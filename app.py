@@ -197,12 +197,20 @@ def calculate_win_probability(manager):
     frames = np.arange(0, max_frame, REPLAY_FPS)
     seconds = frames / float(REPLAY_FPS)
 
+    # Build player team lookup — g.player_id.is_orange is unreliable
+    # (it's a reference ID, not the full player object), so we look up
+    # the scorer's team from proto.players instead
+    player_teams = {}
+    for p in proto.players:
+        player_teams[str(p.id.id)] = "Orange" if p.is_orange else "Blue"
+
     blue_goals = []
     orange_goals = []
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
-            team = "Orange" if getattr(g.player_id, 'is_orange', False) else "Blue"
+            pid = str(getattr(g.player_id, 'id', ''))
+            team = player_teams.get(pid, "Blue")
             frame = min(frame, max_frame)
             if team == "Blue": blue_goals.append(frame)
             else: orange_goals.append(frame)
@@ -221,10 +229,10 @@ def calculate_win_probability(manager):
         if t >= match_length and diff == 0:
             p = 0.5
         else:
-            # Time pressure factor: starts at ~0.4 and rises to ~2.5 in final seconds
-            # This keeps mid-game swings modest while late-game leads feel decisive
+            # Time pressure: base of 0.7 gives visible ~67% for a 1-goal lead
+            # early on, ramping to ~90%+ in the final minute via quadratic curve
             time_fraction = 1.0 - (time_remaining / match_length)
-            time_pressure = 0.4 + 2.1 * (time_fraction ** 2.5)
+            time_pressure = 0.7 + 1.8 * (time_fraction ** 2.0)
             x = diff * time_pressure
             p = 1 / (1 + np.exp(-x))
         probs.append(p * 100)
@@ -325,14 +333,14 @@ def calculate_shot_data(manager, player_map):
     hits = proto.game_stats.hits
     shot_list = []
 
-    # Only tag frames very close to a known goal as metadata-confirmed goals
-    # (15 frames = 0.5s before through 10 frames after the goal event)
+    # Tag frames near known goals as metadata-confirmed goals
+    # (45 frames = 1.5s before through 15 frames after the goal event)
     metadata_goal_frames = set()
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             f = getattr(g, 'frame_number', getattr(g, 'frame', None))
             if f:
-                for i in range(f - 15, f + 10): metadata_goal_frames.add(i)
+                for i in range(f - 45, f + 15): metadata_goal_frames.add(i)
 
     for hit in hits:
         frame = hit.frame_number
@@ -407,13 +415,21 @@ def calculate_shot_data(manager, player_map):
         # Dedup shots within 0.5s windows per player
         raw_df['TimeGroup'] = (raw_df['Frame'] // 15)
         shots_only = raw_df[raw_df['Result'] == 'Shot'].sort_values('xG', ascending=False).drop_duplicates(subset=['Player', 'TimeGroup', 'Result'])
-        # Dedup goals with a wider 3s window — a single goal event can trigger
-        # multiple detections (is_lib_goal, metadata_goal_frames, physics) across
-        # nearby frames and even from different players (last touch ambiguity)
-        goals_only = raw_df[raw_df['Result'] == 'Goal'].copy()
-        goals_only['GoalGroup'] = (goals_only['Frame'] // 90)  # 3-second window
-        goals_only = goals_only.sort_values('xG', ascending=False).drop_duplicates(subset=['GoalGroup'])
-        goals_only = goals_only.drop(columns=['GoalGroup'])
+        # Dedup goals using proximity — a single goal event can trigger
+        # multiple detections across nearby frames. Keep the highest-xG
+        # entry per cluster of goals within 90 frames (3s) of each other.
+        goals_raw = raw_df[raw_df['Result'] == 'Goal'].sort_values('Frame').copy()
+        goals_deduped = []
+        last_kept_frame = -9999
+        for _, row in goals_raw.iterrows():
+            if row['Frame'] - last_kept_frame > 90:
+                goals_deduped.append(row)
+                last_kept_frame = row['Frame']
+            else:
+                # Same goal event — keep higher xG
+                if row['xG'] > goals_deduped[-1]['xG']:
+                    goals_deduped[-1] = row
+        goals_only = pd.DataFrame(goals_deduped) if goals_deduped else pd.DataFrame(columns=raw_df.columns)
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
         return final_df
     return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y"])
