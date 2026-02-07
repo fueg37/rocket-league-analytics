@@ -736,10 +736,26 @@ if app_mode == "🔍 Single Match Analysis":
                 if target:
                     p_frames = game_df[target]
                     if 'pos_z' in p_frames.columns:
-                        valid_pos = p_frames[p_frames['pos_z'] > 0]
-                        soccer_scale = ['#00008b', '#00ffff', '#00ff00', '#ffff00', '#ff0000']
-                        fig = px.density_heatmap(valid_pos, x='pos_x', y='pos_y', nbinsx=120, nbinsy=160, color_continuous_scale=soccer_scale)
-                        fig.update_traces(opacity=0.7)
+                        valid_pos = p_frames[p_frames['pos_z'] > 0].dropna(subset=['pos_x', 'pos_y'])
+                        sofascore_scale = [
+                            [0.0, 'rgba(0,0,0,0)'],
+                            [0.15, 'rgba(20,60,0,0.35)'],
+                            [0.3, 'rgba(60,100,0,0.5)'],
+                            [0.45, 'rgba(120,140,0,0.6)'],
+                            [0.6, 'rgba(180,180,0,0.65)'],
+                            [0.75, 'rgba(220,210,0,0.75)'],
+                            [0.9, 'rgba(255,240,50,0.85)'],
+                            [1.0, 'rgba(255,255,120,0.95)'],
+                        ]
+                        fig = go.Figure()
+                        fig.add_trace(go.Histogram2dContour(
+                            x=valid_pos['pos_x'], y=valid_pos['pos_y'],
+                            colorscale=sofascore_scale,
+                            ncontours=20,
+                            contours=dict(coloring='fill', showlines=False),
+                            showscale=False,
+                            hoverinfo='skip',
+                        ))
                         fig.update_layout(get_field_layout(f"{target} Heatmap"))
                         st.plotly_chart(fig, use_container_width=True)
 
