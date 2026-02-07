@@ -276,8 +276,9 @@ def calculate_kickoff_stats(manager, player_map, match_id=""):
             try:
                 if kicker_name in game_df:
                     boost_row = game_df[kicker_name].loc[first_touch_frame]
-                    if 'boost' in boost_row: boost_at_hit = int(boost_row['boost'])
-            except (KeyError, IndexError):
+                    if 'boost' in boost_row and pd.notna(boost_row['boost']):
+                        boost_at_hit = int(boost_row['boost'])
+            except (KeyError, IndexError, ValueError):
                 pass
             
             check_frame = min(first_touch_frame + 90, game_df.index.max())
