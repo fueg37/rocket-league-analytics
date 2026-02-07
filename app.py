@@ -324,40 +324,34 @@ def calculate_shot_data(manager, player_map):
     game_df = manager.get_data_frame()
     hits = proto.game_stats.hits
     shot_list = []
-    
+
+    # Only tag frames very close to a known goal as metadata-confirmed goals
+    # (15 frames = 0.5s before through 10 frames after the goal event)
     metadata_goal_frames = set()
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             f = getattr(g, 'frame_number', getattr(g, 'frame', None))
-            if f: 
-                for i in range(f - 100, f + 20): metadata_goal_frames.add(i)
+            if f:
+                for i in range(f - 15, f + 10): metadata_goal_frames.add(i)
 
     for hit in hits:
         frame = hit.frame_number
         if not hit.player_id: continue
+        # Trust carball's shot/goal detection as primary signal
         is_lib_shot = getattr(hit, 'is_shot', False)
         is_lib_goal = getattr(hit, 'is_goal', False)
         is_meta_goal = frame in metadata_goal_frames
-        is_physics_shot = False
         ball_pos, ball_vel = None, None
-        
+
         if 'ball' in game_df and frame in game_df.index:
             try:
                 ball_data = game_df['ball'].loc[frame]
                 ball_pos = (ball_data['pos_x'], ball_data['pos_y'], ball_data['pos_z'])
                 ball_vel = (ball_data['vel_x'], ball_data['vel_y'], ball_data['vel_z'])
-                pid = str(hit.player_id.id)
-                shooter_team = "Unknown"
-                for p in proto.players:
-                    if str(p.id.id) == pid:
-                        shooter_team = "Orange" if p.is_orange else "Blue"
-                        break
-                direction_sign = 1 if shooter_team == "Blue" else -1
-                if (ball_vel[1] * direction_sign > 0) and (abs(ball_vel[1]) > 800): is_physics_shot = True
             except (KeyError, IndexError):
                 pass
-            
-        if is_lib_shot or is_lib_goal or is_meta_goal or is_physics_shot:
+
+        if is_lib_shot or is_lib_goal or is_meta_goal:
             pid = str(hit.player_id.id)
             player_name = player_map.get(pid, "Unknown")
             shooter_team = "Unknown"
@@ -720,12 +714,39 @@ if app_mode == "🔍 Single Match Analysis":
                 if not shot_df.empty:
                     fig = go.Figure()
                     fig.update_layout(get_field_layout("Shot Map"))
+                    team_colors = {"Blue": "#3399ff", "Orange": "#ff9900", "Unknown": "gray"}
                     goals = shot_df[shot_df['Result'] == 'Goal']
                     misses = shot_df[shot_df['Result'] == 'Shot']
                     big_chances = shot_df[shot_df['BigChance'] == True]
-                    fig.add_trace(go.Scatter(x=misses['X'], y=misses['Y'], mode='markers', marker=dict(size=10, color='gray', opacity=0.5), name='Shot', text=misses['Player'], customdata=misses['xG'], hovertemplate="xG: %{customdata:.2f}"))
-                    fig.add_trace(go.Scatter(x=goals['X'], y=goals['Y'], mode='markers', marker=dict(size=15, color='#00cc96', line=dict(width=2, color='white')), name='Goal', text=goals['Player'], customdata=goals['xG'], hovertemplate="xG: %{customdata:.2f}"))
-                    fig.add_trace(go.Scatter(x=big_chances['X'], y=big_chances['Y'], mode='markers', marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')), name='Big Chance', hoverinfo='skip'))
+                    # Shots (misses) - colored by team, semi-transparent
+                    for team_name, color in team_colors.items():
+                        t_misses = misses[misses['Team'] == team_name]
+                        if not t_misses.empty:
+                            fig.add_trace(go.Scatter(
+                                x=t_misses['X'], y=t_misses['Y'], mode='markers',
+                                marker=dict(size=10, color=color, opacity=0.45),
+                                name=f'{team_name} Shot',
+                                customdata=np.stack([t_misses['Player'], t_misses['xG']], axis=-1),
+                                hovertemplate="<b>%{customdata[0]}</b><br>xG: %{customdata[1]}<extra>Shot</extra>",
+                            ))
+                    # Goals - colored by team, larger with white border
+                    for team_name, color in team_colors.items():
+                        t_goals = goals[goals['Team'] == team_name]
+                        if not t_goals.empty:
+                            fig.add_trace(go.Scatter(
+                                x=t_goals['X'], y=t_goals['Y'], mode='markers',
+                                marker=dict(size=16, color=color, line=dict(width=2.5, color='white')),
+                                name=f'{team_name} Goal',
+                                customdata=np.stack([t_goals['Player'], t_goals['xG']], axis=-1),
+                                hovertemplate="<b>%{customdata[0]}</b><br>xG: %{customdata[1]}<extra>Goal</extra>",
+                            ))
+                    # Big chance ring overlay
+                    if not big_chances.empty:
+                        fig.add_trace(go.Scatter(
+                            x=big_chances['X'], y=big_chances['Y'], mode='markers',
+                            marker=dict(size=26, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
+                            name='Big Chance', hoverinfo='skip',
+                        ))
                     st.plotly_chart(fig, use_container_width=True)
 
             with t4:
