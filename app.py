@@ -4,7 +4,10 @@ import plotly.express as px
 import plotly.graph_objects as go
 import os
 import tempfile
+import logging
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 # --- 1. SETUP & IMPORTS ---
 try:
@@ -22,6 +25,7 @@ st.title("🚀 Rocket League Pro Analytics (Final Version)")
 # --- 2. PERSISTENCE CONFIG ---
 DB_FILE = "career_stats.csv"
 KICKOFF_DB_FILE = "career_kickoffs.csv"
+REPLAY_FPS = 30  # Standard replay frame rate
 
 # --- 3. HELPER: DATABASE MANAGEMENT ---
 def load_data():
@@ -31,11 +35,11 @@ def load_data():
     
     if os.path.exists(DB_FILE):
         try: stats_df = pd.read_csv(DB_FILE)
-        except: pass
-        
+        except Exception as e: logger.warning("Failed to load %s: %s", DB_FILE, e)
+
     if os.path.exists(KICKOFF_DB_FILE):
         try: kickoff_df = pd.read_csv(KICKOFF_DB_FILE)
-        except: pass
+        except Exception as e: logger.warning("Failed to load %s: %s", KICKOFF_DB_FILE, e)
         
     return stats_df, kickoff_df
 
@@ -93,7 +97,8 @@ def get_field_layout(title=""):
 @st.cache_resource(show_spinner=False)
 def get_parsed_replay_data(file_bytes, file_name):
     if not SPROCKET_AVAILABLE:
-        return None, None, None
+        return None, None, None, None
+    tmp_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".replay") as tmp:
             tmp.write(file_bytes)
@@ -101,11 +106,14 @@ def get_parsed_replay_data(file_bytes, file_name):
         manager = carball.analyze_replay_file(tmp_path)
         game_df = manager.get_data_frame()
         proto = manager.get_protobuf_data()
-        try: os.unlink(tmp_path)
-        except: pass
-        return manager, game_df, proto
+        return manager, game_df, proto, None
     except Exception as e:
-        return None, None, None
+        logger.error("Failed to parse replay %s: %s", file_name, e)
+        return None, None, None, str(e)
+    finally:
+        if tmp_path:
+            try: os.unlink(tmp_path)
+            except OSError: pass
 
 # --- 6. MATH: PROBABILITY (xG) ---
 def calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y):
@@ -120,7 +128,7 @@ def calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target
         unit_r = vec_r / norm_r
         dot = np.dot(unit_l, unit_r)
         angle = np.arccos(np.clip(dot, -1.0, 1.0))
-    except: angle = 0
+    except (ValueError, FloatingPointError): angle = 0
     base_xg = (angle * 0.85) * np.exp(-0.00045 * dist)
     speed = np.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
     speed_factor = 1.0 + (speed - 1400) / 2000.0
@@ -134,9 +142,11 @@ def calculate_contextual_momentum(manager, game_df, proto):
     if 'ball' not in game_df: return pd.Series()
     try:
         numeric_cols = game_df.select_dtypes(include=[np.number]).columns
-        df_resampled = game_df[numeric_cols].resample('1s').mean()
-    except:
-        df_resampled = game_df.iloc[::30, :]
+        df_numeric = game_df[numeric_cols].copy()
+        df_numeric.index = pd.to_timedelta(df_numeric.index / REPLAY_FPS, unit='s')
+        df_resampled = df_numeric.resample('1s').mean()
+    except Exception:
+        df_resampled = game_df.iloc[::REPLAY_FPS, :]
 
     if df_resampled.empty or 'ball' not in df_resampled: return pd.Series()
 
@@ -161,20 +171,25 @@ def calculate_contextual_momentum(manager, game_df, proto):
     if not dist_to_orange.empty and not dist_to_blue.empty:
         min_orange = dist_to_orange.min(axis=1)
         min_blue = dist_to_blue.min(axis=1)
-        relevant_dist = np.where(threat > 0, min_orange, min_blue)
+        # When blue is attacking (threat > 0), check if blue players are near the ball
+        # When orange is attacking (threat < 0), check if orange players are near the ball
+        relevant_dist = np.where(threat > 0, min_blue, min_orange)
         final_threat = np.where(relevant_dist > 2000, threat * 0.2, threat)
     else:
         final_threat = threat
 
-    return pd.Series(final_threat * 100).rolling(window=10, center=True).mean().fillna(0)
+    time_seconds = np.arange(len(final_threat))
+    if hasattr(df_resampled.index, 'total_seconds'):
+        time_seconds = df_resampled.index.total_seconds().values
+    return pd.Series(final_threat * 100, index=time_seconds).rolling(window=10, center=True).mean().fillna(0)
 
 def calculate_win_probability(manager):
     """Calculates win probability for Blue Team over time."""
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     max_frame = game_df.index.max()
-    frames = np.arange(0, max_frame, 30)
-    seconds = frames / 30.0
+    frames = np.arange(0, max_frame, REPLAY_FPS)
+    seconds = frames / float(REPLAY_FPS)
     
     blue_goals = []
     orange_goals = []
@@ -243,7 +258,8 @@ def calculate_kickoff_stats(manager, player_map, match_id=""):
                 if p.name == kicker_name:
                     kicker_team = "Orange" if p.is_orange else "Blue"
                     break
-        except: pass
+        except (KeyError, IndexError) as e:
+            logger.debug("Kickoff kicker lookup failed at frame %s: %s", k_frame, e)
 
         first_touch_frame = -1
         time_to_hit = 0.0
@@ -251,7 +267,7 @@ def calculate_kickoff_stats(manager, player_map, match_id=""):
         for hit in all_hits:
             if hit.frame_number > k_frame:
                 first_touch_frame = hit.frame_number
-                time_to_hit = (first_touch_frame - k_frame) / 30.0
+                time_to_hit = (first_touch_frame - k_frame) / float(REPLAY_FPS)
                 break
         
         outcome = "Neutral"
@@ -261,7 +277,8 @@ def calculate_kickoff_stats(manager, player_map, match_id=""):
                 if kicker_name in game_df:
                     boost_row = game_df[kicker_name].loc[first_touch_frame]
                     if 'boost' in boost_row: boost_at_hit = int(boost_row['boost'])
-            except: pass
+            except (KeyError, IndexError):
+                pass
             
             check_frame = min(first_touch_frame + 90, game_df.index.max())
             try:
@@ -273,7 +290,8 @@ def calculate_kickoff_stats(manager, player_map, match_id=""):
                 elif kicker_team == "Orange":
                     if end_y < -1000: outcome = "Win" 
                     elif end_y > 1000: outcome = "Loss"
-            except: pass
+            except (KeyError, IndexError):
+                pass
 
         kickoff_goal = False
         for gf in goal_frames:
@@ -325,7 +343,8 @@ def calculate_shot_data(manager, player_map):
                         break
                 direction_sign = 1 if shooter_team == "Blue" else -1
                 if (ball_vel[1] * direction_sign > 0) and (abs(ball_vel[1]) > 800): is_physics_shot = True
-            except: pass
+            except (KeyError, IndexError):
+                pass
             
         if is_lib_shot or is_lib_goal or is_meta_goal or is_physics_shot:
             pid = str(hit.player_id.id)
@@ -352,7 +371,8 @@ def calculate_shot_data(manager, player_map):
                                 d_pos = frame_data[d_name]
                                 dist = np.sqrt((ball_pos[0]-d_pos['pos_x'])**2 + (ball_pos[1]-d_pos['pos_y'])**2)
                                 if dist < defender_dist: defender_dist = dist
-                    except: pass
+                    except (KeyError, IndexError):
+                        pass
                     if defender_dist > 500: is_big_chance = True
                 result = "Goal" if (is_lib_goal or is_meta_goal) else "Shot"
                 shot_list.append({
@@ -378,12 +398,15 @@ def calculate_advanced_passing(manager, player_map, shot_df, max_time_diff=2.0):
     last_hitter_id = None
     last_hit_time = -999
     last_hit_frame = 0
-    shot_frames = set(shot_df['Frame'].tolist()) if not shot_df.empty else set()
+    shot_frames_by_team = {}
+    if not shot_df.empty:
+        for team_name in shot_df['Team'].unique():
+            shot_frames_by_team[team_name] = set(shot_df[shot_df['Team'] == team_name]['Frame'].tolist())
     
     for hit in hits:
         if not hit.player_id: continue
         curr_id = str(hit.player_id.id)
-        curr_time = hit.frame_number / 30.0
+        curr_time = hit.frame_number / float(REPLAY_FPS)
         curr_frame = hit.frame_number
         if last_hitter_id is not None and curr_id != last_hitter_id:
             if team_map.get(curr_id) == team_map.get(last_hitter_id):
@@ -397,9 +420,11 @@ def calculate_advanced_passing(manager, player_map, shot_df, max_time_diff=2.0):
                             b_data = game_df['ball'].loc[curr_frame]
                             target_y = 5120 if team == "Blue" else -5120
                             xa_val = calculate_xg_probability(b_data['pos_x'], b_data['pos_y'], b_data['pos_z'], b_data['vel_x'], b_data['vel_y'], b_data['vel_z'], target_y)
-                    except: pass
+                    except (KeyError, IndexError):
+                        pass
                     is_key_pass = False
-                    for sf in shot_frames:
+                    team_shots = shot_frames_by_team.get(team, set())
+                    for sf in team_shots:
                         if curr_frame <= sf <= curr_frame + 90:
                             is_key_pass = True
                             break
@@ -411,7 +436,8 @@ def calculate_advanced_passing(manager, player_map, shot_df, max_time_diff=2.0):
                                 'Sender': sender, 'Receiver': receiver, 'Team': team, 'xA': xa_val, 'KeyPass': is_key_pass,
                                 'x1': s_pos['pos_x'], 'y1': s_pos['pos_y'], 'x2': r_pos['pos_x'], 'y2': r_pos['pos_y']
                             })
-                    except: pass
+                    except (KeyError, IndexError):
+                        pass
         last_hitter_id = curr_id
         last_hit_time = curr_time
         last_hit_frame = curr_frame
@@ -429,6 +455,14 @@ def calculate_final_stats(manager, shot_df, pass_df):
             pid = str(h.player_id.id)
             player_hits[pid] = player_hits.get(pid, 0) + 1
             
+    # Pre-compute goals conceded per team for rating penalty
+    goals_by_team = {"Blue": 0, "Orange": 0}
+    if hasattr(proto, 'players'):
+        for p in proto.players:
+            t = "Orange" if p.is_orange else "Blue"
+            goals_by_team[t] += p.goals
+    goals_conceded = {"Blue": goals_by_team["Orange"], "Orange": goals_by_team["Blue"]}
+
     if hasattr(proto, 'players'):
         for player in proto.players:
             name = player.name
@@ -441,8 +475,9 @@ def calculate_final_stats(manager, shot_df, pass_df):
             key_passes = len(p_passes[p_passes['KeyPass'] == True]) if not p_passes.empty else 0
             hits = player_hits.get(str(player.id.id), 0)
             poss_pct = round((hits / total_hits) * 100, 1) if total_hits > 0 else 0
-            raw_rating = 3.5 + (player.goals * 1.0) + (player.assists * 0.75) + (player.saves * 0.6) + (key_passes * 0.4) + (player.shots * 0.2)
-            final_rating = min(10.0, raw_rating)
+            conceded = goals_conceded.get(team, 0)
+            raw_rating = 5.0 + (player.goals * 1.0) + (player.assists * 0.75) + (player.saves * 0.6) + (key_passes * 0.4) + (player.shots * 0.2) - (conceded * 0.3)
+            final_rating = max(1.0, min(10.0, raw_rating))
             p_data = {
                 "Name": name, "Team": team, "Goals": player.goals, "Assists": player.assists, "Saves": player.saves,
                 "Shots": player.shots, "Score": player.score, "xG": round(xg_sum, 2), "xA": round(xa_sum, 2),
@@ -459,7 +494,7 @@ def calculate_final_stats(manager, shot_df, pass_df):
                     velocities = pdf[['vel_x', 'vel_y', 'vel_z']].to_numpy()
                     speeds = np.linalg.norm(velocities, axis=1)
                     p_data['Avg Speed'] = int(np.nanmean(speeds))
-                    p_data['Time Supersonic'] = round(np.sum(speeds >= 2200) / 30.0, 2)
+                    p_data['Time Supersonic'] = round(np.sum(speeds >= 2200) / float(REPLAY_FPS), 2)
                 if 'pos_y' in pdf.columns:
                     y_pos = pdf['pos_y'].to_numpy()
                     total_f = len(y_pos)
@@ -563,9 +598,11 @@ if app_mode == "🔍 Single Match Analysis":
         file_name = uploaded_file.name
         
         with st.spinner("Parsing Replay..."):
-            manager, game_df, proto = get_parsed_replay_data(file_bytes, file_name)
-            
-        if manager:
+            manager, game_df, proto, parse_error = get_parsed_replay_data(file_bytes, file_name)
+
+        if parse_error:
+            st.error(f"Failed to parse replay: {parse_error}")
+        elif manager:
             with st.spinner("Calculating Advanced Physics Stats..."):
                 temp_map = {str(p.id.id): p.name for p in proto.players}
                 shot_df = calculate_shot_data(manager, temp_map)
@@ -609,7 +646,7 @@ if app_mode == "🔍 Single Match Analysis":
                             st.plotly_chart(fig, use_container_width=True)
                         st.markdown("#### Kickoff Log")
                         disp_cols = ['Player', 'Spawn', 'Time to Hit', 'Boost', 'Result', 'Goal (5s)']
-                        st.dataframe(disp_kickoff[disp_cols].style.applymap(lambda x: 'color: green' if x == 'Win' or x == True else ('color: red' if x == 'Loss' else 'color: gray'), subset=['Result', 'Goal (5s)']), use_container_width=True)
+                        st.dataframe(disp_kickoff[disp_cols].style.map(lambda x: 'color: green' if x == 'Win' or x is True else ('color: red' if x == 'Loss' else 'color: gray'), subset=['Result', 'Goal (5s)']), use_container_width=True)
                     else: st.info("No kickoffs found for selected players.")
                 else: st.info("No kickoff data found.")
 
@@ -640,7 +677,7 @@ if app_mode == "🔍 Single Match Analysis":
                     if not shot_df.empty:
                         goals = shot_df[shot_df['Result'] == 'Goal']
                         for _, g in goals.iterrows():
-                            time_sec = g['Frame'] / 30.0
+                            time_sec = g['Frame'] / float(REPLAY_FPS)
                             tm_multiplier = 1 if g['Team'] == 'Blue' else -1
                             fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=f"{g['Team']} Goal", hoverinfo="text+name", showlegend=False))
                     fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
@@ -671,8 +708,10 @@ if app_mode == "🔍 Single Match Analysis":
                         for _, row in reg.iterrows():
                             fig.add_trace(go.Scatter(x=[row['x1'], row['x2']], y=[row['y1'], row['y2']], mode='lines', line=dict(color='rgba(100,100,100,0.3)', width=1), showlegend=False))
                         key = pass_df[pass_df['KeyPass']==True]
+                        key_legend_shown = False
                         for _, row in key.iterrows():
-                            fig.add_trace(go.Scatter(x=[row['x1'], row['x2']], y=[row['y1'], row['y2']], mode='lines', line=dict(color='gold', width=3), name='Key Pass' if _==key.index[0] else None))
+                            fig.add_trace(go.Scatter(x=[row['x1'], row['x2']], y=[row['y1'], row['y2']], mode='lines', line=dict(color='gold', width=3), name='Key Pass' if not key_legend_shown else None, showlegend=not key_legend_shown))
+                            key_legend_shown = True
                         st.plotly_chart(fig, use_container_width=True)
 
             with t5:
@@ -711,8 +750,10 @@ elif app_mode == "📈 Season Batch Processor":
         bar = st.progress(0)
         for i, f in enumerate(uploaded_files):
             bytes_data = f.read()
-            manager, game_df, proto = get_parsed_replay_data(bytes_data, f.name)
-            if manager:
+            manager, game_df, proto, parse_error = get_parsed_replay_data(bytes_data, f.name)
+            if parse_error:
+                logger.warning("Skipping %s: %s", f.name, parse_error)
+            elif manager:
                 game_id = getattr(manager.game, 'id', None) or f.name
                 existing_ids = existing_stats['MatchID'].astype(str).values if not existing_stats.empty else []
                 if str(game_id) in existing_ids:
@@ -729,13 +770,18 @@ elif app_mode == "📈 Season Batch Processor":
                         stats['MatchID'] = str(game_id)
                         blue_g = stats[stats['Team']=='Blue']['Goals'].sum()
                         orange_g = stats[stats['Team']=='Orange']['Goals'].sum()
-                        winner = "Blue" if blue_g > orange_g else "Orange"
-                        stats['Won'] = stats['Team'] == winner
+                        if blue_g > orange_g:
+                            stats['Won'] = stats['Team'] == "Blue"
+                        elif orange_g > blue_g:
+                            stats['Won'] = stats['Team'] == "Orange"
+                        else:
+                            stats['Won'] = False
                         new_stats_list.append(stats)
                     if not kickoff_df.empty:
                         kickoff_df['MatchID'] = str(game_id)
                         new_kickoffs_list.append(kickoff_df)
-                except: pass
+                except Exception as e:
+                    logger.warning("Failed to process replay %s: %s", f.name, e)
             bar.progress((i+1)/len(uploaded_files))
         bar.empty()
         if new_stats_list:
@@ -819,14 +865,20 @@ elif app_mode == "📈 Season Batch Processor":
         with t4:
             st.subheader("Player Comparison Radar")
             categories = ['Rating', 'Goals', 'Assists', 'Saves', 'Shots', 'xG', 'xA', 'Big Chances']
+            # Normalize each category to 0-100 scale across all players for fair comparison
+            all_avgs = season.groupby('Name')[categories].mean()
+            cat_max = all_avgs.max()
+            cat_max = cat_max.replace(0, 1)  # avoid division by zero
             hero_avg = hero_df[categories].mean()
+            hero_norm = (hero_avg / cat_max * 100).fillna(0)
             fig = go.Figure()
-            fig.add_trace(go.Scatterpolar(r=hero_avg.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
+            fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
             if teammate != "None":
                 mate_df = season[season['Name'] == teammate]
                 mate_avg = mate_df[categories].mean()
-                fig.add_trace(go.Scatterpolar(r=mate_avg.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
-            fig.update_layout(polar=dict(radialaxis=dict(visible=True)), showlegend=True, height=500)
+                mate_norm = (mate_avg / cat_max * 100).fillna(0)
+                fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
+            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=500)
             st.plotly_chart(fig, use_container_width=True)
         with t5:
-            st.dataframe(hero_df.style.applymap(lambda x: 'color: green' if x else 'color: red', subset=['Won']), use_container_width=True)
+            st.dataframe(hero_df.style.map(lambda x: 'color: green' if x else 'color: red', subset=['Won']), use_container_width=True)
