@@ -341,6 +341,7 @@ def calculate_shot_data(manager, player_map):
         is_lib_shot = getattr(hit, 'is_shot', False)
         is_lib_goal = getattr(hit, 'is_goal', False)
         is_meta_goal = frame in metadata_goal_frames
+        is_physics_shot = False
         ball_pos, ball_vel = None, None
 
         if 'ball' in game_df and frame in game_df.index:
@@ -348,10 +349,24 @@ def calculate_shot_data(manager, player_map):
                 ball_data = game_df['ball'].loc[frame]
                 ball_pos = (ball_data['pos_x'], ball_data['pos_y'], ball_data['pos_z'])
                 ball_vel = (ball_data['vel_x'], ball_data['vel_y'], ball_data['vel_z'])
+                # Physics fallback: only count as a shot if the ball is in the
+                # attacking third AND moving fast toward goal. This catches real
+                # shots carball misses without flagging mid-field clears.
+                pid = str(hit.player_id.id)
+                shooter_team = "Unknown"
+                for p in proto.players:
+                    if str(p.id.id) == pid:
+                        shooter_team = "Orange" if p.is_orange else "Blue"
+                        break
+                direction_sign = 1 if shooter_team == "Blue" else -1
+                in_attacking_third = (ball_pos[1] * direction_sign) > 1700
+                fast_toward_goal = (ball_vel[1] * direction_sign > 0) and (abs(ball_vel[1]) > 1400)
+                if in_attacking_third and fast_toward_goal:
+                    is_physics_shot = True
             except (KeyError, IndexError):
                 pass
 
-        if is_lib_shot or is_lib_goal or is_meta_goal:
+        if is_lib_shot or is_lib_goal or is_meta_goal or is_physics_shot:
             pid = str(hit.player_id.id)
             player_name = player_map.get(pid, "Unknown")
             shooter_team = "Unknown"
@@ -758,14 +773,27 @@ if app_mode == "🔍 Single Match Analysis":
                     with col_b:
                         fig = go.Figure()
                         fig.update_layout(get_field_layout("Pass Map"))
+                        pass_colors = {"Blue": "rgba(50,150,255,0.4)", "Orange": "rgba(255,160,50,0.4)"}
                         reg = pass_df[pass_df['KeyPass']==False]
-                        for _, row in reg.iterrows():
-                            fig.add_trace(go.Scatter(x=[row['x1'], row['x2']], y=[row['y1'], row['y2']], mode='lines', line=dict(color='rgba(100,100,100,0.3)', width=1), showlegend=False))
+                        # Draw regular passes colored by team
+                        for team_name, color in pass_colors.items():
+                            t_passes = reg[reg['Team'] == team_name]
+                            if not t_passes.empty:
+                                # Use a single trace with None separators for performance
+                                xs, ys = [], []
+                                for _, row in t_passes.iterrows():
+                                    xs.extend([row['x1'], row['x2'], None])
+                                    ys.extend([row['y1'], row['y2'], None])
+                                fig.add_trace(go.Scatter(x=xs, y=ys, mode='lines', line=dict(color=color, width=1.5), name=f'{team_name} Pass'))
+                        # Draw key passes
                         key = pass_df[pass_df['KeyPass']==True]
-                        key_legend_shown = False
-                        for _, row in key.iterrows():
-                            fig.add_trace(go.Scatter(x=[row['x1'], row['x2']], y=[row['y1'], row['y2']], mode='lines', line=dict(color='gold', width=3), name='Key Pass' if not key_legend_shown else None, showlegend=not key_legend_shown))
-                            key_legend_shown = True
+                        if not key.empty:
+                            xs, ys = [], []
+                            for _, row in key.iterrows():
+                                xs.extend([row['x1'], row['x2'], None])
+                                ys.extend([row['y1'], row['y2'], None])
+                            fig.add_trace(go.Scatter(x=xs, y=ys, mode='lines', line=dict(color='gold', width=3), name='Key Pass'))
+                        fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
                         st.plotly_chart(fig, use_container_width=True)
 
             with t5:
