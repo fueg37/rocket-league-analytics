@@ -642,8 +642,21 @@ if app_mode == "🔍 Single Match Analysis":
                             fig.update_layout(height=300)
                             st.plotly_chart(fig, use_container_width=True)
                         with col_k2:
-                            fig = px.density_heatmap(disp_kickoff, x='End_X', y='End_Y', nbinsx=60, nbinsy=80, title="Kickoff Outcome Heatmap")
-                            fig.update_layout(get_field_layout())
+                            result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
+                            fig = go.Figure()
+                            for result, color in result_colors.items():
+                                subset = disp_kickoff[disp_kickoff['Result'] == result]
+                                if not subset.empty:
+                                    fig.add_trace(go.Scatter(
+                                        x=subset['End_X'], y=subset['End_Y'],
+                                        mode='markers',
+                                        marker=dict(size=14, color=color, line=dict(width=1.5, color='white'), opacity=0.9),
+                                        name=result,
+                                        hovertemplate="Player: %{text}<br>Result: " + result + "<extra></extra>",
+                                        text=subset['Player']
+                                    ))
+                            fig.update_layout(get_field_layout("Kickoff Outcomes"))
+                            fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
                             st.plotly_chart(fig, use_container_width=True)
                         st.markdown("#### Kickoff Log")
                         disp_cols = ['Player', 'Spawn', 'Time to Hit', 'Boost', 'Result', 'Goal (5s)']
@@ -850,9 +863,21 @@ elif app_mode == "📈 Season Batch Processor":
                     spawn_grp = hero_k.groupby('Spawn')['Result'].apply(lambda x: (x=='Win').mean()*100).reset_index(name='WinRate')
                     fig = px.bar(spawn_grp, x='Spawn', y='WinRate', title="Win Rate by Spawn Location", color_discrete_sequence=['#636efa'])
                     st.plotly_chart(fig, use_container_width=True)
-                st.write("#### Season Outcome Heatmap")
-                fig = px.density_heatmap(hero_k, x='End_X', y='End_Y', nbinsx=60, nbinsy=80, title=f"Where {hero}'s Kickoffs Go (Season View)")
-                fig.update_layout(get_field_layout())
+                st.write("#### Season Kickoff Outcome Map")
+                result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
+                fig = go.Figure()
+                for result, color in result_colors.items():
+                    subset = hero_k[hero_k['Result'] == result]
+                    if not subset.empty:
+                        fig.add_trace(go.Scatter(
+                            x=subset['End_X'], y=subset['End_Y'],
+                            mode='markers',
+                            marker=dict(size=10, color=color, line=dict(width=1, color='white'), opacity=0.7),
+                            name=f"{result} ({len(subset)})",
+                            hovertemplate="Result: " + result + "<extra></extra>",
+                        ))
+                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View)"))
+                fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
                 st.plotly_chart(fig, use_container_width=True)
             else: st.info("No kickoff data collected.")
         with t3:
