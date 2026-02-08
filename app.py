@@ -619,8 +619,265 @@ def calculate_advanced_passing(manager, player_map, shot_df, max_time_diff=2.0):
         last_hit_frame = curr_frame
     return pd.DataFrame(pass_events)
 
+# --- 9b. MATH: AERIAL STATS ---
+def calculate_aerial_stats(manager, player_map):
+    """Compute per-player aerial stats: aerial hits, avg height, time airborne."""
+    proto = manager.get_protobuf_data()
+    game_df = manager.get_data_frame()
+    hits = proto.game_stats.hits
+    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    AERIAL_HEIGHT = 500  # unreal units — roughly above crossbar height
+
+    aerial_data = {}  # pid -> {hits, heights[], team, name}
+    for hit in hits:
+        if not hit.player_id:
+            continue
+        pid = str(hit.player_id.id)
+        frame = hit.frame_number
+        if 'ball' in game_df and frame in game_df.index:
+            try:
+                ball_z = game_df['ball'].loc[frame]['pos_z']
+                if ball_z >= AERIAL_HEIGHT:
+                    if pid not in aerial_data:
+                        aerial_data[pid] = {'hits': 0, 'heights': [], 'team': team_map.get(pid, 'Unknown'),
+                                            'name': player_map.get(pid, 'Unknown')}
+                    aerial_data[pid]['hits'] += 1
+                    aerial_data[pid]['heights'].append(float(ball_z))
+            except (KeyError, IndexError):
+                pass
+
+    # Time airborne per player (pos_z > 300 = off ground, lower than aerial threshold)
+    airborne_data = {}
+    for p in proto.players:
+        name = p.name
+        if name in game_df:
+            try:
+                z = game_df[name]['pos_z']
+                airborne_frames = int((z > 300).sum())
+                airborne_data[name] = round(airborne_frames / float(REPLAY_FPS), 1)
+            except (KeyError, AttributeError):
+                airborne_data[name] = 0.0
+
+    # Total hits per player for aerial %
+    total_hits_per_player = {}
+    for hit in hits:
+        if hit.player_id:
+            pid = str(hit.player_id.id)
+            total_hits_per_player[pid] = total_hits_per_player.get(pid, 0) + 1
+
+    results = []
+    for p in proto.players:
+        pid = str(p.id.id)
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        a = aerial_data.get(pid, {'hits': 0, 'heights': []})
+        total_h = total_hits_per_player.get(pid, 0)
+        results.append({
+            'Name': name, 'Team': team,
+            'Aerial Hits': a['hits'],
+            'Aerial %': round((a['hits'] / total_h * 100), 1) if total_h > 0 else 0,
+            'Avg Aerial Height': int(np.mean(a['heights'])) if a['heights'] else 0,
+            'Max Aerial Height': int(max(a['heights'])) if a['heights'] else 0,
+            'Time Airborne (s)': airborne_data.get(name, 0.0),
+        })
+    return pd.DataFrame(results)
+
+# --- 9c. MATH: RECOVERY TIME ---
+def calculate_recovery_time(manager, player_map):
+    """After each hit, measure how many seconds until the player reaches supersonic (2200 uu/s)."""
+    proto = manager.get_protobuf_data()
+    game_df = manager.get_data_frame()
+    hits = proto.game_stats.hits
+    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    SUPERSONIC = 2200
+    MAX_RECOVERY_FRAMES = 5 * REPLAY_FPS  # cap at 5 seconds
+
+    recovery_events = []  # per-hit recovery times
+    player_recoveries = {}  # pid -> list of recovery times
+
+    for hit in hits:
+        if not hit.player_id:
+            continue
+        pid = str(hit.player_id.id)
+        name = player_map.get(pid, 'Unknown')
+        frame = hit.frame_number
+        if name not in game_df or 'vel_x' not in game_df[name].columns:
+            continue
+        try:
+            pdf = game_df[name]
+            end_frame = min(frame + MAX_RECOVERY_FRAMES, game_df.index.max())
+            window = pdf.loc[frame:end_frame]
+            if window.empty:
+                continue
+            vels = window[['vel_x', 'vel_y', 'vel_z']].to_numpy()
+            speeds = np.linalg.norm(vels, axis=1)
+            supersonic_idx = np.where(speeds >= SUPERSONIC)[0]
+            if len(supersonic_idx) > 0:
+                recovery_frames = supersonic_idx[0]
+                recovery_sec = recovery_frames / float(REPLAY_FPS)
+            else:
+                recovery_sec = MAX_RECOVERY_FRAMES / float(REPLAY_FPS)  # didn't reach supersonic
+            if pid not in player_recoveries:
+                player_recoveries[pid] = []
+            player_recoveries[pid].append(recovery_sec)
+        except (KeyError, IndexError):
+            pass
+
+    results = []
+    for p in proto.players:
+        pid = str(p.id.id)
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        times = player_recoveries.get(pid, [])
+        results.append({
+            'Name': name, 'Team': team,
+            'Avg Recovery (s)': round(np.mean(times), 2) if times else 0,
+            'Fast Recoveries': sum(1 for t in times if t < 1.0),
+            'Total Hits': len(times),
+            'Recovery < 1s %': round(sum(1 for t in times if t < 1.0) / len(times) * 100, 1) if times else 0,
+        })
+    return pd.DataFrame(results)
+
+# --- 9d. MATH: DEFENSIVE PRESSURE / SHADOW DEFENSE ---
+def calculate_defensive_pressure(manager, game_df, proto):
+    """Track time each player spends in shadow defense position:
+    between the ball and their own goal, moving in same direction as ball."""
+    team_map = {p.name: "Orange" if p.is_orange else "Blue" for p in proto.players}
+    if 'ball' not in game_df:
+        return pd.DataFrame()
+
+    results = []
+    ball_df = game_df['ball']
+    sample_step = 3  # every 3rd frame for performance
+
+    for p in proto.players:
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        own_goal_y = -5120 if team == "Blue" else 5120
+        direction = -1 if team == "Blue" else 1  # toward own goal
+
+        if name not in game_df:
+            results.append({'Name': name, 'Team': team, 'Shadow %': 0, 'Pressure Time (s)': 0})
+            continue
+
+        try:
+            pdf = game_df[name]
+            common_idx = pdf.index.intersection(ball_df.index)[::sample_step]
+            if len(common_idx) < 30:
+                results.append({'Name': name, 'Team': team, 'Shadow %': 0, 'Pressure Time (s)': 0})
+                continue
+
+            p_y = pdf.loc[common_idx, 'pos_y'].to_numpy()
+            p_x = pdf.loc[common_idx, 'pos_x'].to_numpy()
+            b_y = ball_df.loc[common_idx, 'pos_y'].to_numpy()
+            b_x = ball_df.loc[common_idx, 'pos_x'].to_numpy()
+
+            # Player is between ball and own goal (closer to own goal than ball)
+            if team == "Blue":
+                between = p_y < b_y  # player is closer to blue goal (negative y)
+            else:
+                between = p_y > b_y  # player is closer to orange goal (positive y)
+
+            # Player is in defensive half
+            if team == "Blue":
+                in_def_half = p_y < 0
+            else:
+                in_def_half = p_y > 0
+
+            # Player is within reasonable x-range of ball (not on far side of field)
+            x_close = np.abs(p_x - b_x) < 2500
+
+            # Retreating: player velocity toward own goal
+            if 'vel_y' in pdf.columns:
+                p_vy = pdf.loc[common_idx, 'vel_y'].to_numpy()
+                if team == "Blue":
+                    retreating = p_vy < -200  # moving toward blue goal
+                else:
+                    retreating = p_vy > 200  # moving toward orange goal
+            else:
+                retreating = np.ones(len(common_idx), dtype=bool)
+
+            shadow_frames = np.sum(between & in_def_half & x_close & retreating)
+            total_frames = len(common_idx)
+            shadow_pct = round((shadow_frames / total_frames) * 100, 1)
+            pressure_seconds = round(shadow_frames * sample_step / float(REPLAY_FPS), 1)
+
+            results.append({
+                'Name': name, 'Team': team,
+                'Shadow %': shadow_pct,
+                'Pressure Time (s)': pressure_seconds,
+            })
+        except (KeyError, AttributeError):
+            results.append({'Name': name, 'Team': team, 'Shadow %': 0, 'Pressure Time (s)': 0})
+
+    return pd.DataFrame(results)
+
+# --- 9e. MATH: SHOT QUALITY CONCEDED (xG-Against) ---
+def calculate_xg_against(manager, player_map, shot_df):
+    """For each shot, find the closest defender and assign xG-against to them."""
+    if shot_df.empty:
+        return pd.DataFrame()
+
+    proto = manager.get_protobuf_data()
+    game_df = manager.get_data_frame()
+    team_map = {p.name: "Orange" if p.is_orange else "Blue" for p in proto.players}
+    orange_players = [p.name for p in proto.players if p.is_orange]
+    blue_players = [p.name for p in proto.players if not p.is_orange]
+
+    xga_per_player = {}  # name -> list of xG values conceded
+    for p in proto.players:
+        xga_per_player[p.name] = []
+
+    for _, shot in shot_df.iterrows():
+        frame = int(shot['Frame'])
+        shooter_team = shot['Team']
+        xg = shot['xG']
+        # Defenders are the opposing team
+        defenders = blue_players if shooter_team == "Orange" else orange_players
+
+        if frame not in game_df.index:
+            continue
+
+        # Find closest defender to ball at shot frame
+        closest_defender = None
+        min_dist = 99999
+        try:
+            ball_x, ball_y = shot['X'], shot['Y']
+            for d_name in defenders:
+                if d_name in game_df:
+                    d_data = game_df[d_name].loc[frame]
+                    dist = np.sqrt((ball_x - d_data['pos_x'])**2 + (ball_y - d_data['pos_y'])**2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        closest_defender = d_name
+        except (KeyError, IndexError):
+            continue
+
+        if closest_defender:
+            xga_per_player[closest_defender].append({
+                'xG': xg, 'result': shot['Result'], 'dist': round(min_dist),
+                'frame': frame
+            })
+
+    results = []
+    for p in proto.players:
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        events = xga_per_player.get(name, [])
+        xg_vals = [e['xG'] for e in events]
+        goals_conceded = sum(1 for e in events if e['result'] == 'Goal')
+        results.append({
+            'Name': name, 'Team': team,
+            'Shots Faced': len(events),
+            'xGA': round(sum(xg_vals), 2),
+            'Goals Conceded (nearest)': goals_conceded,
+            'Avg Dist to Shot': int(np.mean([e['dist'] for e in events])) if events else 0,
+            'High xG Faced': sum(1 for e in events if e['xG'] > 0.3),
+        })
+    return pd.DataFrame(results)
+
 # --- 10. MATH: AGGREGATE ---
-def calculate_final_stats(manager, shot_df, pass_df):
+def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     stats = []
@@ -662,6 +919,10 @@ def calculate_final_stats(manager, shot_df, pass_df):
                 "Boost Used": 0, "Wasted Boost": 0, "Avg Speed": 0, "Time Supersonic": 0,
                 "Pos_Def": 0, "Pos_Mid": 0, "Pos_Off": 0,
                 "Wall_Time": 0, "Corner_Time": 0, "On_Wall_Time": 0, "Carry_Time": 0,
+                "Aerial Hits": 0, "Aerial %": 0, "Avg Aerial Height": 0, "Time Airborne (s)": 0,
+                "Avg Recovery (s)": 0, "Fast Recoveries": 0, "Recovery < 1s %": 0,
+                "Shadow %": 0, "Pressure Time (s)": 0,
+                "xGA": 0, "Shots Faced": 0, "Goals Conceded (nearest)": 0,
                 "Overtime": False, "Luck": 0.0, "Timestamp": ""
             }
             if hasattr(player, 'stats') and hasattr(player.stats, 'boost'):
@@ -717,6 +978,19 @@ def calculate_final_stats(manager, shot_df, pass_df):
                             p_data['Carry_Time'] = round((carry_frames / len(common_idx)) * 100, 1)
                     except:
                         pass
+            # Merge in pre-computed advanced stats by player name
+            for extra_df, cols in [
+                (aerial_df, ['Aerial Hits', 'Aerial %', 'Avg Aerial Height', 'Time Airborne (s)']),
+                (recovery_df, ['Avg Recovery (s)', 'Fast Recoveries', 'Recovery < 1s %']),
+                (defense_df, ['Shadow %', 'Pressure Time (s)']),
+                (xga_df, ['xGA', 'Shots Faced', 'Goals Conceded (nearest)']),
+            ]:
+                if extra_df is not None and not extra_df.empty:
+                    row = extra_df[extra_df['Name'] == name]
+                    if not row.empty:
+                        for c in cols:
+                            if c in row.columns:
+                                p_data[c] = row.iloc[0][c]
             stats.append(p_data)
     return pd.DataFrame(stats)
 
@@ -1005,7 +1279,7 @@ def render_dashboard(df, shot_df, pass_df):
             st.subheader(f"{'🔵' if team_name == 'Blue' else '🟠'} {team_name} Team")
             for _, p in team_df.iterrows():
                 with st.expander(f"**{p['Name']}** (Rating: {p['Rating']})"):
-                    sc1, sc2, sc3 = st.columns(3)
+                    sc1, sc2, sc3, sc4 = st.columns(4)
                     with sc1:
                         st.caption("Attack")
                         st.write(f"⚽ Goals: {p['Goals']}")
@@ -1020,6 +1294,13 @@ def render_dashboard(df, shot_df, pass_df):
                         st.caption("Defense")
                         st.write(f"🛡️ Saves: {p['Saves']}")
                         st.write(f"⏱️ Poss: {p['Possession']}%")
+                        st.write(f"🛡️ xGA: {p.get('xGA', 0)}")
+                        st.write(f"👤 Shadow: {p.get('Shadow %', 0)}%")
+                    with sc4:
+                        st.caption("Mechanics")
+                        st.write(f"✈️ Aerials: {p.get('Aerial Hits', 0)}")
+                        st.write(f"⬆️ Airborne: {p.get('Time Airborne (s)', 0)}s")
+                        st.write(f"⚡ Recovery: {p.get('Avg Recovery (s)', 0)}s")
 
 # --- 12. MAIN APP FLOW ---
 st.sidebar.header("Settings")
@@ -1054,7 +1335,11 @@ if app_mode == "🔍 Single Match Analysis":
                 momentum_series = calculate_contextual_momentum(manager, game_df, proto)
                 pass_df = calculate_advanced_passing(manager, temp_map, shot_df, pass_threshold)
                 kickoff_df = calculate_kickoff_stats(manager, temp_map)
-                df = calculate_final_stats(manager, shot_df, pass_df)
+                aerial_df = calculate_aerial_stats(manager, temp_map)
+                recovery_df = calculate_recovery_time(manager, temp_map)
+                defense_df = calculate_defensive_pressure(manager, game_df, proto)
+                xga_df = calculate_xg_against(manager, temp_map, shot_df)
+                df = calculate_final_stats(manager, shot_df, pass_df, aerial_df, recovery_df, defense_df, xga_df)
                 is_overtime = detect_overtime(manager)  # NEW
                 if not df.empty:
                     df['Overtime'] = is_overtime
@@ -1073,7 +1358,7 @@ if app_mode == "🔍 Single Match Analysis":
             render_scoreboard(df, shot_df, is_overtime)
             render_dashboard(df, shot_df, pass_df)
             
-            t1, t2, t3, t3b, t4, t5, t6, t7 = st.tabs(["🚀 Kickoffs", "🌊 Match Narrative", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "⚡ Speed", "📸 Export"])
+            t1, t2, t3, t3b, t4, t5, t6, t8, t7 = st.tabs(["🚀 Kickoffs", "🌊 Match Narrative", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "⚡ Speed", "🛡️ Advanced", "📸 Export"])
             
             with t1:
                 st.subheader("Kickoff Analysis")
@@ -1359,6 +1644,138 @@ if app_mode == "🔍 Single Match Analysis":
                     fig = px.bar(df, x='Name', y='Boost Used', color='Team', title="Total Boost Used", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9000"})
                     st.plotly_chart(fig, use_container_width=True)
 
+            with t8:
+                st.subheader("Advanced Analytics")
+
+                # --- SECTION 1: Aerial Stats ---
+                st.markdown("#### Aerial Stats")
+                if not aerial_df.empty:
+                    ac1, ac2 = st.columns(2)
+                    with ac1:
+                        fig_aer = px.bar(aerial_df, x='Name', y='Aerial Hits', color='Team',
+                            title="Aerial Hits", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_aer.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_aer, use_container_width=True)
+                    with ac2:
+                        fig_air = go.Figure()
+                        for _, row in aerial_df.iterrows():
+                            color = '#007bff' if row['Team'] == 'Blue' else '#ff9900'
+                            fig_air.add_trace(go.Bar(x=[row['Name']], y=[row['Time Airborne (s)']],
+                                name=row['Name'], marker_color=color, showlegend=False))
+                        fig_air.update_layout(title="Time Airborne (s)",
+                            plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_air, use_container_width=True)
+                    aer_cols = ['Name', 'Team', 'Aerial Hits', 'Aerial %', 'Avg Aerial Height', 'Max Aerial Height', 'Time Airborne (s)']
+                    st.dataframe(aerial_df[aer_cols].sort_values('Aerial Hits', ascending=False), use_container_width=True, hide_index=True)
+                st.divider()
+
+                # --- SECTION 2: Recovery Time ---
+                st.markdown("#### Recovery Time")
+                if not recovery_df.empty:
+                    rc1, rc2 = st.columns(2)
+                    with rc1:
+                        fig_rec = px.bar(recovery_df, x='Name', y='Avg Recovery (s)', color='Team',
+                            title="Avg Time to Supersonic After Hit",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_rec.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_rec, use_container_width=True)
+                    with rc2:
+                        fig_fast = px.bar(recovery_df, x='Name', y='Recovery < 1s %', color='Team',
+                            title="Fast Recovery Rate (< 1s)",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_fast.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_fast, use_container_width=True)
+                    rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
+                    st.dataframe(recovery_df[rec_cols].sort_values('Avg Recovery (s)'), use_container_width=True, hide_index=True)
+                st.divider()
+
+                # --- SECTION 3: xA Sankey Flow ---
+                st.markdown("#### Pass Chain Flow (xA Sankey)")
+                if not pass_df.empty:
+                    # Build Sankey from pass chains: Sender -> Receiver, weighted by count or xA
+                    chain_df = pass_df.groupby(['Sender', 'Receiver', 'Team']).agg(
+                        count=('xA', 'size'), total_xA=('xA', 'sum'),
+                        key_passes=('KeyPass', 'sum')
+                    ).reset_index()
+                    chain_df = chain_df[chain_df['count'] >= 2]  # filter noise
+                    if not chain_df.empty:
+                        all_names = sorted(set(chain_df['Sender'].tolist() + chain_df['Receiver'].tolist()))
+                        name_to_idx = {n: i for i, n in enumerate(all_names)}
+                        node_colors = []
+                        for n in all_names:
+                            team = chain_df[chain_df['Sender'] == n]['Team'].values
+                            if len(team) == 0:
+                                team = chain_df[chain_df['Receiver'] == n]['Team'].values
+                            node_colors.append('#007bff' if (len(team) > 0 and team[0] == 'Blue') else '#ff9900')
+                        link_colors = []
+                        for _, row in chain_df.iterrows():
+                            if row['Team'] == 'Blue':
+                                link_colors.append('rgba(0,123,255,0.35)')
+                            else:
+                                link_colors.append('rgba(255,153,0,0.35)')
+                        fig_sankey = go.Figure(go.Sankey(
+                            node=dict(pad=15, thickness=20, line=dict(color='white', width=0.5),
+                                      label=all_names, color=node_colors),
+                            link=dict(
+                                source=[name_to_idx[r['Sender']] for _, r in chain_df.iterrows()],
+                                target=[name_to_idx[r['Receiver']] for _, r in chain_df.iterrows()],
+                                value=chain_df['count'].tolist(),
+                                color=link_colors,
+                                customdata=np.stack([chain_df['total_xA'].round(2), chain_df['key_passes'].astype(int)], axis=-1),
+                                hovertemplate='%{source.label} → %{target.label}<br>Passes: %{value}<br>xA: %{customdata[0]}<br>Key Passes: %{customdata[1]}<extra></extra>',
+                            )
+                        ))
+                        fig_sankey.update_layout(title="Pass Flow Network",
+                            plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
+                            font=dict(color='white', size=12), height=400)
+                        st.plotly_chart(fig_sankey, use_container_width=True)
+                    else:
+                        st.info("Not enough passing connections to build Sankey diagram.")
+                else:
+                    st.info("No pass data available.")
+                st.divider()
+
+                # --- SECTION 4: Defensive Pressure / Shadow Defense ---
+                st.markdown("#### Defensive Pressure (Shadow Defense)")
+                if not defense_df.empty:
+                    dc1, dc2 = st.columns(2)
+                    with dc1:
+                        fig_shadow = px.bar(defense_df, x='Name', y='Shadow %', color='Team',
+                            title="Shadow Defense Time %",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_shadow.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_shadow, use_container_width=True)
+                    with dc2:
+                        fig_pres = px.bar(defense_df, x='Name', y='Pressure Time (s)', color='Team',
+                            title="Total Pressure Time (s)",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_pres.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_pres, use_container_width=True)
+                    st.dataframe(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']].sort_values('Shadow %', ascending=False),
+                        use_container_width=True, hide_index=True)
+                    st.caption("Shadow defense: time spent between ball and own goal while retreating in defensive half.")
+                st.divider()
+
+                # --- SECTION 5: Shot Quality Conceded (xG-Against) ---
+                st.markdown("#### Shot Quality Conceded (xG-Against)")
+                if not xga_df.empty:
+                    xc1, xc2 = st.columns(2)
+                    with xc1:
+                        fig_xga = px.bar(xga_df, x='Name', y='xGA', color='Team',
+                            title="Expected Goals Against (as nearest defender)",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_xga.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_xga, use_container_width=True)
+                    with xc2:
+                        fig_dist = px.bar(xga_df, x='Name', y='Avg Dist to Shot', color='Team',
+                            title="Avg Distance to Shot When Nearest Defender",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_dist.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_dist, use_container_width=True)
+                    xga_cols = ['Name', 'Team', 'Shots Faced', 'xGA', 'Goals Conceded (nearest)', 'Avg Dist to Shot', 'High xG Faced']
+                    st.dataframe(xga_df[xga_cols].sort_values('xGA', ascending=False), use_container_width=True, hide_index=True)
+                    st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
+
             with t7:
                 st.subheader("Composite Dashboard Export")
                 can_export = KALEIDO_AVAILABLE and PIL_AVAILABLE
@@ -1488,7 +1905,11 @@ elif app_mode == "📈 Season Batch Processor":
                     temp_map = {str(p.id.id): p.name for p in proto.players}
                     shot_df = calculate_shot_data(manager, temp_map)
                     pass_df = calculate_advanced_passing(manager, temp_map, shot_df, pass_threshold)
-                    stats = calculate_final_stats(manager, shot_df, pass_df)
+                    aerial_df_b = calculate_aerial_stats(manager, temp_map)
+                    recovery_df_b = calculate_recovery_time(manager, temp_map)
+                    defense_df_b = calculate_defensive_pressure(manager, game_df, proto)
+                    xga_df_b = calculate_xg_against(manager, temp_map, shot_df)
+                    stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b)
                     kickoff_df = calculate_kickoff_stats(manager, temp_map, game_id)
                     if not stats.empty and 'IsBot' in stats.columns and filter_ghosts: stats = stats[~stats['IsBot']]
                     if not stats.empty:
@@ -1535,7 +1956,11 @@ elif app_mode == "📈 Season Batch Processor":
         season = existing_stats
         season_kickoffs = existing_kickoffs
         # Ensure backward compatibility for new columns
-        for col, default in [('Overtime', False), ('Luck', 0.0), ('Timestamp', ''), ('Wall_Time', 0.0), ('Corner_Time', 0.0), ('On_Wall_Time', 0.0), ('Carry_Time', 0.0)]:
+        for col, default in [('Overtime', False), ('Luck', 0.0), ('Timestamp', ''), ('Wall_Time', 0.0), ('Corner_Time', 0.0), ('On_Wall_Time', 0.0), ('Carry_Time', 0.0),
+                              ('Aerial Hits', 0), ('Aerial %', 0.0), ('Avg Aerial Height', 0), ('Time Airborne (s)', 0.0),
+                              ('Avg Recovery (s)', 0.0), ('Fast Recoveries', 0), ('Recovery < 1s %', 0.0),
+                              ('Shadow %', 0.0), ('Pressure Time (s)', 0.0),
+                              ('xGA', 0.0), ('Shots Faced', 0), ('Goals Conceded (nearest)', 0)]:
             if col not in season.columns:
                 season[col] = default
         st.divider()
@@ -1606,7 +2031,8 @@ elif app_mode == "📈 Season Batch Processor":
         t1, t2, t3, t4, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "📊 Log", "🗓️ Sessions", "📸 Export"])
         with t1:
             st.subheader("Performance Trends")
-            metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'Avg Speed', 'Luck', 'Carry_Time'])
+            metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'Avg Speed', 'Luck', 'Carry_Time',
+                'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA'])
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero, line=dict(color='#007bff', width=3)))
             if teammate != "None":
