@@ -2,6 +2,6 @@ streamlit
 pandas
 plotly
 numpy
-sprocket-carball
-protobuf<4.0.0
 Pillow
+protobuf<4.0.0
+git+https://github.com/SprocketBot/carball.git
