@@ -291,7 +291,7 @@ def calculate_win_probability(manager):
     is_ot = match_duration_s > 305
     frames = np.arange(0, max_frame, 30)
     seconds = frames / 30.0
-=======
+
     """Calculates win probability for Blue Team over time.
 
     Uses a sigmoid model calibrated for RL's high-scoring, fast-paced nature:
@@ -322,7 +322,7 @@ def calculate_win_probability(manager):
 
             scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
             team = _pid_team.get(scorer_pid, "Orange" if getattr(g.player_id, 'is_orange', False) else "Blue")
-=======
+
             pid = str(getattr(g.player_id, 'id', ''))
             team = player_teams.get(pid, "Blue")
             frame = min(frame, max_frame)
@@ -332,7 +332,7 @@ def calculate_win_probability(manager):
     blue_goals.sort()
     orange_goals.sort()
     probs = []
-=======
+
     match_length = 300.0  # standard match length in seconds
 
     for f, t in zip(frames, seconds):
@@ -342,7 +342,7 @@ def calculate_win_probability(manager):
 
         if t >= 300 and diff == 0:
             # In overtime or heading to OT: 50/50 next-goal-wins
-=======
+
         time_remaining = max(match_length - t, 0.0)
 
         if t >= match_length and diff == 0:
@@ -362,7 +362,6 @@ def calculate_win_probability(manager):
         probs.append(p * 100)
 
     return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'IsOT': is_ot})
-=======
             # Time pressure: base of 0.7 gives visible ~67% for a 1-goal lead
             # early on, ramping to ~90%+ in the final minute via quadratic curve
             time_fraction = 1.0 - (time_remaining / match_length)
@@ -472,7 +471,7 @@ def calculate_shot_data(manager, player_map):
     # Map each goal to the exact scorer frame from metadata
     _pid_team_shot = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
     goal_scorer_frames = {}  # frame -> team of scorer
-=======
+
     # Tag frames near known goals as metadata-confirmed goals
     # (45 frames = 1.5s before through 15 frames after the goal event)
     metadata_goal_frames = set()
@@ -502,7 +501,7 @@ def calculate_shot_data(manager, player_map):
                     best_hit = hit.frame_number
             if best_hit is not None:
                 goal_hit_frames.add(best_hit)
-=======
+
                 for i in range(f - 45, f + 15): metadata_goal_frames.add(i)
  
 
@@ -542,7 +541,7 @@ def calculate_shot_data(manager, player_map):
 
         # Only count if library says it's a shot/goal, or tight physics check passes
         if is_lib_shot or is_lib_goal or is_goal_hit or is_physics_shot:
-=======
+
                 in_attacking_third = (ball_pos[1] * direction_sign) > 1700
                 fast_toward_goal = (ball_vel[1] * direction_sign > 0) and (abs(ball_vel[1]) > 1400)
                 if in_attacking_third and fast_toward_goal:
@@ -596,7 +595,7 @@ def calculate_shot_data(manager, player_map):
         raw_df['_sort'] = raw_df['Result'].map({'Goal': 0, 'Shot': 1})
         final_df = raw_df.sort_values(['_sort', 'xG'], ascending=[True, False]).drop_duplicates(subset=['Team', 'TimeGroup'])
         final_df = final_df.drop(columns=['_sort'])
-=======
+
         # Dedup shots within 0.5s windows per player
         raw_df['TimeGroup'] = (raw_df['Frame'] // 15)
         shots_only = raw_df[raw_df['Result'] == 'Shot'].sort_values('xG', ascending=False).drop_duplicates(subset=['Player', 'TimeGroup', 'Result'])
@@ -732,7 +731,7 @@ def calculate_final_stats(manager, shot_df, pass_df):
                     p_data['Time Supersonic'] = round(np.sum(speeds >= 2200) / 30.0, 2)
                 if 'pos_y' in pdf.columns and 'pos_x' in pdf.columns:
                     x_pos = pdf['pos_x'].to_numpy()
-=======
+
                     p_data['Time Supersonic'] = round(np.sum(speeds >= 2200) / float(REPLAY_FPS), 2)
                 if 'pos_y' in pdf.columns:
  
@@ -1092,9 +1091,9 @@ if not SPROCKET_AVAILABLE:
     st.error(f"⚠️ Library Error: {IMPORT_ERROR}")
     st.stop()
 
-# ==========================================
+# 
 # MODE 1: SINGLE MATCH
-# ==========================================
+# 
 if app_mode == "🔍 Single Match Analysis":
     uploaded_file = st.file_uploader("Upload Replay", type=["replay"])
     
@@ -1178,7 +1177,7 @@ if app_mode == "🔍 Single Match Analysis":
                         else:
                             _styler = _styler.applymap(_style_fn, subset=['Result', 'Goal (5s)'])
                         st.dataframe(_styler, use_container_width=True)
-=======
+
                             result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
                             fig = go.Figure()
                             for result, color in result_colors.items():
@@ -1286,7 +1285,7 @@ if app_mode == "🔍 Single Match Analysis":
                             time_sec = gf / 30.0
                             tm_multiplier = 1 if gteam == 'Blue' else -1
                             fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=scorer_name, hoverinfo="text+name", showlegend=False))
-=======
+
                     if not shot_df.empty:
                         goals = shot_df[shot_df['Result'] == 'Goal']
                         for _, g in goals.iterrows():
@@ -1321,7 +1320,7 @@ if app_mode == "🔍 Single Match Analysis":
                         fig.add_trace(go.Scatter(x=big_chances['X'], y=big_chances['Y'], mode='markers',
                             marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
                             name='Big Chance', hoverinfo='skip'))
-=======
+
                     team_colors = {"Blue": "#3399ff", "Orange": "#ff9900", "Unknown": "gray"}
                     goals = shot_df[shot_df['Result'] == 'Goal']
                     misses = shot_df[shot_df['Result'] == 'Shot']
@@ -1463,7 +1462,7 @@ if app_mode == "🔍 Single Match Analysis":
                             contours=dict(coloring='fill', showlines=False),
                             ncontours=20, showscale=False,
                             hoverinfo='skip'
-=======
+
                         valid_pos = p_frames[p_frames['pos_z'] > 0].dropna(subset=['pos_x', 'pos_y'])
                         sofascore_scale = [
                             [0.0, 'rgba(0,0,0,0)'],
@@ -1600,9 +1599,9 @@ if app_mode == "🔍 Single Match Analysis":
                                 import traceback
                                 st.code(traceback.format_exc())
 
-# ==========================================
+# 
 # MODE 2: SEASON BATCH
-# ==========================================
+# 
 elif app_mode == "📈 Season Batch Processor":
     existing_stats, existing_kickoffs = load_data()
     session_gap = st.sidebar.slider("Session Gap (minutes)", 10, 120, 30, 5)
@@ -1647,7 +1646,7 @@ elif app_mode == "📈 Season Batch Processor":
                         # Timestamp
                         ts = get_match_timestamp(proto)
                         stats['Timestamp'] = ts
-=======
+
                         if blue_g > orange_g:
                             stats['Won'] = stats['Team'] == "Blue"
                         elif orange_g > blue_g:
@@ -1794,7 +1793,7 @@ elif app_mode == "📈 Season Batch Processor":
                         ))
                 fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View)"))
                 fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color='white')))
-=======
+
                 st.write("#### Season Kickoff Outcome Map")
                 result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
                 fig = go.Figure()
@@ -1957,6 +1956,6 @@ elif app_mode == "📈 Season Batch Processor":
             else:
                 st.warning("Install `kaleido` for image export: `pip install kaleido`")
                 st.code("pip install kaleido", language="bash")
-=======
+
             st.dataframe(hero_df.style.map(lambda x: 'color: green' if x else 'color: red', subset=['Won']), use_container_width=True)
  
