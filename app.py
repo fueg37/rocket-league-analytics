@@ -287,30 +287,10 @@ def calculate_win_probability(manager):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     max_frame = game_df.index.max()
-    match_duration_s = max_frame / 30.0
+    match_duration_s = max_frame / float(REPLAY_FPS)
     is_ot = match_duration_s > 305
-    frames = np.arange(0, max_frame, 30)
-    seconds = frames / 30.0
-
-    """Calculates win probability for Blue Team over time.
-
-    Uses a sigmoid model calibrated for RL's high-scoring, fast-paced nature:
-    probability shifts gradually with goal differential and accelerates
-    as time runs out. A 1-goal lead at midgame ≈ 60%, only reaching 80%+
-    in the final 30 seconds.
-    """
-    proto = manager.get_protobuf_data()
-    game_df = manager.get_data_frame()
-    max_frame = game_df.index.max()
     frames = np.arange(0, max_frame, REPLAY_FPS)
     seconds = frames / float(REPLAY_FPS)
-
-    # Build player team lookup — g.player_id.is_orange is unreliable
-    # (it's a reference ID, not the full player object), so we look up
-    # the scorer's team from proto.players instead
-    player_teams = {}
-    for p in proto.players:
-        player_teams[str(p.id.id)] = "Orange" if p.is_orange else "Blue"
 
     blue_goals = []
     orange_goals = []
@@ -319,12 +299,8 @@ def calculate_win_probability(manager):
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
-
             scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
             team = _pid_team.get(scorer_pid, "Orange" if getattr(g.player_id, 'is_orange', False) else "Blue")
-
-            pid = str(getattr(g.player_id, 'id', ''))
-            team = player_teams.get(pid, "Blue")
             frame = min(frame, max_frame)
             if team == "Blue": blue_goals.append(frame)
             else: orange_goals.append(frame)
@@ -339,11 +315,6 @@ def calculate_win_probability(manager):
         b_score = sum(1 for gf in blue_goals if gf <= f)
         o_score = sum(1 for gf in orange_goals if gf <= f)
         diff = b_score - o_score
-
-        if t >= 300 and diff == 0:
-            # In overtime or heading to OT: 50/50 next-goal-wins
-
-        time_remaining = max(match_length - t, 0.0)
 
         if t >= match_length and diff == 0:
             p = 0.5
@@ -362,15 +333,6 @@ def calculate_win_probability(manager):
         probs.append(p * 100)
 
     return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'IsOT': is_ot})
-            # Time pressure: base of 0.7 gives visible ~67% for a 1-goal lead
-            # early on, ramping to ~90%+ in the final minute via quadratic curve
-            time_fraction = 1.0 - (time_remaining / match_length)
-            time_pressure = 0.7 + 1.8 * (time_fraction ** 2.0)
-            x = diff * time_pressure
-            p = 1 / (1 + np.exp(-x))
-        probs.append(p * 100)
-
-    return pd.DataFrame({'Time': seconds, 'WinProb': probs})
 
 # --- 8. MATH: KICKOFFS ---
 def calculate_kickoff_stats(manager, player_map, match_id=""):
@@ -472,10 +434,6 @@ def calculate_shot_data(manager, player_map):
     _pid_team_shot = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
     goal_scorer_frames = {}  # frame -> team of scorer
 
-    # Tag frames near known goals as metadata-confirmed goals
-    # (45 frames = 1.5s before through 15 frames after the goal event)
-    metadata_goal_frames = set()
- 
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             f = getattr(g, 'frame_number', getattr(g, 'frame', None))
@@ -501,8 +459,6 @@ def calculate_shot_data(manager, player_map):
                     best_hit = hit.frame_number
             if best_hit is not None:
                 goal_hit_frames.add(best_hit)
-
-                for i in range(f - 45, f + 15): metadata_goal_frames.add(i)
  
 
     for hit in hits:
@@ -541,16 +497,6 @@ def calculate_shot_data(manager, player_map):
 
         # Only count if library says it's a shot/goal, or tight physics check passes
         if is_lib_shot or is_lib_goal or is_goal_hit or is_physics_shot:
-
-                in_attacking_third = (ball_pos[1] * direction_sign) > 1700
-                fast_toward_goal = (ball_vel[1] * direction_sign > 0) and (abs(ball_vel[1]) > 1400)
-                if in_attacking_third and fast_toward_goal:
-                    is_physics_shot = True
-            except (KeyError, IndexError):
-                pass
-
-        if is_lib_shot or is_lib_goal or is_meta_goal or is_physics_shot:
- 
             pid = str(hit.player_id.id)
             player_name = player_map.get(pid, "Unknown")
             shooter_team = "Unknown"
@@ -727,14 +673,9 @@ def calculate_final_stats(manager, shot_df, pass_df):
                     velocities = pdf[['vel_x', 'vel_y', 'vel_z']].to_numpy()
                     speeds = np.linalg.norm(velocities, axis=1)
                     p_data['Avg Speed'] = int(np.nanmean(speeds))
-
-                    p_data['Time Supersonic'] = round(np.sum(speeds >= 2200) / 30.0, 2)
-                if 'pos_y' in pdf.columns and 'pos_x' in pdf.columns:
-                    x_pos = pdf['pos_x'].to_numpy()
-
                     p_data['Time Supersonic'] = round(np.sum(speeds >= 2200) / float(REPLAY_FPS), 2)
                 if 'pos_y' in pdf.columns:
- 
+                    x_pos = pdf['pos_x'].to_numpy() if 'pos_x' in pdf.columns else np.zeros(len(pdf))
                     y_pos = pdf['pos_y'].to_numpy()
                     z_pos = pdf['pos_z'].to_numpy() if 'pos_z' in pdf.columns else np.zeros_like(y_pos)
                     total_f = len(y_pos)
@@ -1177,27 +1118,6 @@ if app_mode == "🔍 Single Match Analysis":
                         else:
                             _styler = _styler.applymap(_style_fn, subset=['Result', 'Goal (5s)'])
                         st.dataframe(_styler, use_container_width=True)
-
-                            result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
-                            fig = go.Figure()
-                            for result, color in result_colors.items():
-                                subset = disp_kickoff[disp_kickoff['Result'] == result]
-                                if not subset.empty:
-                                    fig.add_trace(go.Scatter(
-                                        x=subset['End_X'], y=subset['End_Y'],
-                                        mode='markers',
-                                        marker=dict(size=14, color=color, line=dict(width=1.5, color='white'), opacity=0.9),
-                                        name=result,
-                                        hovertemplate="Player: %{text}<br>Result: " + result + "<extra></extra>",
-                                        text=subset['Player']
-                                    ))
-                            fig.update_layout(get_field_layout("Kickoff Outcomes"))
-                            fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
-                            st.plotly_chart(fig, use_container_width=True)
-                        st.markdown("#### Kickoff Log")
-                        disp_cols = ['Player', 'Spawn', 'Time to Hit', 'Boost', 'Result', 'Goal (5s)']
-                        st.dataframe(disp_kickoff[disp_cols].style.map(lambda x: 'color: green' if x == 'Win' or x is True else ('color: red' if x == 'Loss' else 'color: gray'), subset=['Result', 'Goal (5s)']), use_container_width=True)
- 
                     else: st.info("No kickoffs found for selected players.")
                 else: st.info("No kickoff data found.")
 
@@ -1286,13 +1206,6 @@ if app_mode == "🔍 Single Match Analysis":
                             tm_multiplier = 1 if gteam == 'Blue' else -1
                             fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=scorer_name, hoverinfo="text+name", showlegend=False))
 
-                    if not shot_df.empty:
-                        goals = shot_df[shot_df['Result'] == 'Goal']
-                        for _, g in goals.iterrows():
-                            time_sec = g['Frame'] / float(REPLAY_FPS)
-                            tm_multiplier = 1 if g['Team'] == 'Blue' else -1
-                            fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=f"{g['Team']} Goal", hoverinfo="text+name", showlegend=False))
- 
                     fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
                     st.plotly_chart(fig, use_container_width=True)
 
@@ -1321,40 +1234,6 @@ if app_mode == "🔍 Single Match Analysis":
                             marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
                             name='Big Chance', hoverinfo='skip'))
 
-                    team_colors = {"Blue": "#3399ff", "Orange": "#ff9900", "Unknown": "gray"}
-                    goals = shot_df[shot_df['Result'] == 'Goal']
-                    misses = shot_df[shot_df['Result'] == 'Shot']
-                    big_chances = shot_df[shot_df['BigChance'] == True]
-                    # Shots (misses) - colored by team, semi-transparent
-                    for team_name, color in team_colors.items():
-                        t_misses = misses[misses['Team'] == team_name]
-                        if not t_misses.empty:
-                            fig.add_trace(go.Scatter(
-                                x=t_misses['X'], y=t_misses['Y'], mode='markers',
-                                marker=dict(size=10, color=color, opacity=0.45),
-                                name=f'{team_name} Shot',
-                                customdata=np.stack([t_misses['Player'], t_misses['xG']], axis=-1),
-                                hovertemplate="<b>%{customdata[0]}</b><br>xG: %{customdata[1]}<extra>Shot</extra>",
-                            ))
-                    # Goals - colored by team, larger with white border
-                    for team_name, color in team_colors.items():
-                        t_goals = goals[goals['Team'] == team_name]
-                        if not t_goals.empty:
-                            fig.add_trace(go.Scatter(
-                                x=t_goals['X'], y=t_goals['Y'], mode='markers',
-                                marker=dict(size=16, color=color, line=dict(width=2.5, color='white')),
-                                name=f'{team_name} Goal',
-                                customdata=np.stack([t_goals['Player'], t_goals['xG']], axis=-1),
-                                hovertemplate="<b>%{customdata[0]}</b><br>xG: %{customdata[1]}<extra>Goal</extra>",
-                            ))
-                    # Big chance ring overlay
-                    if not big_chances.empty:
-                        fig.add_trace(go.Scatter(
-                            x=big_chances['X'], y=big_chances['Y'], mode='markers',
-                            marker=dict(size=26, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
-                            name='Big Chance', hoverinfo='skip',
-                        ))
- 
                     st.plotly_chart(fig, use_container_width=True)
 
             with t3b:
@@ -1447,23 +1326,8 @@ if app_mode == "🔍 Single Match Analysis":
                 if target:
                     p_frames = game_df[target]
                     if 'pos_z' in p_frames.columns:
-
-                        valid_pos = p_frames[p_frames['pos_z'] > 0]
-                        # Downsample for performance (every 3rd frame is plenty for KDE)
-                        sampled = valid_pos.iloc[::3]
-                        # Sofascore-style smooth KDE heatmap with contour fill
-                        fig = go.Figure()
-                        fig.add_trace(go.Histogram2dContour(
-                            x=sampled['pos_x'], y=sampled['pos_y'],
-                            colorscale=[[0, 'rgba(0,0,0,0)'], [0.15, 'rgba(0,80,0,0.25)'],
-                                        [0.3, 'rgba(0,160,0,0.4)'], [0.5, 'rgba(80,200,0,0.5)'],
-                                        [0.7, 'rgba(200,220,0,0.6)'], [0.85, 'rgba(255,200,0,0.65)'],
-                                        [1.0, 'rgba(255,255,50,0.75)']],
-                            contours=dict(coloring='fill', showlines=False),
-                            ncontours=20, showscale=False,
-                            hoverinfo='skip'
-
                         valid_pos = p_frames[p_frames['pos_z'] > 0].dropna(subset=['pos_x', 'pos_y'])
+                        sampled = valid_pos.iloc[::3]
                         sofascore_scale = [
                             [0.0, 'rgba(0,0,0,0)'],
                             [0.15, 'rgba(20,60,0,0.35)'],
@@ -1476,13 +1340,12 @@ if app_mode == "🔍 Single Match Analysis":
                         ]
                         fig = go.Figure()
                         fig.add_trace(go.Histogram2dContour(
-                            x=valid_pos['pos_x'], y=valid_pos['pos_y'],
+                            x=sampled['pos_x'], y=sampled['pos_y'],
                             colorscale=sofascore_scale,
                             ncontours=20,
                             contours=dict(coloring='fill', showlines=False),
                             showscale=False,
                             hoverinfo='skip',
- 
                         ))
                         fig.update_layout(get_field_layout(f"{target} Heatmap"))
                         st.plotly_chart(fig, use_container_width=True)
@@ -1633,10 +1496,14 @@ elif app_mode == "📈 Season Batch Processor":
                         blue_g = stats[stats['Team']=='Blue']['Goals'].sum()
                         orange_g = stats[stats['Team']=='Orange']['Goals'].sum()
 
-                        winner = "Blue" if blue_g > orange_g else "Orange"
-                        stats['Won'] = stats['Team'] == winner
+                        if blue_g > orange_g:
+                            stats['Won'] = stats['Team'] == "Blue"
+                        elif orange_g > blue_g:
+                            stats['Won'] = stats['Team'] == "Orange"
+                        else:
+                            stats['Won'] = False
                         # Overtime detection
-                        is_ot = detect_overtime(manager)  # NEW
+                        is_ot = detect_overtime(manager)
                         stats['Overtime'] = is_ot
                         # Luck calculation
                         for team in ["Blue", "Orange"]:
@@ -1646,13 +1513,6 @@ elif app_mode == "📈 Season Batch Processor":
                         # Timestamp
                         ts = get_match_timestamp(proto)
                         stats['Timestamp'] = ts
-
-                        if blue_g > orange_g:
-                            stats['Won'] = stats['Team'] == "Blue"
-                        elif orange_g > blue_g:
-                            stats['Won'] = stats['Team'] == "Orange"
-                        else:
-                            stats['Won'] = False
  
                         new_stats_list.append(stats)
                     if not kickoff_df.empty:
@@ -1779,20 +1639,6 @@ elif app_mode == "📈 Season Batch Processor":
                     spawn_grp = hero_k.groupby('Spawn')['Result'].apply(lambda x: (x=='Win').mean()*100).reset_index(name='WinRate')
                     fig = px.bar(spawn_grp, x='Spawn', y='WinRate', title="Win Rate by Spawn Location", color_discrete_sequence=['#636efa'])
                     st.plotly_chart(fig, use_container_width=True)
-
-                st.write("#### Season Kickoff Outcomes")
-                color_map_k = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#AB63FA"}
-                fig = go.Figure()
-                for outcome, color in color_map_k.items():
-                    subset = hero_k[hero_k['Result'] == outcome]
-                    if not subset.empty:
-                        fig.add_trace(go.Scatter(
-                            x=subset['End_X'], y=subset['End_Y'], mode='markers',
-                            marker=dict(size=10, color=color, opacity=0.7, line=dict(width=1, color='white')),
-                            name=outcome
-                        ))
-                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View)"))
-                fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color='white')))
 
                 st.write("#### Season Kickoff Outcome Map")
                 result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
