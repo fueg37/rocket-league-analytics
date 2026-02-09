@@ -1275,8 +1275,114 @@ def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
     rotation_summary = pd.DataFrame(summary)
     return rotation_timeline, rotation_summary, double_commits_df
 
+# --- 9h. MATH: EXPECTED SAVES (xS) ---
+def calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, saver_dist):
+    """Calculate expected save difficulty. Returns [0.01, 0.99].
+    Higher = harder save (more impressive if saved)."""
+    # Speed factor: faster shots are harder to save
+    speed_norm = min(shot_speed / 4000.0, 1.5)
+    speed_factor = 0.3 * (speed_norm ** 0.8)
+    # Reaction time proxy: closer shots = less time to react
+    reaction_time = dist_to_goal / max(shot_speed, 500.0)
+    reaction_factor = max(0.0, 0.3 * (1.0 - min(reaction_time / 1.0, 1.0)))
+    # Angle: shots aimed at corners are harder
+    angle_factor = 0.2 * min(abs(angle_off_center) / (np.pi / 2), 1.0)
+    # Height: aerial saves are harder
+    height_factor = 0.15 * min(max(shot_z - 200, 0) / 600.0, 1.0)
+    # Saver distance: if saver was far from optimal position, harder save
+    saver_factor = 0.1 * min(saver_dist / 2000.0, 1.0)
+    xs = speed_factor + reaction_factor + angle_factor + height_factor + saver_factor
+    return max(0.01, min(xs, 0.99))
+
+def calculate_expected_saves(manager, player_map, shot_df):
+    """Calculate xS for each saved shot. Returns (xs_events_df, xs_summary_df).
+    For each non-goal shot, finds the nearest defender and scores the save difficulty."""
+    proto = manager.get_protobuf_data()
+    game_df = manager.get_data_frame()
+    if shot_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    player_teams = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
+    saved_shots = shot_df[shot_df['Result'] == 'Shot'].copy()
+    if saved_shots.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Pre-compute player position arrays
+    player_pos = {}
+    for p in proto.players:
+        if p.name in game_df:
+            pdf = game_df[p.name]
+            if 'pos_x' in pdf.columns:
+                player_pos[p.name] = {
+                    'team': "Orange" if p.is_orange else "Blue",
+                    'x': pdf['pos_x'].values, 'y': pdf['pos_y'].values,
+                    'frames': pdf.index.values
+                }
+
+    events = []
+    for _, shot in saved_shots.iterrows():
+        frame = shot['Frame']
+        shot_team = shot['Team']
+        defending_team = "Orange" if shot_team == "Blue" else "Blue"
+        target_y = 5120.0 if shot_team == "Blue" else -5120.0
+
+        # Shot properties
+        shot_speed = np.sqrt(shot['VelX']**2 + shot['VelY']**2 + shot['VelZ']**2)
+        dist_to_goal = np.sqrt(shot['X']**2 + (target_y - shot['Y'])**2)
+        # Angle off center: how far from goal center the ball is aimed
+        angle_off_center = np.arctan2(abs(shot['X']), abs(target_y - shot['Y']))
+        shot_z = max(shot['Z'], 0)
+
+        # Find nearest defending player at this frame
+        nearest_defender = None
+        nearest_dist = 99999
+        for pname, pd_info in player_pos.items():
+            if pd_info['team'] != defending_team:
+                continue
+            pi = min(np.searchsorted(pd_info['frames'], frame), len(pd_info['x']) - 1)
+            if pi < 0:
+                continue
+            px, py = pd_info['x'][pi], pd_info['y'][pi]
+            # Distance from defender to ball
+            dist = np.sqrt((px - shot['X'])**2 + (py - shot['Y'])**2)
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_defender = pname
+
+        if nearest_defender is None:
+            continue
+
+        xs = calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, nearest_dist)
+        events.append({
+            'Saver': nearest_defender, 'Team': defending_team,
+            'Frame': frame, 'Time': round(frame / REPLAY_FPS, 1),
+            'xS': round(xs, 3), 'ShotSpeed': int(shot_speed),
+            'DistToGoal': int(dist_to_goal), 'ShotHeight': int(shot_z),
+            'SaverDist': int(nearest_dist), 'Shooter': shot['Player']
+        })
+
+    xs_events_df = pd.DataFrame(events)
+
+    # Build per-player summary
+    summary = []
+    for p in proto.players:
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        p_saves = xs_events_df[xs_events_df['Saver'] == name] if not xs_events_df.empty else pd.DataFrame()
+        total_xs = round(p_saves['xS'].sum(), 2) if not p_saves.empty else 0
+        avg_xs = round(p_saves['xS'].mean(), 3) if not p_saves.empty else 0
+        hard_saves = int((p_saves['xS'] > 0.4).sum()) if not p_saves.empty else 0
+        summary.append({
+            'Name': name, 'Team': team,
+            'Saves_Nearby': len(p_saves) if not p_saves.empty else 0,
+            'Total_xS': total_xs, 'Avg_xS': avg_xs,
+            'Hard_Saves': hard_saves
+        })
+    xs_summary_df = pd.DataFrame(summary)
+    return xs_events_df, xs_summary_df
+
 # --- 10. MATH: AGGREGATE ---
-def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None, vaep_summary=None, rotation_summary=None):
+def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None, vaep_summary=None, rotation_summary=None, xs_summary=None):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     stats = []
@@ -1324,6 +1430,7 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 "xGA": 0, "Shots Faced": 0, "Goals Conceded (nearest)": 0,
                 "Total_VAEP": 0.0, "Avg_VAEP": 0.0, "Positive_Actions": 0, "Negative_Actions": 0,
                 "Time_1st%": 0.0, "Time_2nd%": 0.0, "Time_3rd%": 0.0, "DoubleCommits": 0, "RotationBreaks": 0,
+                "Total_xS": 0.0, "Avg_xS": 0.0, "Hard_Saves": 0, "Saves_Nearby": 0,
                 "Overtime": False, "Luck": 0.0, "Timestamp": ""
             }
             if hasattr(player, 'stats') and hasattr(player.stats, 'boost'):
@@ -1387,6 +1494,7 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 (xga_df, ['xGA', 'Shots Faced', 'Goals Conceded (nearest)']),
                 (vaep_summary, ['Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']),
                 (rotation_summary, ['Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits', 'RotationBreaks']),
+                (xs_summary, ['Total_xS', 'Avg_xS', 'Hard_Saves', 'Saves_Nearby']),
             ]:
                 if extra_df is not None and not extra_df.empty:
                     row = extra_df[extra_df['Name'] == name]
@@ -1744,13 +1852,14 @@ if app_mode == "🔍 Single Match Analysis":
                 xga_df = calculate_xg_against(manager, temp_map, shot_df)
                 vaep_df, vaep_summary = calculate_vaep(manager, temp_map, shot_df)
                 rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(manager, game_df, proto)
+                xs_events_df, xs_summary = calculate_expected_saves(manager, temp_map, shot_df)
                 wp_model, wp_scaler = load_win_prob_model()
                 wp_result = calculate_win_probability_trained(manager, wp_model, wp_scaler)
                 if isinstance(wp_result, tuple):
                     win_prob_df, wp_model_used = wp_result
                 else:
                     win_prob_df, wp_model_used = wp_result, False
-                df = calculate_final_stats(manager, shot_df, pass_df, aerial_df, recovery_df, defense_df, xga_df, vaep_summary, rotation_summary)
+                df = calculate_final_stats(manager, shot_df, pass_df, aerial_df, recovery_df, defense_df, xga_df, vaep_summary, rotation_summary, xs_summary)
                 is_overtime = detect_overtime(manager)  # NEW
                 if not df.empty:
                     df['Overtime'] = is_overtime
@@ -1769,7 +1878,7 @@ if app_mode == "🔍 Single Match Analysis":
             render_scoreboard(df, shot_df, is_overtime)
             render_dashboard(df, shot_df, pass_df)
             
-            t1, t2, t3, t3b, t4, t5, t6, t8, t9, t7 = st.tabs(["🚀 Kickoffs", "🌊 Match Narrative", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "⚡ Speed", "🛡️ Advanced", "🔄 Rotation", "📸 Export"])
+            t1, t2, t3, t3b, t4, t5, t6, t8, t9, t10, t7 = st.tabs(["🚀 Kickoffs", "🌊 Match Narrative", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "⚡ Speed", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "📸 Export"])
             
             with t1:
                 st.subheader("Kickoff Analysis")
@@ -2222,6 +2331,37 @@ if app_mode == "🔍 Single Match Analysis":
                     st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
                 else:
                     st.info("No VAEP data available.")
+                st.divider()
+
+                # --- SECTION 7: Expected Saves (xS) ---
+                st.markdown("#### Expected Saves (xS)")
+                if not xs_summary.empty and xs_summary['Saves_Nearby'].sum() > 0:
+                    xs1, xs2 = st.columns(2)
+                    with xs1:
+                        fig_xs_bar = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Total_xS', ascending=False),
+                            x='Name', y='Total_xS', color='Team',
+                            title="Total xS (Save Difficulty)",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_xs_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_xs_bar, use_container_width=True)
+                    with xs2:
+                        fig_xs_avg = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Avg_xS', ascending=False),
+                            x='Name', y='Avg_xS', color='Team',
+                            title="Avg xS per Save",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_xs_avg.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_xs_avg, use_container_width=True)
+                    xs_show_cols = ['Name', 'Team', 'Saves_Nearby', 'Total_xS', 'Avg_xS', 'Hard_Saves']
+                    st.dataframe(xs_summary[xs_show_cols].sort_values('Total_xS', ascending=False),
+                        use_container_width=True, hide_index=True)
+                    # Individual save events
+                    if not xs_events_df.empty:
+                        with st.expander("Individual Save Events"):
+                            st.dataframe(xs_events_df[['Saver', 'Shooter', 'Time', 'xS', 'ShotSpeed', 'ShotHeight', 'SaverDist']].sort_values('xS', ascending=False),
+                                use_container_width=True, hide_index=True)
+                    st.caption("xS: save difficulty based on shot speed, distance, angle, height, and saver positioning. Higher = more impressive save.")
+                else:
+                    st.info("No save events to analyze.")
 
             with t9:
                 st.subheader("Rotation Analysis")
@@ -2299,6 +2439,122 @@ if app_mode == "🔍 Single Match Analysis":
                     st.caption("1st man = closest to ball, 2nd = support, 3rd = last back. Double commits = 2 players within 800u of ball in attacking half.")
                 else:
                     st.info("No rotation data available.")
+
+            with t10:
+                st.subheader("Tactical Replay Viewer")
+                try:
+                    max_frame = game_df.index.max()
+                    match_duration = max_frame / float(REPLAY_FPS)
+
+                    # Build pre-computed arrays for fast lookup
+                    ball_df_tac = game_df['ball'] if 'ball' in game_df else None
+                    tac_players = []
+                    for p in proto.players:
+                        if p.name in game_df:
+                            pdf = game_df[p.name]
+                            if 'pos_x' in pdf.columns:
+                                pinfo = {
+                                    'name': p.name,
+                                    'team': "Orange" if p.is_orange else "Blue",
+                                    'frames': pdf.index.values,
+                                    'x': pdf['pos_x'].values,
+                                    'y': pdf['pos_y'].values,
+                                    'boost': pdf['boost'].values if 'boost' in pdf.columns else np.zeros(len(pdf))
+                                }
+                                tac_players.append(pinfo)
+
+                    # Time slider
+                    time_val = st.slider("Match Time (seconds)", 0.0, round(match_duration, 1), 0.0, 0.5, key="tac_slider")
+                    target_frame = int(time_val * REPLAY_FPS)
+
+                    # Speed controls
+                    sc1, sc2, sc3 = st.columns(3)
+                    with sc1:
+                        show_trail = st.checkbox("Show ball trail", value=True, key="tac_trail")
+                    with sc2:
+                        show_boost = st.checkbox("Show boost levels", value=True, key="tac_boost")
+                    with sc3:
+                        show_lines = st.checkbox("Show lines to ball", value=False, key="tac_lines")
+
+                    fig_tac = go.Figure()
+                    fig_tac.update_layout(get_field_layout(""))
+                    fig_tac.update_layout(title=None, margin=dict(l=10, r=10, t=30, b=10), height=600)
+
+                    # Ball trail (last 1 second = 30 frames)
+                    if ball_df_tac is not None and show_trail:
+                        b_frames = ball_df_tac.index.values
+                        b_x = ball_df_tac['pos_x'].values
+                        b_y = ball_df_tac['pos_y'].values
+                        trail_start = max(0, target_frame - REPLAY_FPS)
+                        trail_indices = np.where((b_frames >= trail_start) & (b_frames <= target_frame))[0]
+                        if len(trail_indices) > 1:
+                            trail_x = b_x[trail_indices]
+                            trail_y = b_y[trail_indices]
+                            # Fade opacity from old to new
+                            n_pts = len(trail_x)
+                            opacities = np.linspace(0.1, 0.5, n_pts)
+                            for j in range(n_pts - 1):
+                                fig_tac.add_trace(go.Scatter(
+                                    x=[trail_x[j], trail_x[j+1]], y=[trail_y[j], trail_y[j+1]],
+                                    mode='lines', line=dict(color=f'rgba(255,255,255,{opacities[j]:.2f})', width=2),
+                                    showlegend=False, hoverinfo='skip'))
+
+                    # Ball position
+                    if ball_df_tac is not None:
+                        b_frames = ball_df_tac.index.values
+                        b_x = ball_df_tac['pos_x'].values
+                        b_y = ball_df_tac['pos_y'].values
+                        bi = min(np.searchsorted(b_frames, target_frame), len(b_x) - 1)
+                        ball_cx, ball_cy = b_x[bi], b_y[bi]
+                        fig_tac.add_trace(go.Scatter(
+                            x=[ball_cx], y=[ball_cy], mode='markers',
+                            marker=dict(size=14, color='#ffffff', symbol='circle',
+                                        line=dict(width=2, color='#ffcc00')),
+                            name='Ball', showlegend=True,
+                            hovertemplate="Ball<br>x: %{x:.0f}<br>y: %{y:.0f}<extra></extra>"))
+                    else:
+                        ball_cx, ball_cy = 0, 0
+
+                    # Player positions
+                    for pinfo in tac_players:
+                        pi = min(np.searchsorted(pinfo['frames'], target_frame), len(pinfo['x']) - 1)
+                        if pi < 0:
+                            continue
+                        px, py = pinfo['x'][pi], pinfo['y'][pi]
+                        boost_val = pinfo['boost'][pi] if pi < len(pinfo['boost']) else 0
+                        boost_val = max(0, min(100, boost_val)) if not np.isnan(boost_val) else 0
+                        color = "#007bff" if pinfo['team'] == "Blue" else "#ff9900"
+                        label = pinfo['name']
+                        if show_boost:
+                            label = f"{pinfo['name']} ({int(boost_val)})"
+
+                        fig_tac.add_trace(go.Scatter(
+                            x=[px], y=[py], mode='markers+text',
+                            marker=dict(size=18, color=color, line=dict(width=2, color='white'), opacity=0.9),
+                            text=[label], textposition='top center',
+                            textfont=dict(color='white', size=10),
+                            name=pinfo['name'], showlegend=False,
+                            hovertemplate=f"<b>{pinfo['name']}</b><br>Boost: {int(boost_val)}<br>x: %{{x:.0f}}<br>y: %{{y:.0f}}<extra></extra>"))
+
+                        # Line to ball
+                        if show_lines and ball_df_tac is not None:
+                            fig_tac.add_trace(go.Scatter(
+                                x=[px, ball_cx], y=[py, ball_cy], mode='lines',
+                                line=dict(color=color, width=1, dash='dot'),
+                                showlegend=False, hoverinfo='skip', opacity=0.3))
+
+                    # Add time annotation
+                    minutes = int(time_val // 60)
+                    secs = int(time_val % 60)
+                    ot_label = " (OT)" if time_val > 300 else ""
+                    fig_tac.add_annotation(x=0, y=6500, text=f"{minutes}:{secs:02d}{ot_label}",
+                        showarrow=False, font=dict(size=16, color='white'),
+                        bgcolor='rgba(0,0,0,0.5)')
+
+                    st.plotly_chart(fig_tac, use_container_width=True)
+                    st.caption("Scrub through the match to see player positions and ball movement. Blue team attacks upward, Orange attacks downward.")
+                except Exception as e:
+                    st.error(f"Could not render tactical view: {e}")
 
             with t7:
                 st.subheader("Composite Dashboard Export")
@@ -2436,7 +2692,8 @@ elif app_mode == "📈 Season Batch Processor":
                     xga_df_b = calculate_xg_against(manager, temp_map, shot_df)
                     vaep_df_b, vaep_summary_b = calculate_vaep(manager, temp_map, shot_df)
                     _, rotation_summary_b, _ = calculate_rotation_analysis(manager, game_df, proto)
-                    stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b, vaep_summary_b, rotation_summary_b)
+                    _, xs_summary_b = calculate_expected_saves(manager, temp_map, shot_df)
+                    stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b, vaep_summary_b, rotation_summary_b, xs_summary_b)
                     # Collect win prob training data
                     wp_train = extract_win_prob_training_data(manager, game_df, proto)
                     if not wp_train.empty:
@@ -2500,7 +2757,8 @@ elif app_mode == "📈 Season Batch Processor":
                               ('Shadow %', 0.0), ('Pressure Time (s)', 0.0),
                               ('xGA', 0.0), ('Shots Faced', 0), ('Goals Conceded (nearest)', 0),
                               ('Total_VAEP', 0.0), ('Avg_VAEP', 0.0), ('Positive_Actions', 0), ('Negative_Actions', 0),
-                              ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('Time_3rd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0)]:
+                              ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('Time_3rd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0),
+                              ('Total_xS', 0.0), ('Avg_xS', 0.0), ('Hard_Saves', 0), ('Saves_Nearby', 0)]:
             if col not in season.columns:
                 season[col] = default
         st.divider()
@@ -2573,7 +2831,8 @@ elif app_mode == "📈 Season Batch Processor":
             st.subheader("Performance Trends")
             metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'Avg Speed', 'Luck', 'Carry_Time',
                 'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA',
-                'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits'])
+                'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits',
+                'Total_xS', 'Avg_xS', 'Hard_Saves'])
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero, line=dict(color='#007bff', width=3)))
             if teammate != "None":
