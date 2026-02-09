@@ -1190,7 +1190,7 @@ def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
 
     timeline = []
     double_commits_raw = []
-    role_counts = {p.name: {'1st': 0, '2nd': 0, '3rd': 0, 'total': 0} for p in proto.players}
+    role_counts = {p.name: {'1st': 0, '2nd': 0, 'total': 0} for p in proto.players}
     rotation_break_counts = {p.name: 0 for p in proto.players}
 
     for frame in range(0, max_frame, sample_step):
@@ -1216,7 +1216,7 @@ def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
 
             distances.sort(key=lambda x: x[1])
             for rank, (name, dist, px, py, in_attack) in enumerate(distances):
-                role = ['1st', '2nd', '3rd'][min(rank, 2)]
+                role = ['1st', '2nd'][min(rank, 1)]
                 timeline.append({'Frame': frame, 'Time': time_s, 'Player': name, 'Role': role, 'Team': team_name})
                 role_counts[name]['total'] += 1
                 role_counts[name][role] += 1
@@ -1257,7 +1257,7 @@ def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
     for p in proto.players:
         name = p.name
         team = "Orange" if p.is_orange else "Blue"
-        rc = role_counts.get(name, {'1st': 0, '2nd': 0, '3rd': 0, 'total': 0})
+        rc = role_counts.get(name, {'1st': 0, '2nd': 0, 'total': 0})
         total = max(rc['total'], 1)
         dc_count = 0
         if not double_commits_df.empty:
@@ -1268,7 +1268,6 @@ def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
             'Name': name, 'Team': team,
             'Time_1st%': round((rc['1st'] / total) * 100, 1),
             'Time_2nd%': round((rc['2nd'] / total) * 100, 1),
-            'Time_3rd%': round((rc['3rd'] / total) * 100, 1),
             'DoubleCommits': dc_count,
             'RotationBreaks': rot_breaks
         })
@@ -1434,7 +1433,7 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 "Shadow %": 0, "Pressure Time (s)": 0,
                 "xGA": 0, "Shots Faced": 0, "Goals Conceded (nearest)": 0,
                 "Total_VAEP": 0.0, "Avg_VAEP": 0.0, "Positive_Actions": 0, "Negative_Actions": 0,
-                "Time_1st%": 0.0, "Time_2nd%": 0.0, "Time_3rd%": 0.0, "DoubleCommits": 0, "RotationBreaks": 0,
+                "Time_1st%": 0.0, "Time_2nd%": 0.0, "DoubleCommits": 0, "RotationBreaks": 0,
                 "Total_xS": 0.0, "Avg_xS": 0.0, "Hard_Saves": 0, "Saves_Nearby": 0,
                 "Overtime": False, "Luck": 0.0, "Timestamp": ""
             }
@@ -1498,7 +1497,7 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 (defense_df, ['Shadow %', 'Pressure Time (s)']),
                 (xga_df, ['xGA', 'Shots Faced', 'Goals Conceded (nearest)']),
                 (vaep_summary, ['Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']),
-                (rotation_summary, ['Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits', 'RotationBreaks']),
+                (rotation_summary, ['Time_1st%', 'Time_2nd%', 'DoubleCommits', 'RotationBreaks']),
                 (xs_summary, ['Total_xS', 'Avg_xS', 'Hard_Saves', 'Saves_Nearby']),
             ]:
                 if extra_df is not None and not extra_df.empty:
@@ -2376,12 +2375,12 @@ if app_mode == "🔍 Single Match Analysis":
                     rc1, rc2 = st.columns(2)
                     with rc1:
                         fig_roles = go.Figure()
-                        for role, color in [('1st', '#EF553B'), ('2nd', '#FFA15A'), ('3rd', '#00CC96')]:
+                        for role, color in [('1st', '#EF553B'), ('2nd', '#FFA15A')]:
                             col_name = f'Time_{role}%'
                             fig_roles.add_trace(go.Bar(
                                 x=rotation_summary['Name'], y=rotation_summary[col_name],
                                 name=f'{role} Man', marker_color=color))
-                        fig_roles.update_layout(barmode='stack', title="Time Spent as 1st/2nd/3rd Man",
+                        fig_roles.update_layout(barmode='stack', title="Time Spent as 1st/2nd Man",
                             yaxis_title="% of Match", plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
                             font=dict(color='white'), legend=dict(orientation='h', y=1.12))
                         st.plotly_chart(fig_roles, use_container_width=True)
@@ -2391,7 +2390,7 @@ if app_mode == "🔍 Single Match Analysis":
                             team_data = rotation_summary[rotation_summary['Team'] == team]
                             if not team_data.empty:
                                 st.markdown(f"**{team} Team**")
-                                st.dataframe(team_data[['Name', 'Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits']].reset_index(drop=True),
+                                st.dataframe(team_data[['Name', 'Time_1st%', 'Time_2nd%', 'DoubleCommits']].reset_index(drop=True),
                                     use_container_width=True, hide_index=True)
 
                     st.divider()
@@ -2403,7 +2402,7 @@ if app_mode == "🔍 Single Match Analysis":
                             team_tl = rotation_timeline[rotation_timeline['Team'] == team]
                             if team_tl.empty:
                                 continue
-                            role_map = {'1st': 1, '2nd': 2, '3rd': 3}
+                            role_map = {'1st': 1, '2nd': 2}
                             team_tl = team_tl.copy()
                             team_tl['RoleNum'] = team_tl['Role'].map(role_map)
                             players = sorted(team_tl['Player'].unique())
@@ -2412,9 +2411,9 @@ if app_mode == "🔍 Single Match Analysis":
                             fig_tl = go.Figure()
                             fig_tl.add_trace(go.Heatmap(
                                 x=sampled['Time'], y=sampled['Player'], z=sampled['RoleNum'],
-                                colorscale=[[0, '#EF553B'], [0.5, '#FFA15A'], [1.0, '#00CC96']],
-                                zmin=1, zmax=3, showscale=True,
-                                colorbar=dict(title="Role", tickvals=[1, 2, 3], ticktext=['1st', '2nd', '3rd'])))
+                                colorscale=[[0, '#EF553B'], [1.0, '#FFA15A']],
+                                zmin=1, zmax=2, showscale=True,
+                                colorbar=dict(title="Role", tickvals=[1, 2], ticktext=['1st', '2nd'])))
                             fig_tl.update_layout(title=f"{team} Rotation Timeline",
                                 xaxis_title="Time (s)", yaxis_title="Player",
                                 plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
@@ -2441,7 +2440,7 @@ if app_mode == "🔍 Single Match Analysis":
                     else:
                         st.success("No double commits detected!")
 
-                    st.caption("1st man = closest to ball, 2nd = support, 3rd = last back. Double commits = 2 players within 800u of ball in attacking half.")
+                    st.caption("1st man = closest to ball, 2nd = support/last back. Double commits = 2 players within 800u of ball in attacking half.")
                 else:
                     st.info("No rotation data available.")
 
@@ -2762,7 +2761,7 @@ elif app_mode == "📈 Season Batch Processor":
                               ('Shadow %', 0.0), ('Pressure Time (s)', 0.0),
                               ('xGA', 0.0), ('Shots Faced', 0), ('Goals Conceded (nearest)', 0),
                               ('Total_VAEP', 0.0), ('Avg_VAEP', 0.0), ('Positive_Actions', 0), ('Negative_Actions', 0),
-                              ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('Time_3rd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0),
+                              ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0),
                               ('Total_xS', 0.0), ('Avg_xS', 0.0), ('Hard_Saves', 0), ('Saves_Nearby', 0)]:
             if col not in season.columns:
                 season[col] = default
@@ -2836,7 +2835,7 @@ elif app_mode == "📈 Season Batch Processor":
             st.subheader("Performance Trends")
             metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'Avg Speed', 'Luck', 'Carry_Time',
                 'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA',
-                'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits',
+                'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'DoubleCommits',
                 'Total_xS', 'Avg_xS', 'Hard_Saves'])
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero, line=dict(color='#007bff', width=3)))
