@@ -1274,7 +1274,104 @@ def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
     rotation_summary = pd.DataFrame(summary)
     return rotation_timeline, rotation_summary, double_commits_df
 
-# --- 9h. MATH: EXPECTED SAVES (xS) ---
+# --- 9h. MATH: SITUATIONAL STATS ---
+def calculate_situational_stats(manager, game_df, proto):
+    """Calculate game-state-dependent stats: goals by period, game state, clutch moments."""
+    max_frame = game_df.index.max()
+    match_duration = max_frame / float(REPLAY_FPS)
+    half_frame = int(min(150, match_duration / 2) * REPLAY_FPS)
+    last_min_frame = max(0, int((min(match_duration, 300) - 60) * REPLAY_FPS))
+
+    _pid_team = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
+    _pid_name = {str(p.id.id): p.name for p in proto.players}
+    player_team = {p.name: ("Orange" if p.is_orange else "Blue") for p in proto.players}
+
+    goals = []
+    if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
+        for g in proto.game_metadata.goals:
+            frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
+            pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
+            team = _pid_team.get(pid, "Blue")
+            scorer = _pid_name.get(pid, "")
+            goals.append((frame, team, scorer))
+    goals.sort()
+
+    per_player = {p.name: {'Goals_First_Half': 0, 'Goals_Second_Half': 0, 'Goals_Last_Min': 0,
+        'Goals_When_Leading': 0, 'Goals_When_Trailing': 0, 'Goals_When_Tied': 0} for p in proto.players}
+
+    blue_score, orange_score = 0, 0
+    first_scorer_team = None
+    blue_ever_led, orange_ever_led = False, False
+
+    for frame, scoring_team, scorer in goals:
+        if blue_score > orange_score:
+            state_blue, state_orange = 'Leading', 'Trailing'
+        elif orange_score > blue_score:
+            state_blue, state_orange = 'Trailing', 'Leading'
+        else:
+            state_blue, state_orange = 'Tied', 'Tied'
+
+        if first_scorer_team is None:
+            first_scorer_team = scoring_team
+
+        if scorer in per_player:
+            team = player_team[scorer]
+            state = state_blue if team == "Blue" else state_orange
+            per_player[scorer][f'Goals_When_{state}'] += 1
+            if frame <= half_frame:
+                per_player[scorer]['Goals_First_Half'] += 1
+            else:
+                per_player[scorer]['Goals_Second_Half'] += 1
+            if frame >= last_min_frame:
+                per_player[scorer]['Goals_Last_Min'] += 1
+
+        if scoring_team == "Blue":
+            blue_score += 1
+        else:
+            orange_score += 1
+        if blue_score > orange_score:
+            blue_ever_led = True
+        if orange_score > blue_score:
+            orange_ever_led = True
+
+    blue_won = blue_score > orange_score
+    orange_won = orange_score > blue_score
+
+    saves_last_min = {p.name: 0 for p in proto.players}
+    for hit in proto.game_stats.hits:
+        if not hit.player_id:
+            continue
+        if hit.frame_number >= last_min_frame and getattr(hit, 'is_save', False):
+            pid = str(hit.player_id.id)
+            name = _pid_name.get(pid, "")
+            if name in saves_last_min:
+                saves_last_min[name] += 1
+
+    results = []
+    for p in proto.players:
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        s = per_player.get(name, {})
+        team_won = (team == "Blue" and blue_won) or (team == "Orange" and orange_won)
+        team_scored_first = (first_scorer_team == team) if first_scorer_team else False
+        opp_ever_led = orange_ever_led if team == "Blue" else blue_ever_led
+        team_ever_led = blue_ever_led if team == "Blue" else orange_ever_led
+        results.append({
+            'Name': name, 'Team': team,
+            'Goals_First_Half': s.get('Goals_First_Half', 0),
+            'Goals_Second_Half': s.get('Goals_Second_Half', 0),
+            'Goals_Last_Min': s.get('Goals_Last_Min', 0),
+            'Saves_Last_Min': saves_last_min.get(name, 0),
+            'Goals_When_Leading': s.get('Goals_When_Leading', 0),
+            'Goals_When_Trailing': s.get('Goals_When_Trailing', 0),
+            'Goals_When_Tied': s.get('Goals_When_Tied', 0),
+            'Scored_First': team_scored_first,
+            'Comeback_Win': team_won and opp_ever_led,
+            'Blown_Lead': not team_won and team_ever_led and (blue_won or orange_won),
+        })
+    return pd.DataFrame(results)
+
+# --- 9i. MATH: EXPECTED SAVES (xS) ---
 def calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, saver_dist):
     """Calculate expected save difficulty. Returns [0.01, 0.99].
     Higher = harder save (more impressive if saved)."""
@@ -1386,7 +1483,7 @@ def calculate_expected_saves(manager, player_map, shot_df):
     return xs_events_df, xs_summary_df
 
 # --- 10. MATH: AGGREGATE ---
-def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None, vaep_summary=None, rotation_summary=None, xs_summary=None):
+def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None, vaep_summary=None, rotation_summary=None, xs_summary=None, situational_df=None):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     stats = []
@@ -1435,6 +1532,9 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 "Total_VAEP": 0.0, "Avg_VAEP": 0.0, "Positive_Actions": 0, "Negative_Actions": 0,
                 "Time_1st%": 0.0, "Time_2nd%": 0.0, "DoubleCommits": 0, "RotationBreaks": 0,
                 "Total_xS": 0.0, "Avg_xS": 0.0, "Hard_Saves": 0, "Saves_Nearby": 0,
+                "Goals_First_Half": 0, "Goals_Second_Half": 0, "Goals_Last_Min": 0, "Saves_Last_Min": 0,
+                "Goals_When_Leading": 0, "Goals_When_Trailing": 0, "Goals_When_Tied": 0,
+                "Scored_First": False, "Comeback_Win": False, "Blown_Lead": False,
                 "Overtime": False, "Luck": 0.0, "Timestamp": ""
             }
             if hasattr(player, 'stats') and hasattr(player.stats, 'boost'):
@@ -1499,6 +1599,9 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 (vaep_summary, ['Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']),
                 (rotation_summary, ['Time_1st%', 'Time_2nd%', 'DoubleCommits', 'RotationBreaks']),
                 (xs_summary, ['Total_xS', 'Avg_xS', 'Hard_Saves', 'Saves_Nearby']),
+                (situational_df, ['Goals_First_Half', 'Goals_Second_Half', 'Goals_Last_Min', 'Saves_Last_Min',
+                                  'Goals_When_Leading', 'Goals_When_Trailing', 'Goals_When_Tied',
+                                  'Scored_First', 'Comeback_Win', 'Blown_Lead']),
             ]:
                 if extra_df is not None and not extra_df.empty:
                     row = extra_df[extra_df['Name'] == name]
@@ -1857,14 +1960,15 @@ if app_mode == "🔍 Single Match Analysis":
                 vaep_df, vaep_summary = calculate_vaep(manager, temp_map, shot_df)
                 rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(manager, game_df, proto)
                 xs_events_df, xs_summary = calculate_expected_saves(manager, temp_map, shot_df)
+                situational_df = calculate_situational_stats(manager, game_df, proto)
                 wp_model, wp_scaler = load_win_prob_model()
                 wp_result = calculate_win_probability_trained(manager, wp_model, wp_scaler)
                 if isinstance(wp_result, tuple):
                     win_prob_df, wp_model_used = wp_result
                 else:
                     win_prob_df, wp_model_used = wp_result, False
-                df = calculate_final_stats(manager, shot_df, pass_df, aerial_df, recovery_df, defense_df, xga_df, vaep_summary, rotation_summary, xs_summary)
-                is_overtime = detect_overtime(manager)  # NEW
+                df = calculate_final_stats(manager, shot_df, pass_df, aerial_df, recovery_df, defense_df, xga_df, vaep_summary, rotation_summary, xs_summary, situational_df)
+                is_overtime = detect_overtime(manager)
                 if not df.empty:
                     df['Overtime'] = is_overtime
                     # Calculate per-team luck
@@ -2697,7 +2801,8 @@ elif app_mode == "📈 Season Batch Processor":
                     vaep_df_b, vaep_summary_b = calculate_vaep(manager, temp_map, shot_df)
                     _, rotation_summary_b, _ = calculate_rotation_analysis(manager, game_df, proto)
                     _, xs_summary_b = calculate_expected_saves(manager, temp_map, shot_df)
-                    stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b, vaep_summary_b, rotation_summary_b, xs_summary_b)
+                    situational_df_b = calculate_situational_stats(manager, game_df, proto)
+                    stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b, vaep_summary_b, rotation_summary_b, xs_summary_b, situational_df_b)
                     # Collect win prob training data
                     wp_train = extract_win_prob_training_data(manager, game_df, proto)
                     if not wp_train.empty:
@@ -2762,7 +2867,10 @@ elif app_mode == "📈 Season Batch Processor":
                               ('xGA', 0.0), ('Shots Faced', 0), ('Goals Conceded (nearest)', 0),
                               ('Total_VAEP', 0.0), ('Avg_VAEP', 0.0), ('Positive_Actions', 0), ('Negative_Actions', 0),
                               ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0),
-                              ('Total_xS', 0.0), ('Avg_xS', 0.0), ('Hard_Saves', 0), ('Saves_Nearby', 0)]:
+                              ('Total_xS', 0.0), ('Avg_xS', 0.0), ('Hard_Saves', 0), ('Saves_Nearby', 0),
+                              ('Goals_First_Half', 0), ('Goals_Second_Half', 0), ('Goals_Last_Min', 0), ('Saves_Last_Min', 0),
+                              ('Goals_When_Leading', 0), ('Goals_When_Trailing', 0), ('Goals_When_Tied', 0),
+                              ('Scored_First', False), ('Comeback_Win', False), ('Blown_Lead', False)]:
             if col not in season.columns:
                 season[col] = default
         st.divider()
@@ -2823,33 +2931,93 @@ elif app_mode == "📈 Season Batch Processor":
 
         # Summary metrics
         ot_count = int(hero_df['Overtime'].sum()) if 'Overtime' in hero_df.columns else 0
-        c1, c2, c3, c4, c5 = st.columns(5)
+        # Compute streaks
+        _cur_streak = 0
+        _max_w_streak = 0
+        _max_l_streak = 0
+        _cur_type = None
+        _cur_run = 0
+        if 'Won' in hero_df.columns:
+            for w in hero_df['Won']:
+                if w == _cur_type:
+                    _cur_run += 1
+                else:
+                    _cur_type = w
+                    _cur_run = 1
+                if w:
+                    _max_w_streak = max(_max_w_streak, _cur_run)
+                else:
+                    _max_l_streak = max(_max_l_streak, _cur_run)
+            # Current streak
+            if len(hero_df) > 0:
+                last_result = hero_df['Won'].iloc[-1]
+                _cur_streak = 0
+                for w in reversed(hero_df['Won'].tolist()):
+                    if w == last_result:
+                        _cur_streak += 1
+                    else:
+                        break
+                _streak_label = f"{'W' if last_result else 'L'}{_cur_streak}"
+            else:
+                _streak_label = "-"
+        else:
+            _streak_label = "-"
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
         c1.metric("Games", len(hero_df))
         c2.metric("Win Rate", f"{(hero_df['Won'].sum()/len(hero_df)*100):.1f}%")
         if 'Rating' in hero_df: c3.metric("Avg Rating", f"{hero_df['Rating'].mean():.2f}")
         if 'xG' in hero_df: c4.metric("Total xG", f"{hero_df['xG'].sum():.2f}")
-        c5.metric("OT Games", ot_count)
+        c5.metric("Current Streak", _streak_label)
+        c6.metric("Best W Streak", _max_w_streak)
 
-        t1, t2, t3, t4, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "📊 Log", "🗓️ Sessions", "📸 Export"])
+        t1, t2, t3, t4, t8, t9, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "💡 Insights", "📊 Situational", "📊 Log", "🗓️ Sessions", "📸 Export"])
         with t1:
             st.subheader("Performance Trends")
             metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'Avg Speed', 'Luck', 'Carry_Time',
                 'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA',
                 'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'DoubleCommits',
-                'Total_xS', 'Avg_xS', 'Hard_Saves'])
+                'Total_xS', 'Avg_xS', 'Hard_Saves',
+                'Goals_First_Half', 'Goals_Second_Half', 'Goals_Last_Min', 'Saves_Last_Min',
+                'Goals_When_Leading', 'Goals_When_Trailing', 'Goals_When_Tied'])
+            t_opt1, t_opt2 = st.columns(2)
+            with t_opt1:
+                rolling_window = st.slider("Rolling Average Window", 3, 20, 10, 1, key="roll_window")
+            with t_opt2:
+                show_wl_markers = st.checkbox("Color by Win/Loss", value=True, key="wl_markers")
             fig = go.Figure()
-            fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero, line=dict(color='#007bff', width=3)))
+            fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero,
+                line=dict(color='#007bff', width=2, dash='dot' if show_wl_markers else 'solid'),
+                opacity=0.4 if show_wl_markers else 1.0))
+            # Rolling average
+            if len(hero_df) >= rolling_window:
+                rolling = hero_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+                fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=rolling, name=f'{hero} ({rolling_window}g avg)',
+                    line=dict(color='#007bff', width=3)))
+            # Win/Loss colored markers
+            if show_wl_markers and 'Won' in hero_df.columns:
+                wins = hero_df[hero_df['Won'] == True]
+                losses = hero_df[hero_df['Won'] == False]
+                if not wins.empty:
+                    fig.add_trace(go.Scatter(x=wins['GameNum'], y=wins[metric], mode='markers',
+                        marker=dict(size=8, color='#00cc96', symbol='circle'), name='Win'))
+                if not losses.empty:
+                    fig.add_trace(go.Scatter(x=losses['GameNum'], y=losses[metric], mode='markers',
+                        marker=dict(size=8, color='#EF553B', symbol='x'), name='Loss'))
             if teammate != "None":
                 mate_df = season[season['Name'] == teammate].reset_index(drop=True)
                 mate_df['GameNum'] = mate_df.index + 1
                 if metric in mate_df.columns:
-                    fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_df[metric], name=teammate, line=dict(color='#ff9900', width=3, dash='dot')))
+                    fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_df[metric], name=teammate, line=dict(color='#ff9900', width=2, dash='dot')))
+                    if len(mate_df) >= rolling_window:
+                        mate_rolling = mate_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+                        fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_rolling, name=f'{teammate} ({rolling_window}g avg)',
+                            line=dict(color='#ff9900', width=3)))
             # Mark OT games
             if 'Overtime' in hero_df.columns:
                 ot_games = hero_df[hero_df['Overtime'] == True]
                 if not ot_games.empty:
-                    fig.add_trace(go.Scatter(x=ot_games['GameNum'], y=ot_games[metric], mode='markers', marker=dict(size=10, color='#ffcc00', symbol='diamond'), name='OT Game'))
-            fig.update_layout(title=f"{metric} over Time", plot_bgcolor='#1e1e1e')
+                    fig.add_trace(go.Scatter(x=ot_games['GameNum'], y=ot_games[metric], mode='markers', marker=dict(size=12, color='#ffcc00', symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
+            fig.update_layout(title=f"{metric} over Time", plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
             st.plotly_chart(fig, use_container_width=True)
         with t2:
             st.subheader("Season Kickoff Meta")
@@ -2949,6 +3117,350 @@ elif app_mode == "📈 Season Batch Processor":
                 fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
             fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=500)
             st.plotly_chart(fig, use_container_width=True)
+        with t8:
+            st.subheader("Career Insights")
+            _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xA', 'Avg Speed',
+                'Aerial Hits', 'Aerial %', 'Avg Recovery (s)', 'Shadow %', 'xGA',
+                'Total_VAEP', 'Avg_VAEP', 'Total_xS', 'Time_1st%', 'DoubleCommits', 'Possession', 'Carry_Time']
+            _available_insight = [s for s in _insight_stats if s in hero_df.columns and hero_df[s].notna().any()]
+
+            # --- 1. Win vs Loss Stat Splits ---
+            st.markdown("#### Win vs Loss Comparison")
+            if 'Won' in hero_df.columns and len(hero_df) >= 5:
+                win_df = hero_df[hero_df['Won'] == True]
+                loss_df = hero_df[hero_df['Won'] == False]
+                if not win_df.empty and not loss_df.empty:
+                    split_data = []
+                    for s in _available_insight:
+                        w_avg = win_df[s].mean()
+                        l_avg = loss_df[s].mean()
+                        diff = w_avg - l_avg
+                        pct_diff = ((w_avg - l_avg) / abs(l_avg) * 100) if l_avg != 0 else 0
+                        split_data.append({'Stat': s, 'Win Avg': round(w_avg, 2), 'Loss Avg': round(l_avg, 2),
+                            'Difference': round(diff, 2), 'Change %': round(pct_diff, 1)})
+                    split_df = pd.DataFrame(split_data).sort_values('Change %', ascending=False)
+                    # Show top positive and negative differences
+                    ic1, ic2 = st.columns(2)
+                    with ic1:
+                        st.markdown("**Biggest boosts in wins:**")
+                        top_pos = split_df.head(5)
+                        for _, row in top_pos.iterrows():
+                            arrow = "+" if row['Difference'] > 0 else ""
+                            st.write(f"**{row['Stat']}**: {row['Win Avg']} vs {row['Loss Avg']} ({arrow}{row['Change %']:.0f}%)")
+                    with ic2:
+                        st.markdown("**Worst in losses:**")
+                        top_neg = split_df.tail(5)
+                        for _, row in top_neg.iterrows():
+                            arrow = "+" if row['Difference'] > 0 else ""
+                            st.write(f"**{row['Stat']}**: {row['Win Avg']} vs {row['Loss Avg']} ({arrow}{row['Change %']:.0f}%)")
+                    with st.expander("Full Win vs Loss Table"):
+                        st.dataframe(split_df.style.background_gradient(subset=['Change %'], cmap='RdYlGn'),
+                            use_container_width=True, hide_index=True)
+                else:
+                    st.info("Need both wins and losses to compare.")
+            else:
+                st.info("Need at least 5 games for win/loss analysis.")
+            st.divider()
+
+            # --- 2. Stat Correlations with Winning ---
+            st.markdown("#### What Correlates with Winning?")
+            if 'Won' in hero_df.columns and len(hero_df) >= 10:
+                correlations = []
+                won_numeric = hero_df['Won'].astype(float)
+                for s in _available_insight:
+                    try:
+                        corr = hero_df[s].corr(won_numeric)
+                        if not np.isnan(corr):
+                            correlations.append({'Stat': s, 'Correlation': round(corr, 3)})
+                    except:
+                        pass
+                if correlations:
+                    corr_df = pd.DataFrame(correlations).sort_values('Correlation', ascending=False)
+                    fig_corr = go.Figure()
+                    colors = ['#00cc96' if v > 0 else '#EF553B' for v in corr_df['Correlation']]
+                    fig_corr.add_trace(go.Bar(x=corr_df['Stat'], y=corr_df['Correlation'],
+                        marker_color=colors))
+                    fig_corr.update_layout(title="Stat Correlation with Winning (higher = more predictive of wins)",
+                        yaxis_title="Correlation", xaxis_tickangle=-45,
+                        plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=350)
+                    st.plotly_chart(fig_corr, use_container_width=True)
+                    st.caption("Green = higher stat → more wins. Red = higher stat → more losses. Focus on improving green stats.")
+            else:
+                st.info("Need at least 10 games for correlation analysis.")
+            st.divider()
+
+            # --- 3. Personal Bests ---
+            st.markdown("#### Personal Bests")
+            pb_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'Total_VAEP', 'Total_xS', 'Avg Speed']
+            pb_avail = [s for s in pb_stats if s in hero_df.columns]
+            pb_cols = st.columns(min(len(pb_avail), 4))
+            for i, s in enumerate(pb_avail):
+                col = pb_cols[i % len(pb_cols)]
+                best_val = hero_df[s].max()
+                best_game = hero_df[hero_df[s] == best_val]['GameNum'].iloc[0] if not hero_df[hero_df[s] == best_val].empty else "?"
+                recent_val = hero_df[s].iloc[-1] if len(hero_df) > 0 else 0
+                is_pb = recent_val >= best_val and len(hero_df) > 1
+                pb_icon = " (NEW!)" if is_pb else ""
+                col.metric(f"Best {s}", f"{best_val:.2f}{pb_icon}", delta=f"Game #{best_game}")
+            st.divider()
+
+            # --- 4. Improvement Tracker ---
+            st.markdown("#### Improvement Tracker")
+            if len(hero_df) >= 10:
+                split_point = len(hero_df) // 2
+                first_half = hero_df.iloc[:split_point]
+                second_half = hero_df.iloc[split_point:]
+                improvements = []
+                for s in _available_insight:
+                    fh_avg = first_half[s].mean()
+                    sh_avg = second_half[s].mean()
+                    if fh_avg != 0:
+                        change_pct = ((sh_avg - fh_avg) / abs(fh_avg)) * 100
+                    else:
+                        change_pct = 0
+                    improvements.append({'Stat': s, f'First {split_point} Games': round(fh_avg, 2),
+                        f'Last {len(hero_df) - split_point} Games': round(sh_avg, 2), 'Change %': round(change_pct, 1)})
+                imp_df = pd.DataFrame(improvements).sort_values('Change %', ascending=False)
+                imp1, imp2 = st.columns(2)
+                with imp1:
+                    st.markdown("**Most Improved:**")
+                    for _, row in imp_df.head(5).iterrows():
+                        if row['Change %'] > 0:
+                            st.write(f"**{row['Stat']}**: +{row['Change %']:.0f}%")
+                with imp2:
+                    st.markdown("**Declined:**")
+                    for _, row in imp_df.tail(5).iterrows():
+                        if row['Change %'] < 0:
+                            st.write(f"**{row['Stat']}**: {row['Change %']:.0f}%")
+                with st.expander("Full Improvement Table"):
+                    st.dataframe(imp_df.style.background_gradient(subset=['Change %'], cmap='RdYlGn'),
+                        use_container_width=True, hide_index=True)
+            else:
+                st.info("Need at least 10 games to track improvement.")
+            st.divider()
+
+            # --- 5. Comeback Rate ---
+            st.markdown("#### Comeback & Resilience")
+            if 'Won' in hero_df.columns and 'Overtime' in hero_df.columns:
+                total_games = len(hero_df)
+                total_wins = int(hero_df['Won'].sum())
+                ot_games_i = hero_df[hero_df['Overtime'] == True]
+                ot_wins = int(ot_games_i['Won'].sum()) if not ot_games_i.empty else 0
+                ot_total = len(ot_games_i)
+                ot_wr = round((ot_wins / ot_total * 100), 1) if ot_total > 0 else 0
+                r1, r2, r3 = st.columns(3)
+                r1.metric("OT Record", f"{ot_wins}W-{ot_total - ot_wins}L" if ot_total > 0 else "No OT games")
+                r2.metric("OT Win Rate", f"{ot_wr}%" if ot_total > 0 else "-")
+                r3.metric("Longest Loss Streak", _max_l_streak)
+                # Win rate in last 10 vs overall
+                if len(hero_df) >= 10:
+                    last_10_wr = round(hero_df.tail(10)['Won'].sum() / 10 * 100, 1)
+                    overall_wr = round(total_wins / total_games * 100, 1)
+                    form_delta = round(last_10_wr - overall_wr, 1)
+                    st.metric("Last 10 Games Win Rate", f"{last_10_wr}%", delta=f"{form_delta:+.1f}% vs career")
+
+        with t9:
+            st.subheader("Situational Analysis")
+            st.caption("How do you perform under different game states and match situations?")
+
+            # --- 1. Goal Distribution by Period ---
+            st.markdown("#### When Do You Score?")
+            _sit_cols = ['Goals_First_Half', 'Goals_Second_Half', 'Goals_Last_Min']
+            if all(c in hero_df.columns for c in _sit_cols):
+                _g1h = int(hero_df['Goals_First_Half'].sum())
+                _g2h = int(hero_df['Goals_Second_Half'].sum())
+                _glm = int(hero_df['Goals_Last_Min'].sum())
+                _total_g = _g1h + _g2h
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("First Half Goals", _g1h, help="Goals in the first 2:30")
+                c2.metric("Second Half Goals", _g2h, help="Goals in the last 2:30")
+                c3.metric("Last Minute Goals", _glm, help="Goals in final 60 seconds")
+                c4.metric("Clutch Goal Rate", f"{round(_glm / max(_total_g, 1) * 100, 1)}%", help="% of goals in last 60s")
+
+                # Period distribution pie chart
+                fig_period = go.Figure(data=[go.Pie(
+                    labels=['First Half', 'Second Half (excl. last min)', 'Last Minute'],
+                    values=[_g1h, max(0, _g2h - _glm), _glm],
+                    marker_colors=['#636EFA', '#EF553B', '#FFA15A'],
+                    hole=0.4,
+                    textinfo='label+percent+value'
+                )])
+                fig_period.update_layout(title="Goal Distribution by Period", height=350,
+                    margin=dict(t=40, b=20, l=20, r=20))
+                st.plotly_chart(fig_period, use_container_width=True)
+
+                # Rolling clutch rate
+                if len(hero_df) >= 5:
+                    hero_df_sit = hero_df.copy()
+                    hero_df_sit['_goals_total'] = hero_df_sit['Goals_First_Half'] + hero_df_sit['Goals_Second_Half']
+                    hero_df_sit['_clutch_pct'] = hero_df_sit['Goals_Last_Min'] / hero_df_sit['_goals_total'].replace(0, np.nan) * 100
+                    hero_df_sit['_late_roll'] = hero_df_sit['Goals_Last_Min'].rolling(10, min_periods=3).mean()
+                    fig_late = go.Figure()
+                    fig_late.add_trace(go.Scatter(x=hero_df_sit['GameNum'], y=hero_df_sit['_late_roll'],
+                        mode='lines', name='Last Min Goals (10-game avg)', line=dict(color='#FFA15A', width=2)))
+                    fig_late.update_layout(title="Late-Game Scoring Trend", xaxis_title="Game #",
+                        yaxis_title="Avg Last-Minute Goals", height=300, margin=dict(t=40, b=20))
+                    st.plotly_chart(fig_late, use_container_width=True)
+            else:
+                st.info("Play more games to see goal distribution data.")
+
+            st.divider()
+
+            # --- 2. Game State Splits ---
+            st.markdown("#### Performance by Game State")
+            _gs_cols = ['Goals_When_Leading', 'Goals_When_Trailing', 'Goals_When_Tied']
+            if all(c in hero_df.columns for c in _gs_cols):
+                _g_lead = int(hero_df['Goals_When_Leading'].sum())
+                _g_trail = int(hero_df['Goals_When_Trailing'].sum())
+                _g_tied = int(hero_df['Goals_When_Tied'].sum())
+                _g_state_total = _g_lead + _g_trail + _g_tied
+
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Goals When Leading", _g_lead,
+                    help=f"{round(_g_lead / max(_g_state_total, 1) * 100, 1)}% of all goals")
+                c2.metric("Goals When Trailing", _g_trail,
+                    help=f"{round(_g_trail / max(_g_state_total, 1) * 100, 1)}% of all goals")
+                c3.metric("Goals When Tied", _g_tied,
+                    help=f"{round(_g_tied / max(_g_state_total, 1) * 100, 1)}% of all goals")
+
+                # Game state bar chart
+                fig_gs = go.Figure(data=[go.Bar(
+                    x=['Leading', 'Trailing', 'Tied'],
+                    y=[_g_lead, _g_trail, _g_tied],
+                    marker_color=['#00CC96', '#EF553B', '#636EFA'],
+                    text=[_g_lead, _g_trail, _g_tied],
+                    textposition='auto'
+                )])
+                fig_gs.update_layout(title="Goals by Game State", yaxis_title="Goals",
+                    height=300, margin=dict(t=40, b=20))
+                st.plotly_chart(fig_gs, use_container_width=True)
+
+                # Strategy insight
+                if _g_state_total > 0:
+                    lead_pct = _g_lead / _g_state_total * 100
+                    trail_pct = _g_trail / _g_state_total * 100
+                    if lead_pct > 45:
+                        st.success(f"You pile on when ahead ({lead_pct:.0f}% of goals when leading). You keep the pressure on.")
+                    elif trail_pct > 45:
+                        st.warning(f"You're a comeback specialist ({trail_pct:.0f}% of goals when trailing). You dig deep when behind.")
+                    else:
+                        st.info("Your scoring is balanced across game states — you're consistent regardless of the scoreboard.")
+
+            st.divider()
+
+            # --- 3. First Goal Impact ---
+            st.markdown("#### First Goal Impact")
+            if 'Scored_First' in hero_df.columns and 'Won' in hero_df.columns:
+                sf_games = hero_df[hero_df['Scored_First'] == True]
+                nsf_games = hero_df[hero_df['Scored_First'] == False]
+                sf_wr = round(sf_games['Won'].mean() * 100, 1) if len(sf_games) > 0 else 0
+                nsf_wr = round(nsf_games['Won'].mean() * 100, 1) if len(nsf_games) > 0 else 0
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Scored First", f"{len(sf_games)}/{len(hero_df)} games")
+                c2.metric("Win Rate (Scored First)", f"{sf_wr}%")
+                c3.metric("Win Rate (Didn't Score First)", f"{nsf_wr}%")
+                wr_diff = round(sf_wr - nsf_wr, 1)
+                c4.metric("First Goal Advantage", f"{wr_diff:+.1f}%",
+                    delta=f"{wr_diff:+.1f}%" if wr_diff != 0 else None)
+
+                if sf_wr > nsf_wr + 15:
+                    st.success(f"First goals matter! You win {wr_diff:.0f}% more when you score first.")
+                elif nsf_wr > sf_wr + 15:
+                    st.info("Interestingly, you actually perform better when the opponent scores first — slow starter energy.")
+
+            st.divider()
+
+            # --- 4. Clutch & Comeback Performance ---
+            st.markdown("#### Clutch & Comebacks")
+            if 'Comeback_Win' in hero_df.columns and 'Blown_Lead' in hero_df.columns:
+                _cb_wins = int(hero_df['Comeback_Win'].sum())
+                _blown = int(hero_df['Blown_Lead'].sum())
+                _saves_lm = int(hero_df['Saves_Last_Min'].sum()) if 'Saves_Last_Min' in hero_df.columns else 0
+                total_g = len(hero_df)
+
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Comeback Wins", _cb_wins, help="Games where opponent led but you won")
+                c2.metric("Blown Leads", _blown, help="Games where you led but lost")
+                c3.metric("Last Minute Saves", _saves_lm)
+                # Clutch ratio
+                clutch_ratio = round(_cb_wins / max(_cb_wins + _blown, 1) * 100, 1)
+                c4.metric("Clutch Ratio", f"{clutch_ratio}%",
+                    help="Comeback Wins / (Comeback Wins + Blown Leads)")
+
+                if _cb_wins > _blown:
+                    st.success(f"Clutch performer! {_cb_wins} comeback wins vs {_blown} blown leads.")
+                elif _blown > _cb_wins:
+                    st.warning(f"Lead management needs work — {_blown} blown leads vs {_cb_wins} comebacks.")
+                else:
+                    st.info("Balanced — you come back as often as you give up leads.")
+
+                # Rolling comeback trend
+                if len(hero_df) >= 10:
+                    _cb_roll = hero_df['Comeback_Win'].astype(int).rolling(15, min_periods=5).mean() * 100
+                    _bl_roll = hero_df['Blown_Lead'].astype(int).rolling(15, min_periods=5).mean() * 100
+                    fig_cb = go.Figure()
+                    fig_cb.add_trace(go.Scatter(x=hero_df['GameNum'], y=_cb_roll,
+                        mode='lines', name='Comeback Win %', line=dict(color='#00CC96', width=2)))
+                    fig_cb.add_trace(go.Scatter(x=hero_df['GameNum'], y=_bl_roll,
+                        mode='lines', name='Blown Lead %', line=dict(color='#EF553B', width=2)))
+                    fig_cb.update_layout(title="Comeback vs Blown Lead Trends (15-game rolling)",
+                        xaxis_title="Game #", yaxis_title="Rate (%)", height=300,
+                        margin=dict(t=40, b=20))
+                    st.plotly_chart(fig_cb, use_container_width=True)
+
+            st.divider()
+
+            # --- 5. Close Game Analysis ---
+            st.markdown("#### Close Game Analysis")
+            if 'Goals' in hero_df.columns and 'Won' in hero_df.columns:
+                # Detect close games via team goal differential
+                # We'll estimate: if player goals + assists is low and game was close
+                # Better approach: use actual team scores from the data
+                all_games = hero_df.copy()
+                # We can't easily get opponent score, but we can proxy via Overtime flag
+                if 'Overtime' in all_games.columns:
+                    ot_games = all_games[all_games['Overtime'] == True]
+                    non_ot = all_games[all_games['Overtime'] == False]
+                    ot_wr = round(ot_games['Won'].mean() * 100, 1) if len(ot_games) > 0 else 0
+                    non_ot_wr = round(non_ot['Won'].mean() * 100, 1) if len(non_ot) > 0 else 0
+
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Overtime Games", f"{len(ot_games)} ({round(len(ot_games)/max(len(all_games),1)*100,1)}%)")
+                    c2.metric("OT Win Rate", f"{ot_wr}%")
+                    c3.metric("Regulation Win Rate", f"{non_ot_wr}%")
+
+                    if ot_wr > non_ot_wr + 10:
+                        st.success("You thrive under pressure — higher win rate in OT than regulation!")
+                    elif non_ot_wr > ot_wr + 10:
+                        st.info("You're better at closing games in regulation. OT is a coin flip for you.")
+
+            st.divider()
+
+            # --- 6. Saves Distribution ---
+            st.markdown("#### Defensive Timing")
+            if 'Saves_Last_Min' in hero_df.columns and 'Saves' in hero_df.columns:
+                total_saves = int(hero_df['Saves'].sum())
+                late_saves = int(hero_df['Saves_Last_Min'].sum())
+                early_saves = total_saves - late_saves
+
+                if total_saves > 0:
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Total Saves", total_saves)
+                    c2.metric("Last Minute Saves", late_saves)
+                    c3.metric("Clutch Save Rate", f"{round(late_saves / total_saves * 100, 1)}%")
+
+                    fig_sv = go.Figure(data=[go.Pie(
+                        labels=['Regular Saves', 'Last Minute Saves'],
+                        values=[early_saves, late_saves],
+                        marker_colors=['#636EFA', '#EF553B'],
+                        hole=0.4,
+                        textinfo='label+percent+value'
+                    )])
+                    fig_sv.update_layout(title="Save Distribution by Timing", height=300,
+                        margin=dict(t=40, b=20, l=20, r=20))
+                    st.plotly_chart(fig_sv, use_container_width=True)
+
         with t5:
 
             st.subheader("Match Log")
