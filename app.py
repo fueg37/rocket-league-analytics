@@ -1326,12 +1326,17 @@ def calculate_expected_saves(manager, player_map, shot_df):
         defending_team = "Orange" if shot_team == "Blue" else "Blue"
         target_y = 5120.0 if shot_team == "Blue" else -5120.0
 
-        # Shot properties
-        shot_speed = np.sqrt(shot['VelX']**2 + shot['VelY']**2 + shot['VelZ']**2)
+        # Shot properties — shot_df stores Speed (scalar), X, Y only
+        shot_speed = shot['Speed']
         dist_to_goal = np.sqrt(shot['X']**2 + (target_y - shot['Y'])**2)
-        # Angle off center: how far from goal center the ball is aimed
         angle_off_center = np.arctan2(abs(shot['X']), abs(target_y - shot['Y']))
-        shot_z = max(shot['Z'], 0)
+        # Get ball Z from game_df since shot_df only stores X, Y
+        shot_z = 0
+        if 'ball' in game_df and frame in game_df.index:
+            try:
+                shot_z = max(game_df['ball'].loc[frame]['pos_z'], 0)
+            except (KeyError, IndexError):
+                pass
 
         # Find nearest defending player at this frame
         nearest_defender = None
