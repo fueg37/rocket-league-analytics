@@ -5,3 +5,4 @@ numpy
 sprocket-carball
 protobuf<4.0.0
 Pillow
+scikit-learn  # optional: enables trained win probability model

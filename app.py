@@ -37,6 +37,16 @@ try:
 except ImportError:
     pass
 
+SKLEARN_AVAILABLE = False
+try:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    SKLEARN_AVAILABLE = True
+except ImportError:
+    pass
+
+import json
+
 # Load pitch background image as base64 for Plotly
 PITCH_IMAGE_B64 = None
 _pitch_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "simple-pitch.png")
@@ -51,6 +61,7 @@ st.title("🚀 Rocket League Pro Analytics (Final Version)")
 DB_FILE = "career_stats.csv"
 KICKOFF_DB_FILE = "career_kickoffs.csv"
 REPLAY_FPS = 30  # Standard replay frame rate
+WIN_PROB_MODEL_FILE = "win_prob_model.json"
 
 # --- 3. HELPER: DATABASE MANAGEMENT ---
 def load_data():
@@ -333,6 +344,171 @@ def calculate_win_probability(manager):
         probs.append(p * 100)
 
     return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'IsOT': is_ot})
+
+# --- 7b. WIN PROBABILITY MODEL (TRAINED) ---
+def extract_win_prob_training_data(manager, game_df, proto):
+    """Extract per-second training samples from a replay for the win probability model."""
+    max_frame = game_df.index.max()
+    match_duration = max_frame / float(REPLAY_FPS)
+    if match_duration < 60:
+        return pd.DataFrame()
+    blue_goals_total = sum(p.goals for p in proto.players if not p.is_orange)
+    orange_goals_total = sum(p.goals for p in proto.players if p.is_orange)
+    if blue_goals_total == orange_goals_total:
+        return pd.DataFrame()
+    blue_won = 1 if blue_goals_total > orange_goals_total else 0
+
+    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    blue_gf, orange_gf = [], []
+    if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
+        for g in proto.game_metadata.goals:
+            frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
+            pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
+            team = _pid_team.get(pid, "Blue")
+            (blue_gf if team == "Blue" else orange_gf).append(frame)
+
+    ball_df = game_df['ball'] if 'ball' in game_df else None
+    ball_idx = ball_df.index.values if ball_df is not None else np.array([])
+    ball_y_arr = ball_df['pos_y'].values if ball_df is not None and 'pos_y' in ball_df.columns else np.array([])
+
+    samples = []
+    reg_end = min(int(max_frame), 300 * REPLAY_FPS)
+    for f in range(0, reg_end, REPLAY_FPS):
+        b_score = sum(1 for gf in blue_gf if gf <= f)
+        o_score = sum(1 for gf in orange_gf if gf <= f)
+        time_remaining = max(300 - f / float(REPLAY_FPS), 0)
+        ball_y_norm = 0.0
+        if len(ball_idx) > 0:
+            bi = min(np.searchsorted(ball_idx, f), len(ball_y_arr) - 1)
+            ball_y_norm = ball_y_arr[bi] / 5120.0
+        boost_diff = 0.0
+        bl_b, or_b = [], []
+        for p in proto.players:
+            if p.name in game_df and 'boost' in game_df[p.name].columns:
+                pdf = game_df[p.name]
+                pi = np.searchsorted(pdf.index.values, f)
+                pi = min(pi, len(pdf) - 1)
+                if pi >= 0:
+                    try:
+                        bv = pdf.iloc[pi]['boost']
+                        if not np.isnan(bv):
+                            (or_b if p.is_orange else bl_b).append(bv)
+                    except:
+                        pass
+        if bl_b and or_b:
+            boost_diff = np.mean(bl_b) - np.mean(or_b)
+        samples.append({'score_diff': b_score - o_score, 'time_remaining': time_remaining,
+                        'boost_diff': boost_diff, 'ball_y_normalized': ball_y_norm, 'blue_won': blue_won})
+    return pd.DataFrame(samples)
+
+def train_win_probability_model(training_data, min_samples=500):
+    """Train a logistic regression win probability model. Returns (model, scaler) or (None, None)."""
+    if not SKLEARN_AVAILABLE or training_data is None or len(training_data) < min_samples:
+        return None, None
+    features = ['score_diff', 'time_remaining', 'boost_diff', 'ball_y_normalized']
+    X = training_data[features].values
+    y = training_data['blue_won'].values
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+    model = LogisticRegression(C=1.0, max_iter=1000)
+    model.fit(X_scaled, y)
+    return model, scaler
+
+def save_win_prob_model(model, scaler, filepath=WIN_PROB_MODEL_FILE):
+    """Save trained model coefficients as JSON."""
+    if model is None or scaler is None:
+        return
+    data = {
+        'coef': model.coef_.tolist(),
+        'intercept': model.intercept_.tolist(),
+        'scaler_mean': scaler.mean_.tolist(),
+        'scaler_scale': scaler.scale_.tolist(),
+        'n_training_samples': int(model.n_features_in_) if hasattr(model, 'n_features_in_') else 0
+    }
+    with open(filepath, 'w') as f:
+        json.dump(data, f)
+
+def load_win_prob_model(filepath=WIN_PROB_MODEL_FILE):
+    """Load a trained win probability model from JSON. Returns (model, scaler) or (None, None)."""
+    if not SKLEARN_AVAILABLE or not os.path.exists(filepath):
+        return None, None
+    try:
+        with open(filepath, 'r') as f:
+            data = json.load(f)
+        model = LogisticRegression()
+        model.coef_ = np.array(data['coef'])
+        model.intercept_ = np.array(data['intercept'])
+        model.classes_ = np.array([0, 1])
+        scaler = StandardScaler()
+        scaler.mean_ = np.array(data['scaler_mean'])
+        scaler.scale_ = np.array(data['scaler_scale'])
+        scaler.n_features_in_ = len(scaler.mean_)
+        return model, scaler
+    except Exception:
+        return None, None
+
+def calculate_win_probability_trained(manager, model, scaler):
+    """Calculate win probability using a trained model. Falls back to hand-tuned if model is None."""
+    if model is None or scaler is None:
+        return calculate_win_probability(manager), False
+    proto = manager.get_protobuf_data()
+    game_df = manager.get_data_frame()
+    max_frame = game_df.index.max()
+    match_duration_s = max_frame / float(REPLAY_FPS)
+    is_ot = match_duration_s > 305
+    frames = np.arange(0, max_frame, REPLAY_FPS)
+    seconds = frames / float(REPLAY_FPS)
+
+    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    blue_gf, orange_gf = [], []
+    if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
+        for g in proto.game_metadata.goals:
+            frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
+            pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
+            team = _pid_team.get(pid, "Blue")
+            (blue_gf if team == "Blue" else orange_gf).append(min(frame, max_frame))
+
+    ball_df = game_df['ball'] if 'ball' in game_df else None
+    ball_idx = ball_df.index.values if ball_df is not None else np.array([])
+    ball_y_arr = ball_df['pos_y'].values if ball_df is not None and 'pos_y' in ball_df.columns else np.array([])
+
+    probs = []
+    for f, t in zip(frames, seconds):
+        b_score = sum(1 for gf in blue_gf if gf <= f)
+        o_score = sum(1 for gf in orange_gf if gf <= f)
+        diff = b_score - o_score
+        if t >= 300 and diff == 0:
+            probs.append(50.0)
+            continue
+        if t >= 300 and diff != 0:
+            probs.append(95.0 if diff > 0 else 5.0)
+            continue
+        time_remaining = max(300 - t, 1.0)
+        ball_y_norm = 0.0
+        if len(ball_idx) > 0:
+            bi = min(np.searchsorted(ball_idx, f), len(ball_y_arr) - 1)
+            ball_y_norm = ball_y_arr[bi] / 5120.0
+        boost_diff = 0.0
+        bl_b, or_b = [], []
+        for p in proto.players:
+            if p.name in game_df and 'boost' in game_df[p.name].columns:
+                pdf = game_df[p.name]
+                pi = min(np.searchsorted(pdf.index.values, f), len(pdf) - 1)
+                if pi >= 0:
+                    try:
+                        bv = pdf.iloc[pi]['boost']
+                        if not np.isnan(bv):
+                            (or_b if p.is_orange else bl_b).append(bv)
+                    except:
+                        pass
+        if bl_b and or_b:
+            boost_diff = np.mean(bl_b) - np.mean(or_b)
+        X = np.array([[diff, time_remaining, boost_diff, ball_y_norm]])
+        X_scaled = scaler.transform(X)
+        p = model.predict_proba(X_scaled)[0][1] * 100
+        probs.append(p)
+
+    return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'IsOT': is_ot}), True
 
 # --- 8. MATH: KICKOFFS ---
 def calculate_kickoff_stats(manager, player_map, match_id=""):
@@ -876,8 +1052,231 @@ def calculate_xg_against(manager, player_map, shot_df):
         })
     return pd.DataFrame(results)
 
+# --- 9f. MATH: VAEP (Valuing Actions by Estimating Probabilities) ---
+def estimate_scoring_threat(ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz, team, nearest_own_dist, nearest_opp_dist):
+    """Estimate scoring threat for a given game state. Returns [0, 0.99]."""
+    target_y = 5120.0 if team == "Blue" else -5120.0
+    dist_to_goal = np.sqrt(ball_x**2 + (target_y - ball_y)**2)
+    positional_threat = np.exp(-0.0004 * dist_to_goal)
+    vel_towards = ball_vy if team == "Blue" else -ball_vy
+    vel_bonus = max(0.0, vel_towards / 4000.0) * 0.3
+    dist_diff = nearest_opp_dist - nearest_own_dist
+    possession_factor = 1.0 / (1.0 + np.exp(-dist_diff / 500.0))
+    proximity_bonus = 0.2 * max(0.0, 1.0 - dist_to_goal / 2000.0) if dist_to_goal < 2000 else 0.0
+    height_factor = 1.0 if ball_z < 500 else 0.85
+    threat = (positional_threat * 0.5 + possession_factor * 0.3 + vel_bonus + proximity_bonus) * height_factor
+    return max(0.0, min(threat, 0.99))
+
+def calculate_vaep(manager, player_map, shot_df):
+    """Calculate VAEP for each touch. Returns (vaep_df, vaep_summary)."""
+    proto = manager.get_protobuf_data()
+    game_df = manager.get_data_frame()
+    max_frame = game_df.index.max()
+    player_teams = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
+    player_names = {str(p.id.id): p.name for p in proto.players}
+
+    ball_df = game_df['ball'] if 'ball' in game_df else None
+    if ball_df is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Pre-compute arrays for fast lookup
+    ball_frames = ball_df.index.values
+    ball_x = ball_df['pos_x'].values
+    ball_y = ball_df['pos_y'].values
+    ball_z = ball_df['pos_z'].values if 'pos_z' in ball_df.columns else np.zeros(len(ball_df))
+    ball_vx = ball_df['vel_x'].values if 'vel_x' in ball_df.columns else np.zeros(len(ball_df))
+    ball_vy = ball_df['vel_y'].values if 'vel_y' in ball_df.columns else np.zeros(len(ball_df))
+    ball_vz = ball_df['vel_z'].values if 'vel_z' in ball_df.columns else np.zeros(len(ball_df))
+
+    player_pos = {}
+    for p in proto.players:
+        if p.name in game_df:
+            pdf = game_df[p.name]
+            if 'pos_x' in pdf.columns:
+                player_pos[p.name] = {
+                    'team': "Orange" if p.is_orange else "Blue",
+                    'x': pdf['pos_x'].values, 'y': pdf['pos_y'].values,
+                    'frames': pdf.index.values
+                }
+
+    def _ball_at(frame):
+        bi = min(np.searchsorted(ball_frames, frame), len(ball_x) - 1)
+        if bi < 0:
+            return None
+        return ball_x[bi], ball_y[bi], ball_z[bi], ball_vx[bi], ball_vy[bi], ball_vz[bi]
+
+    def _nearest_dists(frame, team):
+        bs = _ball_at(frame)
+        if bs is None:
+            return 5000.0, 5000.0
+        bx, by = bs[0], bs[1]
+        own_min, opp_min = 10000.0, 10000.0
+        for pname, pd_info in player_pos.items():
+            pi = min(np.searchsorted(pd_info['frames'], frame), len(pd_info['x']) - 1)
+            if pi < 0:
+                continue
+            dist = np.sqrt((pd_info['x'][pi] - bx)**2 + (pd_info['y'][pi] - by)**2)
+            if pd_info['team'] == team:
+                own_min = min(own_min, dist)
+            else:
+                opp_min = min(opp_min, dist)
+        return own_min, opp_min
+
+    touches = []
+    for hit in proto.game_stats.hits:
+        if not hit.player_id:
+            continue
+        pid = str(hit.player_id.id)
+        team = player_teams.get(pid)
+        name = player_names.get(pid)
+        if not team or not name:
+            continue
+        frame = hit.frame_number
+        f_before = max(0, frame - 1)
+        f_after = min(max_frame, frame + 5)
+        sb = _ball_at(f_before)
+        sa = _ball_at(f_after)
+        if sb is None or sa is None:
+            continue
+        own_b, opp_b = _nearest_dists(f_before, team)
+        own_a, opp_a = _nearest_dists(f_after, team)
+        threat_before = estimate_scoring_threat(sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], team, own_b, opp_b)
+        threat_after = estimate_scoring_threat(sa[0], sa[1], sa[2], sa[3], sa[4], sa[5], team, own_a, opp_a)
+        vaep = round(threat_after - threat_before, 4)
+        touches.append({'Player': name, 'Team': team, 'Frame': frame,
+                        'Time': round(frame / REPLAY_FPS, 1), 'VAEP': vaep,
+                        'BallX': sa[0], 'BallY': sa[1]})
+
+    vaep_df = pd.DataFrame(touches)
+    summary = []
+    for p in proto.players:
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        pt = vaep_df[vaep_df['Player'] == name] if not vaep_df.empty else pd.DataFrame()
+        summary.append({
+            'Name': name, 'Team': team,
+            'Total_VAEP': round(pt['VAEP'].sum(), 3) if not pt.empty else 0,
+            'Avg_VAEP': round(pt['VAEP'].mean(), 4) if not pt.empty else 0,
+            'Positive_Actions': int((pt['VAEP'] > 0).sum()) if not pt.empty else 0,
+            'Negative_Actions': int((pt['VAEP'] < 0).sum()) if not pt.empty else 0
+        })
+    return vaep_df, pd.DataFrame(summary)
+
+# --- 9g. MATH: ROTATION ANALYSIS ---
+def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
+    """Analyze rotation patterns: 1st/2nd/3rd man roles and double commits.
+    Returns (rotation_timeline, rotation_summary, double_commits_df)."""
+    blue_players = [p.name for p in proto.players if not p.is_orange]
+    orange_players = [p.name for p in proto.players if p.is_orange]
+    ball_df = game_df['ball'] if 'ball' in game_df else None
+    if ball_df is None:
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+
+    max_frame = game_df.index.max()
+    ball_frames = ball_df.index.values
+    ball_x_arr = ball_df['pos_x'].values
+    ball_y_arr = ball_df['pos_y'].values
+
+    player_data = {}
+    for p in proto.players:
+        if p.name in game_df:
+            pdf = game_df[p.name]
+            if 'pos_x' in pdf.columns:
+                player_data[p.name] = {
+                    'x': pdf['pos_x'].values, 'y': pdf['pos_y'].values,
+                    'frames': pdf.index.values,
+                    'team': "Orange" if p.is_orange else "Blue"
+                }
+
+    timeline = []
+    double_commits_raw = []
+    role_counts = {p.name: {'1st': 0, '2nd': 0, '3rd': 0, 'total': 0} for p in proto.players}
+    rotation_break_counts = {p.name: 0 for p in proto.players}
+
+    for frame in range(0, max_frame, sample_step):
+        bi = min(np.searchsorted(ball_frames, frame), len(ball_x_arr) - 1)
+        if bi < 0:
+            continue
+        bx, by = ball_x_arr[bi], ball_y_arr[bi]
+        time_s = round(frame / REPLAY_FPS, 1)
+
+        for team_players, team_name in [(blue_players, "Blue"), (orange_players, "Orange")]:
+            distances = []
+            for name in team_players:
+                if name not in player_data:
+                    continue
+                pd_info = player_data[name]
+                pi = min(np.searchsorted(pd_info['frames'], frame), len(pd_info['x']) - 1)
+                if pi < 0:
+                    continue
+                px, py = pd_info['x'][pi], pd_info['y'][pi]
+                dist = np.sqrt((px - bx)**2 + (py - by)**2)
+                in_attack = py > 0 if team_name == "Blue" else py < 0
+                distances.append((name, dist, px, py, in_attack))
+
+            distances.sort(key=lambda x: x[1])
+            for rank, (name, dist, px, py, in_attack) in enumerate(distances):
+                role = ['1st', '2nd', '3rd'][min(rank, 2)]
+                timeline.append({'Frame': frame, 'Time': time_s, 'Player': name, 'Role': role, 'Team': team_name})
+                role_counts[name]['total'] += 1
+                role_counts[name][role] += 1
+
+            # Double commit: 2+ players within 800 units of ball in attacking half
+            attacking_close = [(n, d) for n, d, px, py, ia in distances if d < 800 and ia]
+            if len(attacking_close) >= 2:
+                double_commits_raw.append({
+                    'Frame': frame, 'Time': time_s,
+                    'Player1': attacking_close[0][0], 'Player2': attacking_close[1][0],
+                    'Team': team_name, 'BallX': bx, 'BallY': by
+                })
+
+            # Rotation break: all players in attacking half (nobody back)
+            if len(distances) >= 3:
+                all_attacking = all(ia for _, _, _, _, ia in distances)
+                if all_attacking:
+                    for name, _, _, _, _ in distances:
+                        rotation_break_counts[name] += 1
+
+    rotation_timeline = pd.DataFrame(timeline)
+
+    # Cluster double commits within 30 frames
+    dc_clustered = []
+    if double_commits_raw:
+        dc_raw_df = pd.DataFrame(double_commits_raw)
+        for team in dc_raw_df['Team'].unique():
+            team_dc = dc_raw_df[dc_raw_df['Team'] == team].sort_values('Frame')
+            prev_frame = -100
+            for _, row in team_dc.iterrows():
+                if row['Frame'] - prev_frame > 30:
+                    dc_clustered.append(row.to_dict())
+                prev_frame = row['Frame']
+    double_commits_df = pd.DataFrame(dc_clustered) if dc_clustered else pd.DataFrame()
+
+    # Build summary
+    summary = []
+    for p in proto.players:
+        name = p.name
+        team = "Orange" if p.is_orange else "Blue"
+        rc = role_counts.get(name, {'1st': 0, '2nd': 0, '3rd': 0, 'total': 0})
+        total = max(rc['total'], 1)
+        dc_count = 0
+        if not double_commits_df.empty:
+            dc_count = len(double_commits_df[(double_commits_df['Player1'] == name) | (double_commits_df['Player2'] == name)])
+        # Scale rotation breaks back from sample_step
+        rot_breaks = rotation_break_counts.get(name, 0)
+        summary.append({
+            'Name': name, 'Team': team,
+            'Time_1st%': round((rc['1st'] / total) * 100, 1),
+            'Time_2nd%': round((rc['2nd'] / total) * 100, 1),
+            'Time_3rd%': round((rc['3rd'] / total) * 100, 1),
+            'DoubleCommits': dc_count,
+            'RotationBreaks': rot_breaks
+        })
+    rotation_summary = pd.DataFrame(summary)
+    return rotation_timeline, rotation_summary, double_commits_df
+
 # --- 10. MATH: AGGREGATE ---
-def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None):
+def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None, vaep_summary=None, rotation_summary=None):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     stats = []
@@ -923,6 +1322,8 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 "Avg Recovery (s)": 0, "Fast Recoveries": 0, "Recovery < 1s %": 0,
                 "Shadow %": 0, "Pressure Time (s)": 0,
                 "xGA": 0, "Shots Faced": 0, "Goals Conceded (nearest)": 0,
+                "Total_VAEP": 0.0, "Avg_VAEP": 0.0, "Positive_Actions": 0, "Negative_Actions": 0,
+                "Time_1st%": 0.0, "Time_2nd%": 0.0, "Time_3rd%": 0.0, "DoubleCommits": 0, "RotationBreaks": 0,
                 "Overtime": False, "Luck": 0.0, "Timestamp": ""
             }
             if hasattr(player, 'stats') and hasattr(player.stats, 'boost'):
@@ -984,6 +1385,8 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
                 (recovery_df, ['Avg Recovery (s)', 'Fast Recoveries', 'Recovery < 1s %']),
                 (defense_df, ['Shadow %', 'Pressure Time (s)']),
                 (xga_df, ['xGA', 'Shots Faced', 'Goals Conceded (nearest)']),
+                (vaep_summary, ['Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']),
+                (rotation_summary, ['Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits', 'RotationBreaks']),
             ]:
                 if extra_df is not None and not extra_df.empty:
                     row = extra_df[extra_df['Name'] == name]
@@ -1339,7 +1742,15 @@ if app_mode == "🔍 Single Match Analysis":
                 recovery_df = calculate_recovery_time(manager, temp_map)
                 defense_df = calculate_defensive_pressure(manager, game_df, proto)
                 xga_df = calculate_xg_against(manager, temp_map, shot_df)
-                df = calculate_final_stats(manager, shot_df, pass_df, aerial_df, recovery_df, defense_df, xga_df)
+                vaep_df, vaep_summary = calculate_vaep(manager, temp_map, shot_df)
+                rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(manager, game_df, proto)
+                wp_model, wp_scaler = load_win_prob_model()
+                wp_result = calculate_win_probability_trained(manager, wp_model, wp_scaler)
+                if isinstance(wp_result, tuple):
+                    win_prob_df, wp_model_used = wp_result
+                else:
+                    win_prob_df, wp_model_used = wp_result, False
+                df = calculate_final_stats(manager, shot_df, pass_df, aerial_df, recovery_df, defense_df, xga_df, vaep_summary, rotation_summary)
                 is_overtime = detect_overtime(manager)  # NEW
                 if not df.empty:
                     df['Overtime'] = is_overtime
@@ -1358,7 +1769,7 @@ if app_mode == "🔍 Single Match Analysis":
             render_scoreboard(df, shot_df, is_overtime)
             render_dashboard(df, shot_df, pass_df)
             
-            t1, t2, t3, t3b, t4, t5, t6, t8, t7 = st.tabs(["🚀 Kickoffs", "🌊 Match Narrative", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "⚡ Speed", "🛡️ Advanced", "📸 Export"])
+            t1, t2, t3, t3b, t4, t5, t6, t8, t9, t7 = st.tabs(["🚀 Kickoffs", "🌊 Match Narrative", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "⚡ Speed", "🛡️ Advanced", "🔄 Rotation", "📸 Export"])
             
             with t1:
                 st.subheader("Kickoff Analysis")
@@ -1410,7 +1821,6 @@ if app_mode == "🔍 Single Match Analysis":
                 st.subheader("Match Narrative")
                 # --- A. WIN PROBABILITY CHART ---
                 try:
-                    win_prob_df = calculate_win_probability(manager)
                     if not win_prob_df.empty:
                         fig_prob = go.Figure()
                         fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy', mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.2)', name='Blue Win %', showlegend=False))
@@ -1421,6 +1831,7 @@ if app_mode == "🔍 Single Match Analysis":
                             fig_prob.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT Start")
                         fig_prob.update_layout(title="🏆 Win Probability" + (" (Overtime)" if is_overtime else ""), yaxis=dict(title="Blue Win %", range=[0, 100], showgrid=False), xaxis=dict(title="Time (Seconds)", showgrid=False), plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=250, margin=dict(l=20, r=20, t=40, b=20))
                         st.plotly_chart(fig_prob, use_container_width=True)
+                        st.caption("Model: " + ("Trained (logistic regression on career data)" if wp_model_used else "Hand-tuned heuristic") + ". Process 15+ replays in Season mode to train a data-driven model.")
                 except Exception as e: st.error(f"Could not calculate Win Probability: {e}")
                 st.divider()
 
@@ -1775,6 +2186,119 @@ if app_mode == "🔍 Single Match Analysis":
                     xga_cols = ['Name', 'Team', 'Shots Faced', 'xGA', 'Goals Conceded (nearest)', 'Avg Dist to Shot', 'High xG Faced']
                     st.dataframe(xga_df[xga_cols].sort_values('xGA', ascending=False), use_container_width=True, hide_index=True)
                     st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
+                st.divider()
+
+                # --- SECTION 6: Action Value (VAEP) ---
+                st.markdown("#### Action Value (VAEP)")
+                if not vaep_summary.empty:
+                    vc1, vc2 = st.columns(2)
+                    with vc1:
+                        fig_vaep_bar = px.bar(vaep_summary.sort_values('Total_VAEP', ascending=False),
+                            x='Name', y='Total_VAEP', color='Team',
+                            title="Total VAEP per Player",
+                            color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        fig_vaep_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        st.plotly_chart(fig_vaep_bar, use_container_width=True)
+                    with vc2:
+                        if not vaep_df.empty:
+                            fig_vaep_scatter = go.Figure()
+                            for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                                t_data = vaep_df[vaep_df['Team'] == team]
+                                if not t_data.empty:
+                                    colors_arr = ['#00cc96' if v > 0 else '#EF553B' for v in t_data['VAEP']]
+                                    fig_vaep_scatter.add_trace(go.Scatter(
+                                        x=t_data['Time'], y=t_data['VAEP'], mode='markers',
+                                        marker=dict(size=5, color=colors_arr, opacity=0.6),
+                                        name=team, text=t_data['Player'],
+                                        hovertemplate="<b>%{text}</b><br>Time: %{x}s<br>VAEP: %{y:.3f}<extra></extra>"))
+                            fig_vaep_scatter.add_hline(y=0, line_dash="dot", line_color="gray")
+                            fig_vaep_scatter.update_layout(title="Touch VAEP Timeline (green=positive, red=negative)",
+                                xaxis_title="Time (s)", yaxis_title="VAEP",
+                                plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=350)
+                            st.plotly_chart(fig_vaep_scatter, use_container_width=True)
+                    vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
+                    st.dataframe(vaep_summary[vaep_show_cols].sort_values('Total_VAEP', ascending=False),
+                        use_container_width=True, hide_index=True)
+                    st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
+                else:
+                    st.info("No VAEP data available.")
+
+            with t9:
+                st.subheader("Rotation Analysis")
+                if not rotation_summary.empty:
+                    # Role time distribution stacked bar
+                    st.markdown("#### Role Distribution")
+                    rc1, rc2 = st.columns(2)
+                    with rc1:
+                        fig_roles = go.Figure()
+                        for role, color in [('1st', '#EF553B'), ('2nd', '#FFA15A'), ('3rd', '#00CC96')]:
+                            col_name = f'Time_{role}%'
+                            fig_roles.add_trace(go.Bar(
+                                x=rotation_summary['Name'], y=rotation_summary[col_name],
+                                name=f'{role} Man', marker_color=color))
+                        fig_roles.update_layout(barmode='stack', title="Time Spent as 1st/2nd/3rd Man",
+                            yaxis_title="% of Match", plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
+                            font=dict(color='white'), legend=dict(orientation='h', y=1.12))
+                        st.plotly_chart(fig_roles, use_container_width=True)
+                    with rc2:
+                        # Team comparison
+                        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                            team_data = rotation_summary[rotation_summary['Team'] == team]
+                            if not team_data.empty:
+                                st.markdown(f"**{team} Team**")
+                                st.dataframe(team_data[['Name', 'Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits']].reset_index(drop=True),
+                                    use_container_width=True, hide_index=True)
+
+                    st.divider()
+
+                    # Role timeline heatmap
+                    if not rotation_timeline.empty:
+                        st.markdown("#### Role Timeline")
+                        for team in ["Blue", "Orange"]:
+                            team_tl = rotation_timeline[rotation_timeline['Team'] == team]
+                            if team_tl.empty:
+                                continue
+                            role_map = {'1st': 1, '2nd': 2, '3rd': 3}
+                            team_tl = team_tl.copy()
+                            team_tl['RoleNum'] = team_tl['Role'].map(role_map)
+                            players = sorted(team_tl['Player'].unique())
+                            # Sample to avoid too many points
+                            sampled = team_tl.iloc[::3] if len(team_tl) > 5000 else team_tl
+                            fig_tl = go.Figure()
+                            fig_tl.add_trace(go.Heatmap(
+                                x=sampled['Time'], y=sampled['Player'], z=sampled['RoleNum'],
+                                colorscale=[[0, '#EF553B'], [0.5, '#FFA15A'], [1.0, '#00CC96']],
+                                zmin=1, zmax=3, showscale=True,
+                                colorbar=dict(title="Role", tickvals=[1, 2, 3], ticktext=['1st', '2nd', '3rd'])))
+                            fig_tl.update_layout(title=f"{team} Rotation Timeline",
+                                xaxis_title="Time (s)", yaxis_title="Player",
+                                plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
+                                font=dict(color='white'), height=250)
+                            st.plotly_chart(fig_tl, use_container_width=True)
+
+                    st.divider()
+
+                    # Double commit map
+                    if not double_commits_df.empty:
+                        st.markdown(f"#### Double Commits ({len(double_commits_df)} detected)")
+                        fig_dc = go.Figure()
+                        fig_dc.update_layout(get_field_layout("Double Commit Locations"))
+                        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                            t_dc = double_commits_df[double_commits_df['Team'] == team] if 'Team' in double_commits_df.columns else pd.DataFrame()
+                            if not t_dc.empty:
+                                fig_dc.add_trace(go.Scatter(
+                                    x=t_dc['BallX'], y=t_dc['BallY'], mode='markers',
+                                    marker=dict(size=14, color=color, symbol='x', line=dict(width=2, color='white')),
+                                    name=f'{team} ({len(t_dc)})',
+                                    text=[f"{r['Player1']} + {r['Player2']} @ {r['Time']}s" for _, r in t_dc.iterrows()],
+                                    hovertemplate="<b>%{text}</b><extra></extra>"))
+                        st.plotly_chart(fig_dc, use_container_width=True)
+                    else:
+                        st.success("No double commits detected!")
+
+                    st.caption("1st man = closest to ball, 2nd = support, 3rd = last back. Double commits = 2 players within 800u of ball in attacking half.")
+                else:
+                    st.info("No rotation data available.")
 
             with t7:
                 st.subheader("Composite Dashboard Export")
@@ -1889,6 +2413,7 @@ elif app_mode == "📈 Season Batch Processor":
     if uploaded_files:
         new_stats_list = []
         new_kickoffs_list = []
+        wp_training_list = []
         bar = st.progress(0)
         for i, f in enumerate(uploaded_files):
             bytes_data = f.read()
@@ -1909,7 +2434,13 @@ elif app_mode == "📈 Season Batch Processor":
                     recovery_df_b = calculate_recovery_time(manager, temp_map)
                     defense_df_b = calculate_defensive_pressure(manager, game_df, proto)
                     xga_df_b = calculate_xg_against(manager, temp_map, shot_df)
-                    stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b)
+                    vaep_df_b, vaep_summary_b = calculate_vaep(manager, temp_map, shot_df)
+                    _, rotation_summary_b, _ = calculate_rotation_analysis(manager, game_df, proto)
+                    stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b, vaep_summary_b, rotation_summary_b)
+                    # Collect win prob training data
+                    wp_train = extract_win_prob_training_data(manager, game_df, proto)
+                    if not wp_train.empty:
+                        wp_training_list.append(wp_train)
                     kickoff_df = calculate_kickoff_stats(manager, temp_map, game_id)
                     if not stats.empty and 'IsBot' in stats.columns and filter_ghosts: stats = stats[~stats['IsBot']]
                     if not stats.empty:
@@ -1947,6 +2478,13 @@ elif app_mode == "📈 Season Batch Processor":
             new_stats_df = pd.concat(new_stats_list, ignore_index=True)
             new_kickoffs_df = pd.concat(new_kickoffs_list, ignore_index=True) if new_kickoffs_list else pd.DataFrame()
             save_data(new_stats_df, new_kickoffs_df)
+            # Train win probability model if enough data
+            if wp_training_list:
+                all_wp_data = pd.concat(wp_training_list, ignore_index=True)
+                wp_model, wp_scaler = train_win_probability_model(all_wp_data)
+                if wp_model is not None:
+                    save_win_prob_model(wp_model, wp_scaler)
+                    st.info(f"Win probability model trained on {len(all_wp_data)} samples from {len(wp_training_list)} matches and saved.")
             st.success(f"Added {len(new_stats_df['MatchID'].unique())} new matches to database!")
             existing_stats, existing_kickoffs = load_data()
         else:
@@ -1960,7 +2498,9 @@ elif app_mode == "📈 Season Batch Processor":
                               ('Aerial Hits', 0), ('Aerial %', 0.0), ('Avg Aerial Height', 0), ('Time Airborne (s)', 0.0),
                               ('Avg Recovery (s)', 0.0), ('Fast Recoveries', 0), ('Recovery < 1s %', 0.0),
                               ('Shadow %', 0.0), ('Pressure Time (s)', 0.0),
-                              ('xGA', 0.0), ('Shots Faced', 0), ('Goals Conceded (nearest)', 0)]:
+                              ('xGA', 0.0), ('Shots Faced', 0), ('Goals Conceded (nearest)', 0),
+                              ('Total_VAEP', 0.0), ('Avg_VAEP', 0.0), ('Positive_Actions', 0), ('Negative_Actions', 0),
+                              ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('Time_3rd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0)]:
             if col not in season.columns:
                 season[col] = default
         st.divider()
@@ -2032,7 +2572,8 @@ elif app_mode == "📈 Season Batch Processor":
         with t1:
             st.subheader("Performance Trends")
             metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'Avg Speed', 'Luck', 'Carry_Time',
-                'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA'])
+                'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA',
+                'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'Time_3rd%', 'DoubleCommits'])
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero, line=dict(color='#007bff', width=3)))
             if teammate != "None":
