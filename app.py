@@ -215,25 +215,23 @@ def calculate_luck_percentage(shot_df, team, actual_goals):
 
 # --- 6c. MATH: OVERTIME DETECTION (FIXED) ---
 def detect_overtime(manager):
-    """
-    Returns True if match went to overtime.
-    Uses carball's internal analysis which accounts for pauses/replays.
-    """
-    # Method 1: Check Python Object (Best)
-    if hasattr(manager.game, 'overtime_seconds'):
-        return manager.game.overtime_seconds > 0
-
+    """Returns True if match went to overtime."""
+    # Method 1: Check Python Object (only return True, fall through on False)
+    if hasattr(manager.game, 'overtime_seconds') and manager.game.overtime_seconds > 0:
+        return True
     # Method 2: Check Protobuf Metadata
     proto = manager.get_protobuf_data()
-    if hasattr(proto, 'game_stats') and hasattr(proto.game_stats, 'overtime_seconds'):
-        return proto.game_stats.overtime_seconds > 0
-
-    # Method 3: Fallback — if match lasted > 305s it went to OT (standard game = 300s)
+    if hasattr(proto, 'game_stats') and hasattr(proto.game_stats, 'overtime_seconds') and proto.game_stats.overtime_seconds > 0:
+        return True
+    # Method 3: Estimate actual gameplay by subtracting replay overhead
+    # Each goal adds ~9s (6s replay + 3s kickoff), plus ~3s initial kickoff
     try:
         game_df = manager.get_data_frame()
-        max_frame = game_df.index.max()
-        match_duration_s = max_frame / 30.0
-        return match_duration_s > 305
+        total_seconds = game_df.index.max() / 30.0
+        n_goals = len(proto.game_metadata.goals) if hasattr(proto.game_metadata, 'goals') else 0
+        overhead = n_goals * 9 + 3
+        estimated_gameplay = total_seconds - overhead
+        return estimated_gameplay > 310
     except Exception:
         return False
 
