@@ -222,13 +222,20 @@ def detect_overtime(manager):
     # Method 1: Check Python Object (Best)
     if hasattr(manager.game, 'overtime_seconds'):
         return manager.game.overtime_seconds > 0
-    
+
     # Method 2: Check Protobuf Metadata
     proto = manager.get_protobuf_data()
     if hasattr(proto, 'game_stats') and hasattr(proto.game_stats, 'overtime_seconds'):
         return proto.game_stats.overtime_seconds > 0
-        
-    return False
+
+    # Method 3: Fallback — if match lasted > 305s it went to OT (standard game = 300s)
+    try:
+        game_df = manager.get_data_frame()
+        max_frame = game_df.index.max()
+        match_duration_s = max_frame / 30.0
+        return match_duration_s > 305
+    except Exception:
+        return False
 
 def get_match_timestamp(proto):
     """Extract match timestamp from replay metadata."""
@@ -3101,7 +3108,7 @@ elif app_mode == "📈 Season Batch Processor":
                     st.plotly_chart(fig_comp, use_container_width=True)
         with t4:
             st.subheader("Player Comparison Radar")
-            categories = ['Rating', 'Goals', 'Assists', 'Saves', 'Shots', 'xG', 'xA', 'Big Chances']
+            categories = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', 'Avg Speed', 'Aerial %', 'Total_VAEP']
             # Normalize each category to 0-100 scale across all players for fair comparison
             all_avgs = season.groupby('Name')[categories].mean()
             cat_max = all_avgs.max()
