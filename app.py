@@ -2720,13 +2720,59 @@ if app_mode == "🔍 Single Match Analysis":
             else:
                 st.info("No rotation data available.")
 
+        # Helper function for 3D field geometry
+        def get_3d_field_traces():
+            """Returns list of Plotly traces for 3D Rocket League field boundaries."""
+            traces = []
+
+            # Field dimensions (Rocket League standard)
+            field_x = 4096  # Half-length
+            field_y = 5120  # Half-width
+            wall_height = 2044
+            goal_width = 1784  # From center
+            goal_height = 642
+
+            # Floor outline
+            floor_x = [-field_x, field_x, field_x, -field_x, -field_x]
+            floor_y = [-field_y, -field_y, field_y, field_y, -field_y]
+            floor_z = [0, 0, 0, 0, 0]
+            traces.append(go.Scatter3d(
+                x=floor_x, y=floor_y, z=floor_z,
+                mode='lines', line=dict(color='rgba(255,255,255,0.3)', width=2),
+                showlegend=False, hoverinfo='skip'))
+
+            # Center circle (approximation with 20 points)
+            circle_r = 1140
+            theta = np.linspace(0, 2*np.pi, 20)
+            circle_x = circle_r * np.cos(theta)
+            circle_y = circle_r * np.sin(theta)
+            circle_z = np.zeros(20)
+            traces.append(go.Scatter3d(
+                x=circle_x, y=circle_y, z=circle_z,
+                mode='lines', line=dict(color='rgba(255,255,255,0.2)', width=1),
+                showlegend=False, hoverinfo='skip'))
+
+            # Goal boxes (simplified as rectangles on each end)
+            for goal_y_sign in [-1, 1]:
+                gy = goal_y_sign * field_y
+                goal_x = [-goal_width, goal_width, goal_width, -goal_width, -goal_width]
+                goal_y = [gy, gy, gy, gy, gy]
+                goal_z = [0, 0, goal_height, goal_height, 0]
+                color = 'rgba(0,123,255,0.4)' if goal_y_sign == -1 else 'rgba(255,153,0,0.4)'
+                traces.append(go.Scatter3d(
+                    x=goal_x, y=goal_y, z=goal_z,
+                    mode='lines', line=dict(color=color, width=3),
+                    showlegend=False, hoverinfo='skip'))
+
+            return traces
+
         with t10:
             st.subheader("Tactical Replay Viewer")
             try:
                 max_frame = game_df.index.max()
                 match_duration = max_frame / float(REPLAY_FPS)
 
-                # Build pre-computed arrays for fast lookup
+                # Build pre-computed arrays for fast lookup with 3D position data
                 ball_df_tac = game_df['ball'] if 'ball' in game_df else None
                 tac_players = []
                 for p in proto.players:
@@ -2739,100 +2785,227 @@ if app_mode == "🔍 Single Match Analysis":
                                 'frames': pdf.index.values,
                                 'x': pdf['pos_x'].values,
                                 'y': pdf['pos_y'].values,
+                                'z': pdf['pos_z'].values if 'pos_z' in pdf.columns else np.zeros(len(pdf)),
                                 'boost': pdf['boost'].values if 'boost' in pdf.columns else np.zeros(len(pdf))
                             }
                             tac_players.append(pinfo)
 
-                # Time slider
-                time_val = st.slider("Match Time (seconds)", 0.0, round(match_duration, 1), 0.0, 0.5, key="tac_slider")
-                target_frame = int(time_val * REPLAY_FPS)
-
-                # Speed controls
-                sc1, sc2, sc3 = st.columns(3)
-                with sc1:
-                    show_trail = st.checkbox("Show ball trail", value=True, key="tac_trail")
-                with sc2:
-                    show_boost = st.checkbox("Show boost levels", value=True, key="tac_boost")
-                with sc3:
-                    show_lines = st.checkbox("Show lines to ball", value=False, key="tac_lines")
-
-                fig_tac = go.Figure()
-                fig_tac.update_layout(get_field_layout(""))
-                fig_tac.update_layout(title=None, margin=dict(l=10, r=10, t=30, b=10), height=600)
-
-                # Ball trail (last 1 second = 30 frames)
-                if ball_df_tac is not None and show_trail:
-                    b_frames = ball_df_tac.index.values
-                    b_x = ball_df_tac['pos_x'].values
-                    b_y = ball_df_tac['pos_y'].values
-                    trail_start = max(0, target_frame - REPLAY_FPS)
-                    trail_indices = np.where((b_frames >= trail_start) & (b_frames <= target_frame))[0]
-                    if len(trail_indices) > 1:
-                        trail_x = b_x[trail_indices]
-                        trail_y = b_y[trail_indices]
-                        # Fade opacity from old to new
-                        n_pts = len(trail_x)
-                        opacities = np.linspace(0.1, 0.5, n_pts)
-                        for j in range(n_pts - 1):
-                            fig_tac.add_trace(go.Scatter(
-                                x=[trail_x[j], trail_x[j+1]], y=[trail_y[j], trail_y[j+1]],
-                                mode='lines', line=dict(color=f'rgba(255,255,255,{opacities[j]:.2f})', width=2),
-                                showlegend=False, hoverinfo='skip'))
-
-                # Ball position
+                # Extract ball position arrays
                 if ball_df_tac is not None:
-                    b_frames = ball_df_tac.index.values
-                    b_x = ball_df_tac['pos_x'].values
-                    b_y = ball_df_tac['pos_y'].values
-                    bi = min(np.searchsorted(b_frames, target_frame), len(b_x) - 1)
-                    ball_cx, ball_cy = b_x[bi], b_y[bi]
-                    fig_tac.add_trace(go.Scatter(
-                        x=[ball_cx], y=[ball_cy], mode='markers',
-                        marker=dict(size=14, color='#ffffff', symbol='circle',
-                                    line=dict(width=2, color='#ffcc00')),
-                        name='Ball', showlegend=True,
-                        hovertemplate="Ball<br>x: %{x:.0f}<br>y: %{y:.0f}<extra></extra>"))
+                    ball_frames = ball_df_tac.index.values
+                    ball_x = ball_df_tac['pos_x'].values
+                    ball_y = ball_df_tac['pos_y'].values
+                    ball_z = ball_df_tac['pos_z'].values if 'pos_z' in ball_df_tac.columns else np.zeros(len(ball_df_tac))
                 else:
-                    ball_cx, ball_cy = 0, 0
+                    ball_frames = np.array([])
+                    ball_x = ball_y = ball_z = np.array([])
 
-                # Player positions
-                for pinfo in tac_players:
-                    pi = min(np.searchsorted(pinfo['frames'], target_frame), len(pinfo['x']) - 1)
-                    if pi < 0:
-                        continue
-                    px, py = pinfo['x'][pi], pinfo['y'][pi]
-                    boost_val = pinfo['boost'][pi] if pi < len(pinfo['boost']) else 0
-                    boost_val = max(0, min(100, boost_val)) if not np.isnan(boost_val) else 0
-                    color = "#007bff" if pinfo['team'] == "Blue" else "#ff9900"
-                    label = pinfo['name']
-                    if show_boost:
-                        label = f"{pinfo['name']} ({int(boost_val)})"
+                # Animation controls
+                ctrl_col1, ctrl_col2, ctrl_col3, ctrl_col4 = st.columns([2, 2, 2, 2])
+                with ctrl_col1:
+                    playback_speed = st.select_slider("Playback Speed",
+                        options=[0.25, 0.5, 1.0, 2.0, 4.0],
+                        value=1.0,
+                        format_func=lambda x: f"{x}x")
+                with ctrl_col2:
+                    show_car_trails = st.checkbox("Car Trails", value=False, key="car_trails_3d")
+                with ctrl_col3:
+                    show_ball_trail = st.checkbox("Ball Trail", value=True, key="ball_trail_3d")
+                with ctrl_col4:
+                    trail_seconds = st.slider("Trail Duration (s)", 0.5, 3.0, 1.0, 0.5, key="trail_dur_3d")
 
-                    fig_tac.add_trace(go.Scatter(
-                        x=[px], y=[py], mode='markers+text',
-                        marker=dict(size=18, color=color, line=dict(width=2, color='white'), opacity=0.9),
-                        text=[label], textposition='top center',
-                        textfont=dict(color='white', size=10),
-                        name=pinfo['name'], showlegend=False,
-                        hovertemplate=f"<b>{pinfo['name']}</b><br>Boost: {int(boost_val)}<br>x: %{{x:.0f}}<br>y: %{{y:.0f}}<extra></extra>"))
+                # Calculate frame stride for performance
+                frame_stride = max(1, int(5 / playback_speed))
 
-                    # Line to ball
-                    if show_lines and ball_df_tac is not None:
-                        fig_tac.add_trace(go.Scatter(
-                            x=[px, ball_cx], y=[py, ball_cy], mode='lines',
-                            line=dict(color=color, width=1, dash='dot'),
-                            showlegend=False, hoverinfo='skip', opacity=0.3))
+                # Create 3D figure
+                fig_tac = go.Figure()
 
-                # Add time annotation
-                minutes = int(time_val // 60)
-                secs = int(time_val % 60)
-                ot_label = " (OT)" if time_val > 300 else ""
-                fig_tac.add_annotation(x=0, y=6500, text=f"{minutes}:{secs:02d}{ot_label}",
-                    showarrow=False, font=dict(size=16, color='white'),
-                    bgcolor='rgba(0,0,0,0.5)')
+                # Add static field geometry
+                for trace in get_3d_field_traces():
+                    fig_tac.add_trace(trace)
+
+                # Determine frames to render (downsample based on stride)
+                all_frames = np.arange(0, max_frame + 1, frame_stride)
+                trail_frame_count = int(trail_seconds * REPLAY_FPS)
+
+                # Show warning for long replays
+                if len(all_frames) > 800:
+                    st.warning(f"Long replay detected ({len(all_frames)} frames). Rendering may take 10-15 seconds. Consider increasing playback speed to reduce frame count.")
+
+                # Build animation frames
+                animation_frames = []
+                for frame_idx in all_frames:
+                    frame_traces = []
+
+                    # --- Ball position + trail ---
+                    if len(ball_frames) > 0:
+                        bi = min(np.searchsorted(ball_frames, frame_idx), len(ball_x) - 1)
+                        ball_cx, ball_cy, ball_cz = ball_x[bi], ball_y[bi], ball_z[bi]
+
+                        # Ball current position
+                        frame_traces.append(go.Scatter3d(
+                            x=[ball_cx], y=[ball_cy], z=[ball_cz],
+                            mode='markers',
+                            marker=dict(size=8, color='white', symbol='circle',
+                                       line=dict(width=2, color='gold')),
+                            name='Ball',
+                            hovertemplate="Ball<br>x: %{x:.0f}<br>y: %{y:.0f}<br>z: %{z:.0f}<extra></extra>"))
+
+                        # Ball trail
+                        if show_ball_trail:
+                            trail_start = max(0, bi - trail_frame_count)
+                            if bi > trail_start:
+                                trail_x = ball_x[trail_start:bi+1]
+                                trail_y = ball_y[trail_start:bi+1]
+                                trail_z = ball_z[trail_start:bi+1]
+                                frame_traces.append(go.Scatter3d(
+                                    x=trail_x, y=trail_y, z=trail_z,
+                                    mode='lines',
+                                    line=dict(color='rgba(255,255,255,0.5)', width=3),
+                                    showlegend=False, hoverinfo='skip'))
+
+                    # --- Player positions + trails ---
+                    for pinfo in tac_players:
+                        pi = min(np.searchsorted(pinfo['frames'], frame_idx), len(pinfo['x']) - 1)
+                        if pi < 0:
+                            continue
+
+                        px, py, pz = pinfo['x'][pi], pinfo['y'][pi], pinfo['z'][pi]
+                        boost_val = pinfo['boost'][pi] if pi < len(pinfo['boost']) else 0
+                        boost_val = max(0, min(100, boost_val)) if not np.isnan(boost_val) else 0
+
+                        color = "rgb(0,123,255)" if pinfo['team'] == "Blue" else "rgb(255,153,0)"
+
+                        # Player current position
+                        frame_traces.append(go.Scatter3d(
+                            x=[px], y=[py], z=[pz],
+                            mode='markers+text',
+                            marker=dict(size=6, color=color, symbol='diamond', opacity=0.9,
+                                       line=dict(width=2, color='white')),
+                            text=[pinfo['name']],
+                            textposition='top center',
+                            textfont=dict(color='white', size=9),
+                            name=pinfo['name'],
+                            hovertemplate=f"<b>{pinfo['name']}</b><br>Boost: {int(boost_val)}<br>"
+                                         f"x: %{{x:.0f}}<br>y: %{{y:.0f}}<br>z: %{{z:.0f}}<extra></extra>"))
+
+                        # Car trail
+                        if show_car_trails:
+                            trail_start_idx = max(0, pi - trail_frame_count)
+                            if pi > trail_start_idx:
+                                car_trail_x = pinfo['x'][trail_start_idx:pi+1]
+                                car_trail_y = pinfo['y'][trail_start_idx:pi+1]
+                                car_trail_z = pinfo['z'][trail_start_idx:pi+1]
+                                frame_traces.append(go.Scatter3d(
+                                    x=car_trail_x, y=car_trail_y, z=car_trail_z,
+                                    mode='lines',
+                                    line=dict(color=f'rgba{color[3:-1]},0.4)', width=2),
+                                    showlegend=False, hoverinfo='skip'))
+
+                    # Create animation frame
+                    animation_frames.append(go.Frame(
+                        data=frame_traces,
+                        name=str(frame_idx),
+                        layout=go.Layout(
+                            title_text=f"Time: {int(frame_idx/REPLAY_FPS//60)}:{int(frame_idx/REPLAY_FPS%60):02d}"
+                        )
+                    ))
+
+                # Add frames to figure
+                fig_tac.frames = animation_frames
+
+                # Set initial frame (frame 0)
+                if animation_frames:
+                    fig_tac.add_traces(animation_frames[0].data)
+
+                # Configure 3D camera for isometric view
+                camera = dict(
+                    eye=dict(x=1.5, y=-1.5, z=1.2),
+                    center=dict(x=0, y=0, z=0.3),
+                    up=dict(x=0, y=0, z=1)
+                )
+
+                # Animation buttons
+                play_button = dict(
+                    label="Play",
+                    method="animate",
+                    args=[None, {
+                        "frame": {"duration": int(1000 / (REPLAY_FPS * playback_speed)), "redraw": True},
+                        "fromcurrent": True,
+                        "mode": "immediate",
+                        "transition": {"duration": 0}
+                    }]
+                )
+
+                pause_button = dict(
+                    label="Pause",
+                    method="animate",
+                    args=[[None], {
+                        "frame": {"duration": 0, "redraw": False},
+                        "mode": "immediate",
+                        "transition": {"duration": 0}
+                    }]
+                )
+
+                # Layout configuration
+                fig_tac.update_layout(
+                    scene=dict(
+                        xaxis=dict(range=[-4700, 4700], title="", showgrid=False,
+                                  showbackground=False, showticklabels=False),
+                        yaxis=dict(range=[-6200, 6200], title="", showgrid=False,
+                                  showbackground=False, showticklabels=False),
+                        zaxis=dict(range=[0, 2200], title="", showgrid=False,
+                                  showbackground=False, showticklabels=False),
+                        aspectmode='manual',
+                        aspectratio=dict(x=1, y=1.3, z=0.5),
+                        camera=camera,
+                        bgcolor='rgba(10,10,10,1)'
+                    ),
+                    updatemenus=[{
+                        "type": "buttons",
+                        "showactive": False,
+                        "buttons": [play_button, pause_button],
+                        "x": 0.1,
+                        "y": 1.15,
+                        "xanchor": "left",
+                        "yanchor": "top"
+                    }],
+                    sliders=[{
+                        "active": 0,
+                        "steps": [
+                            {
+                                "args": [[f.name], {
+                                    "frame": {"duration": 0, "redraw": True},
+                                    "mode": "immediate",
+                                    "transition": {"duration": 0}
+                                }],
+                                "label": f"{int(int(f.name)/REPLAY_FPS//60)}:{int(int(f.name)/REPLAY_FPS%60):02d}",
+                                "method": "animate"
+                            }
+                            for f in animation_frames
+                        ],
+                        "x": 0.1,
+                        "len": 0.85,
+                        "xanchor": "left",
+                        "y": 0,
+                        "yanchor": "top",
+                        "pad": {"b": 10, "t": 50},
+                        "currentvalue": {
+                            "visible": True,
+                            "prefix": "Time: ",
+                            "xanchor": "right",
+                            "font": {"size": 16, "color": "white"}
+                        }
+                    }],
+                    height=700,
+                    margin=dict(l=0, r=0, t=80, b=80),
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    showlegend=False
+                )
 
                 st.plotly_chart(fig_tac, use_container_width=True)
-                st.caption("Scrub through the match to see player positions and ball movement. Blue team attacks upward, Orange attacks downward.")
+                st.caption("Use Play/Pause buttons to animate. Scrub the timeline to jump to any moment. Blue team attacks toward positive Y (orange goal), Orange attacks toward negative Y (blue goal).")
             except Exception as e:
                 st.error(f"Could not render tactical view: {e}")
 
