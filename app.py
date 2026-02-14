@@ -150,6 +150,27 @@ def get_field_layout(title=""):
         ]
     return layout
 
+def extract_replay_date(file_bytes):
+    """Extract the Date property from raw replay bytes.
+    Rocket League replays store header properties including 'Date' as a string."""
+    try:
+        data = bytes(file_bytes) if not isinstance(file_bytes, bytes) else file_bytes
+        # Search for the 'Date' property string in the binary data
+        # Format: property name as length-prefixed string, then 'StrProperty', then value
+        import re
+        # Look for date pattern directly: YYYY-MM-DD HH:MM:SS or YYYY-MM-DD
+        text = data.decode('latin-1', errors='ignore')
+        match = re.search(r'(\d{4}-\d{2}-\d{2}[: T]\d{2}[:-]\d{2}[:-]\d{2})', text)
+        if match:
+            return match.group(1).replace(':', '-', 1)  # normalize
+        # Also try Date\x00 property marker followed by date string
+        match = re.search(r'Date\x00.{0,30}?(\d{4}-\d{2}-\d{2})', text)
+        if match:
+            return match.group(1)
+    except Exception:
+        pass
+    return ""
+
 # --- 5. PARSING ENGINE (CACHED) ---
 @st.cache_resource(show_spinner=False)
 def get_parsed_replay_data(file_bytes, file_name):
@@ -242,19 +263,56 @@ def detect_overtime(manager):
     except Exception:
         return False
 
-def get_match_timestamp(proto):
+def get_match_timestamp(proto, manager=None):
     """Extract match timestamp from replay metadata."""
     ts = ""
     try:
-        if hasattr(proto, 'game_metadata'):
+        # Method 1: Check manager.game for datetime/date properties
+        if manager is not None:
+            game = getattr(manager, 'game', None)
+            if game is not None:
+                for attr in ('datetime', 'date', 'time_stamp', 'timestamp', 'match_date'):
+                    val = getattr(game, attr, None)
+                    if val:
+                        ts = str(val)
+                        break
+                # Check game properties/header dict (carball stores replay header here)
+                if not ts:
+                    props = getattr(game, 'properties', None) or getattr(game, 'header', None)
+                    if isinstance(props, dict):
+                        for key in ('Date', 'date', 'Timestamp', 'DateTime'):
+                            if key in props and props[key]:
+                                ts = str(props[key])
+                                break
+                # Try all string-valued attributes as last resort
+                if not ts:
+                    import re
+                    for attr in sorted(dir(game)):
+                        if attr.startswith('_'):
+                            continue
+                        try:
+                            val = getattr(game, attr, None)
+                        except Exception:
+                            continue
+                        if isinstance(val, str) and len(val) > 8 and re.search(r'\d{4}[-/]\d{2}[-/]\d{2}', val):
+                            ts = val
+                            break
+        # Method 2: Check protobuf game_metadata
+        if not ts and hasattr(proto, 'game_metadata'):
             meta = proto.game_metadata
-            if hasattr(meta, 'time') and meta.time:
-                ts = str(meta.time)
-            elif hasattr(meta, 'date') and meta.date:
-                ts = str(meta.date)
-            elif hasattr(meta, 'id') and meta.id:
-                ts = str(meta.id)
-    except:
+            for attr in ('time', 'date', 'match_date', 'datetime'):
+                val = getattr(meta, attr, None)
+                if val:
+                    ts = str(val)
+                    break
+        # Method 3: Log available attributes for debugging (only once)
+        if not ts and manager is not None:
+            game = getattr(manager, 'game', None)
+            if game is not None:
+                attrs = {a: type(getattr(game, a, None)).__name__
+                         for a in dir(game) if not a.startswith('_') and not callable(getattr(game, a, None))}
+                logger.info("Timestamp extraction failed. manager.game attrs: %s", attrs)
+    except Exception:
         pass
     return ts
 
@@ -1287,7 +1345,7 @@ def calculate_rotation_analysis(manager, game_df, proto, sample_step=5):
     return rotation_timeline, rotation_summary, double_commits_df
 
 # --- 9h. MATH: SITUATIONAL STATS ---
-def calculate_situational_stats(manager, game_df, proto):
+def calculate_situational_stats(manager, game_df, proto, shot_df=None):
     """Calculate game-state-dependent stats: goals by period, game state, clutch moments."""
     max_frame = game_df.index.max()
     match_duration = max_frame / float(REPLAY_FPS)
@@ -1349,15 +1407,22 @@ def calculate_situational_stats(manager, game_df, proto):
     blue_won = blue_score > orange_score
     orange_won = orange_score > blue_score
 
+    # Count last-minute saves using shot_df: a saved shot = Result 'Shot' (not 'Goal')
     saves_last_min = {p.name: 0 for p in proto.players}
-    for hit in proto.game_stats.hits:
-        if not hit.player_id:
-            continue
-        if hit.frame_number >= last_min_frame and getattr(hit, 'is_save', False):
-            pid = str(hit.player_id.id)
-            name = _pid_name.get(pid, "")
-            if name in saves_last_min:
-                saves_last_min[name] += 1
+    if shot_df is not None and not shot_df.empty:
+        late_saves = shot_df[(shot_df['Frame'] >= last_min_frame) & (shot_df['Result'] == 'Shot')]
+        for _, s in late_saves.iterrows():
+            defending_team = "Orange" if s['Team'] == "Blue" else "Blue"
+            # Attribute save to defending team players proportional to their total saves
+            defenders = [p for p in proto.players if player_team[p.name] == defending_team]
+            total_def_saves = sum(p.saves for p in defenders)
+            for d in defenders:
+                if total_def_saves > 0:
+                    saves_last_min[d.name] += d.saves / total_def_saves
+                elif len(defenders) > 0:
+                    saves_last_min[d.name] += 1.0 / len(defenders)
+    # Round to integers
+    saves_last_min = {k: int(round(v)) for k, v in saves_last_min.items()}
 
     results = []
     for p in proto.players:
@@ -1639,7 +1704,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     vaep_df, vaep_summary = calculate_vaep(manager, temp_map, shot_df)
     rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(manager, game_df, proto)
     xs_events_df, xs_summary = calculate_expected_saves(manager, temp_map, shot_df)
-    situational_df = calculate_situational_stats(manager, game_df, proto)
+    situational_df = calculate_situational_stats(manager, game_df, proto, shot_df)
     wp_model, wp_scaler = load_win_prob_model()
     wp_result = calculate_win_probability_trained(manager, wp_model, wp_scaler)
     if isinstance(wp_result, tuple):
@@ -2911,7 +2976,7 @@ elif app_mode == "📈 Season Batch Processor":
                     vaep_df_b, vaep_summary_b = calculate_vaep(manager, temp_map, shot_df)
                     _, rotation_summary_b, _ = calculate_rotation_analysis(manager, game_df, proto)
                     _, xs_summary_b = calculate_expected_saves(manager, temp_map, shot_df)
-                    situational_df_b = calculate_situational_stats(manager, game_df, proto)
+                    situational_df_b = calculate_situational_stats(manager, game_df, proto, shot_df)
                     stats = calculate_final_stats(manager, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b, vaep_summary_b, rotation_summary_b, xs_summary_b, situational_df_b)
                     # Collect win prob training data
                     wp_train = extract_win_prob_training_data(manager, game_df, proto)
@@ -2939,7 +3004,9 @@ elif app_mode == "📈 Season Batch Processor":
                             luck_val = calculate_luck_percentage(shot_df, team, team_goals)
                             stats.loc[stats['Team']==team, 'Luck'] = luck_val
                         # Timestamp
-                        ts = get_match_timestamp(proto)
+                        ts = get_match_timestamp(proto, manager)
+                        if not ts:
+                            ts = extract_replay_date(bytes_data)
                         stats['Timestamp'] = ts
  
                         new_stats_list.append(stats)
