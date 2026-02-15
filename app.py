@@ -11,6 +11,17 @@ import logging
 import numpy as np
 from datetime import datetime, timedelta
 
+from constants import (
+    REPLAY_FPS, DB_FILE, KICKOFF_DB_FILE, WIN_PROB_MODEL_FILE,
+    MAX_STORED_MATCHES, FIELD_HALF_X, FIELD_HALF_Y, WALL_HEIGHT,
+    GOAL_HALF_W, GOAL_DEPTH, GOAL_HEIGHT, CENTER_CIRCLE_R,
+    AXIS_PAD_X, AXIS_PAD_Y, TEAM_COLORS, TEAM_COLOR_MAP,
+)
+from utils import (
+    build_pid_team_map, build_pid_name_map, build_player_team_map,
+    get_team_players, frame_to_seconds, seconds_to_frame, fmt_time,
+)
+
 logger = logging.getLogger(__name__)
 
 # --- 1. SETUP & IMPORTS ---
@@ -62,22 +73,8 @@ if "match_store" not in st.session_state:
     st.session_state.match_store = {}
     st.session_state.match_order = []
     st.session_state.active_match = None
-MAX_STORED_MATCHES = 12
 
-# --- 2. PERSISTENCE CONFIG ---
-DB_FILE = "career_stats.csv"
-KICKOFF_DB_FILE = "career_kickoffs.csv"
-REPLAY_FPS = 30  # Standard replay frame rate
-WIN_PROB_MODEL_FILE = "win_prob_model.json"
-
-# --- Rocket League field geometry constants ---
-FIELD_HALF_X = 4096   # Sideline (half-width)
-FIELD_HALF_Y = 5120   # End line (half-length)
-WALL_HEIGHT = 2044
-GOAL_HALF_W = 1784    # Goal opening half-width
-GOAL_DEPTH = 880      # Goal depth behind end line
-GOAL_HEIGHT = 642
-CENTER_CIRCLE_R = 1140
+# (Constants imported from constants.py)
 
 # --- 3. HELPER: DATABASE MANAGEMENT ---
 def load_data():
@@ -127,14 +124,10 @@ def save_data(new_stats, new_kickoffs):
 
 # --- 4. VISUALIZATION HELPERS ---
 
-# Padding beyond field walls for axis range (leaves room for goal depth + labels)
-_AXIS_PAD_X = 600
-_AXIS_PAD_Y = 1080
-
 def get_field_layout(title=""):
     """Returns a Plotly layout dict with the pitch image as background."""
-    rx = FIELD_HALF_X + _AXIS_PAD_X
-    ry = FIELD_HALF_Y + _AXIS_PAD_Y
+    rx = FIELD_HALF_X + AXIS_PAD_X
+    ry = FIELD_HALF_Y + AXIS_PAD_Y
     layout = dict(
         title=title,
         xaxis=dict(range=[-rx, rx], visible=False, fixedrange=True),
@@ -452,7 +445,7 @@ def calculate_win_probability(manager):
     blue_goals = []
     orange_goals = []
     # Build player ID -> team lookup for reliable team detection
-    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
@@ -504,7 +497,7 @@ def extract_win_prob_training_data(manager, game_df, proto):
         return pd.DataFrame()
     blue_won = 1 if blue_goals_total > orange_goals_total else 0
 
-    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
     blue_gf, orange_gf = [], []
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
@@ -605,7 +598,7 @@ def calculate_win_probability_trained(manager, model, scaler):
     frames = np.arange(0, max_frame, REPLAY_FPS)
     seconds = frames / float(REPLAY_FPS)
 
-    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
     blue_gf, orange_gf = [], []
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
@@ -753,7 +746,7 @@ def calculate_shot_data(manager, player_map):
 
     # Build a tight goal frame map: only the LAST hit before each goal gets credit
     # Map each goal to the exact scorer frame from metadata
-    _pid_team_shot = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team_shot = build_pid_team_map(proto)
     goal_scorer_frames = {}  # frame -> team of scorer
 
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -891,8 +884,8 @@ def calculate_advanced_passing(manager, player_map, shot_df, max_time_diff=2.0):
     proto = manager.get_protobuf_data()
     hits = proto.game_stats.hits
     game_df = manager.get_data_frame()
-    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
-    pass_events = [] 
+    team_map = build_pid_team_map(proto)
+    pass_events = []
     last_hitter_id = None
     last_hit_time = -999
     last_hit_frame = 0
@@ -947,7 +940,7 @@ def calculate_aerial_stats(manager, player_map):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     hits = proto.game_stats.hits
-    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    team_map = build_pid_team_map(proto)
     AERIAL_HEIGHT = 500  # unreal units — roughly above crossbar height
 
     aerial_data = {}  # pid -> {hits, heights[], team, name}
@@ -1010,7 +1003,7 @@ def calculate_recovery_time(manager, player_map):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     hits = proto.game_stats.hits
-    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    team_map = build_pid_team_map(proto)
     SUPERSONIC = 2200
     MAX_RECOVERY_FRAMES = 5 * REPLAY_FPS  # cap at 5 seconds
 
@@ -1064,7 +1057,7 @@ def calculate_recovery_time(manager, player_map):
 def calculate_defensive_pressure(manager, game_df, proto):
     """Track time each player spends in shadow defense position:
     between the ball and their own goal, moving in same direction as ball."""
-    team_map = {p.name: "Orange" if p.is_orange else "Blue" for p in proto.players}
+    team_map = build_player_team_map(proto)
     if 'ball' not in game_df:
         return pd.DataFrame()
 
@@ -1142,7 +1135,7 @@ def calculate_xg_against(manager, player_map, shot_df):
 
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
-    team_map = {p.name: "Orange" if p.is_orange else "Blue" for p in proto.players}
+    team_map = build_player_team_map(proto)
     orange_players = [p.name for p in proto.players if p.is_orange]
     blue_players = [p.name for p in proto.players if not p.is_orange]
 
@@ -1218,8 +1211,8 @@ def calculate_vaep(manager, player_map, shot_df):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     max_frame = game_df.index.max()
-    player_teams = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
-    player_names = {str(p.id.id): p.name for p in proto.players}
+    player_teams = build_pid_team_map(proto)
+    player_names = build_pid_name_map(proto)
 
     ball_df = game_df['ball'] if 'ball' in game_df else None
     if ball_df is None:
@@ -1428,9 +1421,9 @@ def calculate_situational_stats(manager, game_df, proto, shot_df=None):
     half_frame = int(min(150, match_duration / 2) * REPLAY_FPS)
     last_min_frame = max(0, int((min(match_duration, 300) - 60) * REPLAY_FPS))
 
-    _pid_team = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
-    _pid_name = {str(p.id.id): p.name for p in proto.players}
-    player_team = {p.name: ("Orange" if p.is_orange else "Blue") for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
+    _pid_name = build_pid_name_map(proto)
+    player_team = build_player_team_map(proto)
 
     goals = []
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -1551,7 +1544,7 @@ def calculate_expected_saves(manager, player_map, shot_df):
     if shot_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    player_teams = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
+    player_teams = build_pid_team_map(proto)
     saved_shots = shot_df[shot_df['Result'] == 'Shot'].copy()
     if saved_shots.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -1768,7 +1761,7 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
 # --- 10b. SINGLE MATCH PERSISTENCE HELPERS ---
 def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     """Compute all analytics for a single match. Returns dict of all results."""
-    temp_map = {str(p.id.id): p.name for p in proto.players}
+    temp_map = build_pid_name_map(proto)
     shot_df = calculate_shot_data(manager, temp_map)
     momentum_series = calculate_contextual_momentum(manager, game_df, proto)
     pass_df = calculate_advanced_passing(manager, temp_map, shot_df, pass_threshold)
@@ -1835,7 +1828,7 @@ def build_export_shot_map(shot_df, proto):
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if not shot_df.empty:
-        _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+        _pid_team = build_pid_team_map(proto)
         for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
             t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
             t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
@@ -1927,7 +1920,7 @@ def build_export_xg_timeline(shot_df, game_df, proto, is_overtime):
     if not shot_df.empty:
         sorted_shots = shot_df.sort_values('Frame').copy()
         sorted_shots['Time'] = sorted_shots['Frame'] / 30.0
-        _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+        _pid_team = build_pid_team_map(proto)
         meta_goals = {"Blue": [], "Orange": []}
         if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
             for g in proto.game_metadata.goals:
@@ -2025,8 +2018,8 @@ def build_export_pressure(momentum_series, proto):
         fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none',
             fillcolor='rgba(255, 153, 0, 0.6)', showlegend=False))
         # Goal markers from proto
-        _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
-        _pid_name = {str(p.id.id): p.name for p in proto.players}
+        _pid_team = build_pid_team_map(proto)
+        _pid_name = build_pid_name_map(proto)
         if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
             for g in proto.game_metadata.goals:
                 gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
@@ -2355,8 +2348,8 @@ if app_mode == "🔍 Single Match Analysis":
                 fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor='rgba(255, 153, 0, 0.6)'))
 
                 # Use proto metadata for authoritative goal list
-                _pi_pid_team = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
-                _pi_pid_name = {str(p.id.id): p.name for p in proto.players}
+                _pi_pid_team = build_pid_team_map(proto)
+                _pi_pid_name = build_pid_name_map(proto)
                 if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
                     for g in proto.game_metadata.goals:
                         gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
@@ -2829,10 +2822,6 @@ if app_mode == "🔍 Single Match Analysis":
                     ball_x = ball_y = ball_z = np.array([])
 
                 n_players = len(tac_players)
-                _TEAM_COLORS = {
-                    "Blue":   {"solid": "rgba(0,123,255,1)",   "trail": "rgba(0,123,255,0.35)"},
-                    "Orange": {"solid": "rgba(255,153,0,1)",   "trail": "rgba(255,153,0,0.35)"},
-                }
 
                 # ── Time range selector ──
                 # Build goal event markers for quick-jump
@@ -2935,7 +2924,7 @@ if app_mode == "🔍 Single Match Analysis":
                         px, py, pz = float(pinfo['x'][pi]), float(pinfo['y'][pi]), float(pinfo['z'][pi])
                         bv = pinfo['boost'][pi] if pi < len(pinfo['boost']) else 0
                         bv = max(0, min(100, bv)) if not np.isnan(bv) else 0
-                        tc = _TEAM_COLORS[pinfo['team']]
+                        tc = TEAM_COLORS[pinfo['team']]
 
                         traces.append(go.Scatter3d(
                             x=[px], y=[py], z=[pz], mode='markers+text',
@@ -2977,8 +2966,8 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_tac.add_traces(animation_frames[0].data)
 
                 # ── Camera + layout ──
-                rx = FIELD_HALF_X + _AXIS_PAD_X
-                ry = FIELD_HALF_Y + _AXIS_PAD_Y
+                rx = FIELD_HALF_X + AXIS_PAD_X
+                ry = FIELD_HALF_Y + AXIS_PAD_Y
                 fig_tac.update_layout(
                     scene=dict(
                         xaxis=dict(range=[-rx, rx], title="", showgrid=False,
@@ -3164,7 +3153,7 @@ elif app_mode == "📈 Season Batch Processor":
                     bar.progress((i+1)/len(uploaded_files))
                     continue
                 try:
-                    temp_map = {str(p.id.id): p.name for p in proto.players}
+                    temp_map = build_pid_name_map(proto)
                     shot_df = calculate_shot_data(manager, temp_map)
                     pass_df = calculate_advanced_passing(manager, temp_map, shot_df, pass_threshold)
                     aerial_df_b = calculate_aerial_stats(manager, temp_map)
