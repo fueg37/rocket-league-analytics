@@ -749,7 +749,7 @@ def calculate_shot_data(manager, player_map):
 
     # Build a tight goal frame map: only the LAST hit before each goal gets credit
     # Map each goal to the exact scorer frame from metadata
-    _pid_team_shot = build_pid_team_map(proto)
+    _pid_team = build_pid_team_map(proto)
     goal_scorer_frames = {}  # frame -> team of scorer
 
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -758,7 +758,7 @@ def calculate_shot_data(manager, player_map):
             if f:
 
                 scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-                scorer_team = _pid_team_shot.get(scorer_pid, "Blue")
+                scorer_team = _pid_team.get(scorer_pid, "Blue")
                 goal_scorer_frames[f] = scorer_team
 
     # For each goal, find the last hit within 10 frames before the goal frame (the actual scoring touch)
@@ -1060,7 +1060,6 @@ def calculate_recovery_time(manager, player_map):
 def calculate_defensive_pressure(manager, game_df, proto):
     """Track time each player spends in shadow defense position:
     between the ball and their own goal, moving in same direction as ball."""
-    team_map = build_player_team_map(proto)
     if 'ball' not in game_df:
         return pd.DataFrame()
 
@@ -1138,7 +1137,6 @@ def calculate_xg_against(manager, player_map, shot_df):
 
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
-    team_map = build_player_team_map(proto)
     orange_players = [p.name for p in proto.players if p.is_orange]
     blue_players = [p.name for p in proto.players if not p.is_orange]
 
@@ -1547,7 +1545,6 @@ def calculate_expected_saves(manager, player_map, shot_df):
     if shot_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    player_teams = build_pid_team_map(proto)
     saved_shots = shot_df[shot_df['Result'] == 'Shot'].copy()
     if saved_shots.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -1765,6 +1762,8 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
 def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     """Compute all analytics for a single match. Returns dict of all results."""
     temp_map = build_pid_name_map(proto)
+    pid_team = build_pid_team_map(proto)
+    player_team = build_player_team_map(proto)
     shot_df = calculate_shot_data(manager, temp_map)
     momentum_series = calculate_contextual_momentum(manager, game_df, proto)
     pass_df = calculate_advanced_passing(manager, temp_map, shot_df, pass_threshold)
@@ -1806,6 +1805,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "situational_df": situational_df,
         "win_prob_df": win_prob_df, "wp_model_used": wp_model_used,
         "is_overtime": is_overtime, "temp_map": temp_map,
+        "pid_team": pid_team, "player_team": player_team,
         "all_players": sorted(list(temp_map.values())),
     }
 
@@ -1831,7 +1831,6 @@ def build_export_shot_map(shot_df, proto):
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if not shot_df.empty:
-        _pid_team = build_pid_team_map(proto)
         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
             t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
             t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
@@ -2017,12 +2016,11 @@ def build_export_pressure(momentum_series, proto):
         x_time = momentum_series.index
         y_values = momentum_series.values
         fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none',
-            fillcolor='rgba(0, 123, 255, 0.6)', showlegend=False))
+            fillcolor=TEAM_COLORS["Blue"]["light"], showlegend=False))
         fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none',
-            fillcolor='rgba(255, 153, 0, 0.6)', showlegend=False))
+            fillcolor=TEAM_COLORS["Orange"]["light"], showlegend=False))
         # Goal markers from proto
         _pid_team = build_pid_team_map(proto)
-        _pid_name = build_pid_name_map(proto)
         if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
             for g in proto.game_metadata.goals:
                 gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
@@ -2305,9 +2303,7 @@ if app_mode == "🔍 Single Match Analysis":
                 # Build goal list from proto metadata (authoritative source for all goals)
                 meta_goals = {"Blue": [], "Orange": []}
                 # Build player ID -> team lookup
-                pid_team_map = {}
-                for p in proto.players:
-                    pid_team_map[str(p.id.id)] = "Orange" if p.is_orange else "Blue"
+                pid_team_map = build_pid_team_map(proto)
                 if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
                     for g in proto.game_metadata.goals:
                         gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
@@ -2347,18 +2343,18 @@ if app_mode == "🔍 Single Match Analysis":
                 fig = go.Figure()
                 x_time = momentum_series.index
                 y_values = momentum_series.values
-                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor='rgba(0, 123, 255, 0.6)'))
-                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor='rgba(255, 153, 0, 0.6)'))
+                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor=TEAM_COLORS["Blue"]["light"]))
+                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor=TEAM_COLORS["Orange"]["light"]))
 
                 # Use proto metadata for authoritative goal list
-                _pi_pid_team = build_pid_team_map(proto)
-                _pi_pid_name = build_pid_name_map(proto)
+                _pid_team = build_pid_team_map(proto)
+                _pid_name = build_pid_name_map(proto)
                 if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
                     for g in proto.game_metadata.goals:
                         gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
                         scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-                        gteam = _pi_pid_team.get(scorer_pid, "Blue")
-                        scorer_name = _pi_pid_name.get(scorer_pid, "Unknown")
+                        gteam = _pid_team.get(scorer_pid, "Blue")
+                        scorer_name = _pid_name.get(scorer_pid, "Unknown")
                         time_sec = gf / 30.0
                         tm_multiplier = 1 if gteam == 'Blue' else -1
                         fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=scorer_name, hoverinfo="text+name", showlegend=False))
@@ -2582,9 +2578,9 @@ if app_mode == "🔍 Single Match Analysis":
                     link_colors = []
                     for _, row in chain_df.iterrows():
                         if row['Team'] == 'Blue':
-                            link_colors.append('rgba(0,123,255,0.35)')
+                            link_colors.append(TEAM_COLORS["Blue"]["trail"])
                         else:
-                            link_colors.append('rgba(255,153,0,0.35)')
+                            link_colors.append(TEAM_COLORS["Orange"]["trail"])
                     fig_sankey = go.Figure(go.Sankey(
                         node=dict(pad=15, thickness=20, line=dict(color='white', width=0.5),
                                   label=all_names, color=node_colors),
