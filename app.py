@@ -11,6 +11,17 @@ import logging
 import numpy as np
 from datetime import datetime, timedelta
 
+from constants import (
+    REPLAY_FPS, DB_FILE, KICKOFF_DB_FILE, WIN_PROB_MODEL_FILE,
+    MAX_STORED_MATCHES, FIELD_HALF_X, FIELD_HALF_Y, WALL_HEIGHT,
+    GOAL_HALF_W, GOAL_DEPTH, GOAL_HEIGHT, CENTER_CIRCLE_R,
+    AXIS_PAD_X, AXIS_PAD_Y, TEAM_COLORS, TEAM_COLOR_MAP,
+)
+from utils import (
+    build_pid_team_map, build_pid_name_map, build_player_team_map,
+    get_team_players, frame_to_seconds, seconds_to_frame, fmt_time,
+)
+
 logger = logging.getLogger(__name__)
 
 # --- 1. SETUP & IMPORTS ---
@@ -62,22 +73,8 @@ if "match_store" not in st.session_state:
     st.session_state.match_store = {}
     st.session_state.match_order = []
     st.session_state.active_match = None
-MAX_STORED_MATCHES = 12
 
-# --- 2. PERSISTENCE CONFIG ---
-DB_FILE = "career_stats.csv"
-KICKOFF_DB_FILE = "career_kickoffs.csv"
-REPLAY_FPS = 30  # Standard replay frame rate
-WIN_PROB_MODEL_FILE = "win_prob_model.json"
-
-# --- Rocket League field geometry constants ---
-FIELD_HALF_X = 4096   # Sideline (half-width)
-FIELD_HALF_Y = 5120   # End line (half-length)
-WALL_HEIGHT = 2044
-GOAL_HALF_W = 1784    # Goal opening half-width
-GOAL_DEPTH = 880      # Goal depth behind end line
-GOAL_HEIGHT = 642
-CENTER_CIRCLE_R = 1140
+# (Constants imported from constants.py)
 
 # --- 3. HELPER: DATABASE MANAGEMENT ---
 def load_data():
@@ -127,14 +124,11 @@ def save_data(new_stats, new_kickoffs):
 
 # --- 4. VISUALIZATION HELPERS ---
 
-# Padding beyond field walls for axis range (leaves room for goal depth + labels)
-_AXIS_PAD_X = 600
-_AXIS_PAD_Y = 1080
-
+@st.cache_data(show_spinner=False)
 def get_field_layout(title=""):
     """Returns a Plotly layout dict with the pitch image as background."""
-    rx = FIELD_HALF_X + _AXIS_PAD_X
-    ry = FIELD_HALF_Y + _AXIS_PAD_Y
+    rx = FIELD_HALF_X + AXIS_PAD_X
+    ry = FIELD_HALF_Y + AXIS_PAD_Y
     layout = dict(
         title=title,
         xaxis=dict(range=[-rx, rx], visible=False, fixedrange=True),
@@ -158,14 +152,15 @@ def get_field_layout(title=""):
         layout['plot_bgcolor'] = '#1a241a'
         layout['shapes'] = [
             dict(type="rect", x0=-FIELD_HALF_X, y0=-FIELD_HALF_Y, x1=FIELD_HALF_X, y1=FIELD_HALF_Y, line=dict(color="rgba(255,255,255,0.8)", width=2)),
-            dict(type="rect", x0=-893, y0=FIELD_HALF_Y, x1=893, y1=FIELD_HALF_Y + GOAL_DEPTH, line=dict(color="#ff9900", width=2)),
-            dict(type="rect", x0=-893, y0=-(FIELD_HALF_Y + GOAL_DEPTH), x1=893, y1=-FIELD_HALF_Y, line=dict(color="#007bff", width=2)),
+            dict(type="rect", x0=-893, y0=FIELD_HALF_Y, x1=893, y1=FIELD_HALF_Y + GOAL_DEPTH, line=dict(color=TEAM_COLORS["Orange"]["primary"], width=2)),
+            dict(type="rect", x0=-893, y0=-(FIELD_HALF_Y + GOAL_DEPTH), x1=893, y1=-FIELD_HALF_Y, line=dict(color=TEAM_COLORS["Blue"]["primary"], width=2)),
             dict(type="line", x0=-FIELD_HALF_X, y0=0, x1=FIELD_HALF_X, y1=0, line=dict(color="rgba(255,255,255,0.5)", width=2, dash="dot")),
             dict(type="circle", x0=-CENTER_CIRCLE_R, y0=-CENTER_CIRCLE_R, x1=CENTER_CIRCLE_R, y1=CENTER_CIRCLE_R, line=dict(color="rgba(255,255,255,0.5)", width=2))
         ]
     return layout
 
 
+@st.cache_resource(show_spinner=False)
 def get_3d_field_traces():
     """Returns list of Plotly Scatter3d traces for 3D Rocket League field boundaries."""
     traces = []
@@ -452,7 +447,7 @@ def calculate_win_probability(manager):
     blue_goals = []
     orange_goals = []
     # Build player ID -> team lookup for reliable team detection
-    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
@@ -504,7 +499,7 @@ def extract_win_prob_training_data(manager, game_df, proto):
         return pd.DataFrame()
     blue_won = 1 if blue_goals_total > orange_goals_total else 0
 
-    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
     blue_gf, orange_gf = [], []
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
@@ -574,6 +569,7 @@ def save_win_prob_model(model, scaler, filepath=WIN_PROB_MODEL_FILE):
     with open(filepath, 'w') as f:
         json.dump(data, f)
 
+@st.cache_resource(show_spinner=False)
 def load_win_prob_model(filepath=WIN_PROB_MODEL_FILE):
     """Load a trained win probability model from JSON. Returns (model, scaler) or (None, None)."""
     if not SKLEARN_AVAILABLE or not os.path.exists(filepath):
@@ -605,7 +601,7 @@ def calculate_win_probability_trained(manager, model, scaler):
     frames = np.arange(0, max_frame, REPLAY_FPS)
     seconds = frames / float(REPLAY_FPS)
 
-    _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
     blue_gf, orange_gf = [], []
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
@@ -753,7 +749,7 @@ def calculate_shot_data(manager, player_map):
 
     # Build a tight goal frame map: only the LAST hit before each goal gets credit
     # Map each goal to the exact scorer frame from metadata
-    _pid_team_shot = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
     goal_scorer_frames = {}  # frame -> team of scorer
 
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -762,7 +758,7 @@ def calculate_shot_data(manager, player_map):
             if f:
 
                 scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-                scorer_team = _pid_team_shot.get(scorer_pid, "Blue")
+                scorer_team = _pid_team.get(scorer_pid, "Blue")
                 goal_scorer_frames[f] = scorer_team
 
     # For each goal, find the last hit within 10 frames before the goal frame (the actual scoring touch)
@@ -891,8 +887,8 @@ def calculate_advanced_passing(manager, player_map, shot_df, max_time_diff=2.0):
     proto = manager.get_protobuf_data()
     hits = proto.game_stats.hits
     game_df = manager.get_data_frame()
-    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
-    pass_events = [] 
+    team_map = build_pid_team_map(proto)
+    pass_events = []
     last_hitter_id = None
     last_hit_time = -999
     last_hit_frame = 0
@@ -947,7 +943,7 @@ def calculate_aerial_stats(manager, player_map):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     hits = proto.game_stats.hits
-    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    team_map = build_pid_team_map(proto)
     AERIAL_HEIGHT = 500  # unreal units — roughly above crossbar height
 
     aerial_data = {}  # pid -> {hits, heights[], team, name}
@@ -1010,7 +1006,7 @@ def calculate_recovery_time(manager, player_map):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     hits = proto.game_stats.hits
-    team_map = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+    team_map = build_pid_team_map(proto)
     SUPERSONIC = 2200
     MAX_RECOVERY_FRAMES = 5 * REPLAY_FPS  # cap at 5 seconds
 
@@ -1064,7 +1060,6 @@ def calculate_recovery_time(manager, player_map):
 def calculate_defensive_pressure(manager, game_df, proto):
     """Track time each player spends in shadow defense position:
     between the ball and their own goal, moving in same direction as ball."""
-    team_map = {p.name: "Orange" if p.is_orange else "Blue" for p in proto.players}
     if 'ball' not in game_df:
         return pd.DataFrame()
 
@@ -1142,7 +1137,6 @@ def calculate_xg_against(manager, player_map, shot_df):
 
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
-    team_map = {p.name: "Orange" if p.is_orange else "Blue" for p in proto.players}
     orange_players = [p.name for p in proto.players if p.is_orange]
     blue_players = [p.name for p in proto.players if not p.is_orange]
 
@@ -1218,8 +1212,8 @@ def calculate_vaep(manager, player_map, shot_df):
     proto = manager.get_protobuf_data()
     game_df = manager.get_data_frame()
     max_frame = game_df.index.max()
-    player_teams = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
-    player_names = {str(p.id.id): p.name for p in proto.players}
+    player_teams = build_pid_team_map(proto)
+    player_names = build_pid_name_map(proto)
 
     ball_df = game_df['ball'] if 'ball' in game_df else None
     if ball_df is None:
@@ -1428,9 +1422,9 @@ def calculate_situational_stats(manager, game_df, proto, shot_df=None):
     half_frame = int(min(150, match_duration / 2) * REPLAY_FPS)
     last_min_frame = max(0, int((min(match_duration, 300) - 60) * REPLAY_FPS))
 
-    _pid_team = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
-    _pid_name = {str(p.id.id): p.name for p in proto.players}
-    player_team = {p.name: ("Orange" if p.is_orange else "Blue") for p in proto.players}
+    _pid_team = build_pid_team_map(proto)
+    _pid_name = build_pid_name_map(proto)
+    player_team = build_player_team_map(proto)
 
     goals = []
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -1551,7 +1545,6 @@ def calculate_expected_saves(manager, player_map, shot_df):
     if shot_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    player_teams = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
     saved_shots = shot_df[shot_df['Result'] == 'Shot'].copy()
     if saved_shots.empty:
         return pd.DataFrame(), pd.DataFrame()
@@ -1768,7 +1761,9 @@ def calculate_final_stats(manager, shot_df, pass_df, aerial_df=None, recovery_df
 # --- 10b. SINGLE MATCH PERSISTENCE HELPERS ---
 def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     """Compute all analytics for a single match. Returns dict of all results."""
-    temp_map = {str(p.id.id): p.name for p in proto.players}
+    temp_map = build_pid_name_map(proto)
+    pid_team = build_pid_team_map(proto)
+    player_team = build_player_team_map(proto)
     shot_df = calculate_shot_data(manager, temp_map)
     momentum_series = calculate_contextual_momentum(manager, game_df, proto)
     pass_df = calculate_advanced_passing(manager, temp_map, shot_df, pass_threshold)
@@ -1810,6 +1805,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "situational_df": situational_df,
         "win_prob_df": win_prob_df, "wp_model_used": wp_model_used,
         "is_overtime": is_overtime, "temp_map": temp_map,
+        "pid_team": pid_team, "player_team": player_team,
         "all_players": sorted(list(temp_map.values())),
     }
 
@@ -1835,8 +1831,7 @@ def build_export_shot_map(shot_df, proto):
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if not shot_df.empty:
-        _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
-        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
             t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
             t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
             if not t_shots.empty:
@@ -1927,7 +1922,7 @@ def build_export_xg_timeline(shot_df, game_df, proto, is_overtime):
     if not shot_df.empty:
         sorted_shots = shot_df.sort_values('Frame').copy()
         sorted_shots['Time'] = sorted_shots['Frame'] / 30.0
-        _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
+        _pid_team = build_pid_team_map(proto)
         meta_goals = {"Blue": [], "Orange": []}
         if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
             for g in proto.game_metadata.goals:
@@ -1936,7 +1931,7 @@ def build_export_xg_timeline(shot_df, game_df, proto, is_overtime):
                 gteam = _pid_team.get(scorer_pid, "Blue")
                 meta_goals[gteam].append(gf / 30.0)
         match_end = game_df.index.max() / 30.0
-        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
             team_shots = sorted_shots[sorted_shots['Team'] == team]
             if not team_shots.empty:
                 times = [0] + team_shots['Time'].tolist() + [match_end]
@@ -1992,7 +1987,7 @@ def build_export_zones(df, focus_players):
     """Positional zone bar chart for export."""
     fig = go.Figure()
     players_to_show = focus_players if focus_players else df['Name'].tolist()[:2]
-    colors = ['#007bff', '#ff9900', '#00cc96', '#AB63FA']
+    colors = [TEAM_COLORS["Blue"]["primary"], TEAM_COLORS["Orange"]["primary"], '#00cc96', '#AB63FA']
     for i, pname in enumerate(players_to_show[:3]):
         p_row = df[df['Name'] == pname]
         if p_row.empty:
@@ -2021,12 +2016,11 @@ def build_export_pressure(momentum_series, proto):
         x_time = momentum_series.index
         y_values = momentum_series.values
         fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none',
-            fillcolor='rgba(0, 123, 255, 0.6)', showlegend=False))
+            fillcolor=TEAM_COLORS["Blue"]["light"], showlegend=False))
         fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none',
-            fillcolor='rgba(255, 153, 0, 0.6)', showlegend=False))
+            fillcolor=TEAM_COLORS["Orange"]["light"], showlegend=False))
         # Goal markers from proto
-        _pid_team = {str(p.id.id): "Orange" if p.is_orange else "Blue" for p in proto.players}
-        _pid_name = {str(p.id.id): p.name for p in proto.players}
+        _pid_team = build_pid_team_map(proto)
         if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
             for g in proto.game_metadata.goals:
                 gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
@@ -2309,16 +2303,14 @@ if app_mode == "🔍 Single Match Analysis":
                 # Build goal list from proto metadata (authoritative source for all goals)
                 meta_goals = {"Blue": [], "Orange": []}
                 # Build player ID -> team lookup
-                pid_team_map = {}
-                for p in proto.players:
-                    pid_team_map[str(p.id.id)] = "Orange" if p.is_orange else "Blue"
+                pid_team_map = build_pid_team_map(proto)
                 if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
                     for g in proto.game_metadata.goals:
                         gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
                         scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
                         gteam = pid_team_map.get(scorer_pid, "Blue")
                         meta_goals[gteam].append(gf / 30.0)
-                for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                     team_shots = sorted_shots[sorted_shots['Team'] == team]
                     if not team_shots.empty:
                         times = [0] + team_shots['Time'].tolist()
@@ -2351,18 +2343,18 @@ if app_mode == "🔍 Single Match Analysis":
                 fig = go.Figure()
                 x_time = momentum_series.index
                 y_values = momentum_series.values
-                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor='rgba(0, 123, 255, 0.6)'))
-                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor='rgba(255, 153, 0, 0.6)'))
+                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor=TEAM_COLORS["Blue"]["light"]))
+                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor=TEAM_COLORS["Orange"]["light"]))
 
                 # Use proto metadata for authoritative goal list
-                _pi_pid_team = {str(p.id.id): ("Orange" if p.is_orange else "Blue") for p in proto.players}
-                _pi_pid_name = {str(p.id.id): p.name for p in proto.players}
+                _pid_team = build_pid_team_map(proto)
+                _pid_name = build_pid_name_map(proto)
                 if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
                     for g in proto.game_metadata.goals:
                         gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
                         scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-                        gteam = _pi_pid_team.get(scorer_pid, "Blue")
-                        scorer_name = _pi_pid_name.get(scorer_pid, "Unknown")
+                        gteam = _pid_team.get(scorer_pid, "Blue")
+                        scorer_name = _pid_name.get(scorer_pid, "Unknown")
                         time_sec = gf / 30.0
                         tm_multiplier = 1 if gteam == 'Blue' else -1
                         fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=scorer_name, hoverinfo="text+name", showlegend=False))
@@ -2376,7 +2368,7 @@ if app_mode == "🔍 Single Match Analysis":
                 fig.update_layout(get_field_layout("Shot Map"))
 
                 # Team-colored shots and goals
-                for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                     t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
                     t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
                     if not t_shots.empty:
@@ -2421,7 +2413,7 @@ if app_mode == "🔍 Single Match Analysis":
                     if p.name in game_df and frame in game_df.index:
                         try:
                             p_data = game_df[p.name].loc[frame]
-                            color = '#007bff' if not p.is_orange else '#ff9900'
+                            color = TEAM_COLORS["Blue"]["primary"] if not p.is_orange else TEAM_COLORS["Orange"]["primary"]
                             marker_sym = 'diamond' if p.name == shot_row['Player'] else 'circle'
                             marker_size = 16 if p.name == shot_row['Player'] else 12
                             fig_ff.add_trace(go.Scatter(x=[p_data['pos_x']], y=[p_data['pos_y']], mode='markers+text', marker=dict(size=marker_size, color=color, symbol=marker_sym, line=dict(width=1, color='white')), text=[p.name], textposition='top center', textfont=dict(size=9, color='white'), name=p.name, showlegend=False))
@@ -2514,10 +2506,10 @@ if app_mode == "🔍 Single Match Analysis":
         with t6:
             c1, c2 = st.columns(2)
             with c1:
-                fig = px.bar(df, x='Name', y='Time Supersonic', color='Team', title="Time Supersonic (s)", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9000"})
+                fig = px.bar(df, x='Name', y='Time Supersonic', color='Team', title="Time Supersonic (s)", color_discrete_map=TEAM_COLOR_MAP)
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
-                fig = px.bar(df, x='Name', y='Boost Used', color='Team', title="Total Boost Used", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9000"})
+                fig = px.bar(df, x='Name', y='Boost Used', color='Team', title="Total Boost Used", color_discrete_map=TEAM_COLOR_MAP)
                 st.plotly_chart(fig, use_container_width=True)
 
         with t8:
@@ -2529,13 +2521,13 @@ if app_mode == "🔍 Single Match Analysis":
                 ac1, ac2 = st.columns(2)
                 with ac1:
                     fig_aer = px.bar(aerial_df, x='Name', y='Aerial Hits', color='Team',
-                        title="Aerial Hits", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        title="Aerial Hits", color_discrete_map=TEAM_COLOR_MAP)
                     fig_aer.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_aer, use_container_width=True)
                 with ac2:
                     fig_air = go.Figure()
                     for _, row in aerial_df.iterrows():
-                        color = '#007bff' if row['Team'] == 'Blue' else '#ff9900'
+                        color = TEAM_COLORS["Blue"]["primary"] if row['Team'] == 'Blue' else TEAM_COLORS["Orange"]["primary"]
                         fig_air.add_trace(go.Bar(x=[row['Name']], y=[row['Time Airborne (s)']],
                             name=row['Name'], marker_color=color, showlegend=False))
                     fig_air.update_layout(title="Time Airborne (s)",
@@ -2552,13 +2544,13 @@ if app_mode == "🔍 Single Match Analysis":
                 with rc1:
                     fig_rec = px.bar(recovery_df, x='Name', y='Avg Recovery (s)', color='Team',
                         title="Avg Time to Supersonic After Hit",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_rec.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_rec, use_container_width=True)
                 with rc2:
                     fig_fast = px.bar(recovery_df, x='Name', y='Recovery < 1s %', color='Team',
                         title="Fast Recovery Rate (< 1s)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_fast.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_fast, use_container_width=True)
                 rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
@@ -2582,13 +2574,13 @@ if app_mode == "🔍 Single Match Analysis":
                         team = chain_df[chain_df['Sender'] == n]['Team'].values
                         if len(team) == 0:
                             team = chain_df[chain_df['Receiver'] == n]['Team'].values
-                        node_colors.append('#007bff' if (len(team) > 0 and team[0] == 'Blue') else '#ff9900')
+                        node_colors.append(TEAM_COLORS["Blue"]["primary"] if (len(team) > 0 and team[0] == 'Blue') else TEAM_COLORS["Orange"]["primary"])
                     link_colors = []
                     for _, row in chain_df.iterrows():
                         if row['Team'] == 'Blue':
-                            link_colors.append('rgba(0,123,255,0.35)')
+                            link_colors.append(TEAM_COLORS["Blue"]["trail"])
                         else:
-                            link_colors.append('rgba(255,153,0,0.35)')
+                            link_colors.append(TEAM_COLORS["Orange"]["trail"])
                     fig_sankey = go.Figure(go.Sankey(
                         node=dict(pad=15, thickness=20, line=dict(color='white', width=0.5),
                                   label=all_names, color=node_colors),
@@ -2618,13 +2610,13 @@ if app_mode == "🔍 Single Match Analysis":
                 with dc1:
                     fig_shadow = px.bar(defense_df, x='Name', y='Shadow %', color='Team',
                         title="Shadow Defense Time %",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_shadow.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_shadow, use_container_width=True)
                 with dc2:
                     fig_pres = px.bar(defense_df, x='Name', y='Pressure Time (s)', color='Team',
                         title="Total Pressure Time (s)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_pres.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_pres, use_container_width=True)
                 st.dataframe(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']].sort_values('Shadow %', ascending=False),
@@ -2639,13 +2631,13 @@ if app_mode == "🔍 Single Match Analysis":
                 with xc1:
                     fig_xga = px.bar(xga_df, x='Name', y='xGA', color='Team',
                         title="Expected Goals Against (as nearest defender)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_xga.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_xga, use_container_width=True)
                 with xc2:
                     fig_dist = px.bar(xga_df, x='Name', y='Avg Dist to Shot', color='Team',
                         title="Avg Distance to Shot When Nearest Defender",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_dist.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_dist, use_container_width=True)
                 xga_cols = ['Name', 'Team', 'Shots Faced', 'xGA', 'Goals Conceded (nearest)', 'Avg Dist to Shot', 'High xG Faced']
@@ -2661,13 +2653,13 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_vaep_bar = px.bar(vaep_summary.sort_values('Total_VAEP', ascending=False),
                         x='Name', y='Total_VAEP', color='Team',
                         title="Total VAEP per Player",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_vaep_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_vaep_bar, use_container_width=True)
                 with vc2:
                     if not vaep_df.empty:
                         fig_vaep_scatter = go.Figure()
-                        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                             t_data = vaep_df[vaep_df['Team'] == team]
                             if not t_data.empty:
                                 colors_arr = ['#00cc96' if v > 0 else '#EF553B' for v in t_data['VAEP']]
@@ -2697,14 +2689,14 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_xs_bar = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Total_xS', ascending=False),
                         x='Name', y='Total_xS', color='Team',
                         title="Total xS (Save Difficulty)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_xs_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_xs_bar, use_container_width=True)
                 with xs2:
                     fig_xs_avg = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Avg_xS', ascending=False),
                         x='Name', y='Avg_xS', color='Team',
                         title="Avg xS per Save",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_xs_avg.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_xs_avg, use_container_width=True)
                 xs_show_cols = ['Name', 'Team', 'Saves_Nearby', 'Total_xS', 'Avg_xS', 'Hard_Saves']
@@ -2738,7 +2730,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(fig_roles, use_container_width=True)
                 with rc2:
                     # Team comparison
-                    for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                    for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                         team_data = rotation_summary[rotation_summary['Team'] == team]
                         if not team_data.empty:
                             st.markdown(f"**{team} Team**")
@@ -2779,7 +2771,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.markdown(f"#### Double Commits ({len(double_commits_df)} detected)")
                     fig_dc = go.Figure()
                     fig_dc.update_layout(get_field_layout("Double Commit Locations"))
-                    for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                    for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                         t_dc = double_commits_df[double_commits_df['Team'] == team] if 'Team' in double_commits_df.columns else pd.DataFrame()
                         if not t_dc.empty:
                             fig_dc.add_trace(go.Scatter(
@@ -2829,10 +2821,6 @@ if app_mode == "🔍 Single Match Analysis":
                     ball_x = ball_y = ball_z = np.array([])
 
                 n_players = len(tac_players)
-                _TEAM_COLORS = {
-                    "Blue":   {"solid": "rgba(0,123,255,1)",   "trail": "rgba(0,123,255,0.35)"},
-                    "Orange": {"solid": "rgba(255,153,0,1)",   "trail": "rgba(255,153,0,0.35)"},
-                }
 
                 # ── Time range selector ──
                 # Build goal event markers for quick-jump
@@ -2935,7 +2923,7 @@ if app_mode == "🔍 Single Match Analysis":
                         px, py, pz = float(pinfo['x'][pi]), float(pinfo['y'][pi]), float(pinfo['z'][pi])
                         bv = pinfo['boost'][pi] if pi < len(pinfo['boost']) else 0
                         bv = max(0, min(100, bv)) if not np.isnan(bv) else 0
-                        tc = _TEAM_COLORS[pinfo['team']]
+                        tc = TEAM_COLORS[pinfo['team']]
 
                         traces.append(go.Scatter3d(
                             x=[px], y=[py], z=[pz], mode='markers+text',
@@ -2977,8 +2965,8 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_tac.add_traces(animation_frames[0].data)
 
                 # ── Camera + layout ──
-                rx = FIELD_HALF_X + _AXIS_PAD_X
-                ry = FIELD_HALF_Y + _AXIS_PAD_Y
+                rx = FIELD_HALF_X + AXIS_PAD_X
+                ry = FIELD_HALF_Y + AXIS_PAD_Y
                 fig_tac.update_layout(
                     scene=dict(
                         xaxis=dict(range=[-rx, rx], title="", showgrid=False,
@@ -3164,7 +3152,7 @@ elif app_mode == "📈 Season Batch Processor":
                     bar.progress((i+1)/len(uploaded_files))
                     continue
                 try:
-                    temp_map = {str(p.id.id): p.name for p in proto.players}
+                    temp_map = build_pid_name_map(proto)
                     shot_df = calculate_shot_data(manager, temp_map)
                     pass_df = calculate_advanced_passing(manager, temp_map, shot_df, pass_threshold)
                     aerial_df_b = calculate_aerial_stats(manager, temp_map)
