@@ -124,6 +124,7 @@ def save_data(new_stats, new_kickoffs):
 
 # --- 4. VISUALIZATION HELPERS ---
 
+@st.cache_data(show_spinner=False)
 def get_field_layout(title=""):
     """Returns a Plotly layout dict with the pitch image as background."""
     rx = FIELD_HALF_X + AXIS_PAD_X
@@ -151,14 +152,15 @@ def get_field_layout(title=""):
         layout['plot_bgcolor'] = '#1a241a'
         layout['shapes'] = [
             dict(type="rect", x0=-FIELD_HALF_X, y0=-FIELD_HALF_Y, x1=FIELD_HALF_X, y1=FIELD_HALF_Y, line=dict(color="rgba(255,255,255,0.8)", width=2)),
-            dict(type="rect", x0=-893, y0=FIELD_HALF_Y, x1=893, y1=FIELD_HALF_Y + GOAL_DEPTH, line=dict(color="#ff9900", width=2)),
-            dict(type="rect", x0=-893, y0=-(FIELD_HALF_Y + GOAL_DEPTH), x1=893, y1=-FIELD_HALF_Y, line=dict(color="#007bff", width=2)),
+            dict(type="rect", x0=-893, y0=FIELD_HALF_Y, x1=893, y1=FIELD_HALF_Y + GOAL_DEPTH, line=dict(color=TEAM_COLORS["Orange"]["primary"], width=2)),
+            dict(type="rect", x0=-893, y0=-(FIELD_HALF_Y + GOAL_DEPTH), x1=893, y1=-FIELD_HALF_Y, line=dict(color=TEAM_COLORS["Blue"]["primary"], width=2)),
             dict(type="line", x0=-FIELD_HALF_X, y0=0, x1=FIELD_HALF_X, y1=0, line=dict(color="rgba(255,255,255,0.5)", width=2, dash="dot")),
             dict(type="circle", x0=-CENTER_CIRCLE_R, y0=-CENTER_CIRCLE_R, x1=CENTER_CIRCLE_R, y1=CENTER_CIRCLE_R, line=dict(color="rgba(255,255,255,0.5)", width=2))
         ]
     return layout
 
 
+@st.cache_resource(show_spinner=False)
 def get_3d_field_traces():
     """Returns list of Plotly Scatter3d traces for 3D Rocket League field boundaries."""
     traces = []
@@ -567,6 +569,7 @@ def save_win_prob_model(model, scaler, filepath=WIN_PROB_MODEL_FILE):
     with open(filepath, 'w') as f:
         json.dump(data, f)
 
+@st.cache_resource(show_spinner=False)
 def load_win_prob_model(filepath=WIN_PROB_MODEL_FILE):
     """Load a trained win probability model from JSON. Returns (model, scaler) or (None, None)."""
     if not SKLEARN_AVAILABLE or not os.path.exists(filepath):
@@ -1829,7 +1832,7 @@ def build_export_shot_map(shot_df, proto):
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if not shot_df.empty:
         _pid_team = build_pid_team_map(proto)
-        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
             t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
             t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
             if not t_shots.empty:
@@ -1929,7 +1932,7 @@ def build_export_xg_timeline(shot_df, game_df, proto, is_overtime):
                 gteam = _pid_team.get(scorer_pid, "Blue")
                 meta_goals[gteam].append(gf / 30.0)
         match_end = game_df.index.max() / 30.0
-        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
             team_shots = sorted_shots[sorted_shots['Team'] == team]
             if not team_shots.empty:
                 times = [0] + team_shots['Time'].tolist() + [match_end]
@@ -1985,7 +1988,7 @@ def build_export_zones(df, focus_players):
     """Positional zone bar chart for export."""
     fig = go.Figure()
     players_to_show = focus_players if focus_players else df['Name'].tolist()[:2]
-    colors = ['#007bff', '#ff9900', '#00cc96', '#AB63FA']
+    colors = [TEAM_COLORS["Blue"]["primary"], TEAM_COLORS["Orange"]["primary"], '#00cc96', '#AB63FA']
     for i, pname in enumerate(players_to_show[:3]):
         p_row = df[df['Name'] == pname]
         if p_row.empty:
@@ -2311,7 +2314,7 @@ if app_mode == "🔍 Single Match Analysis":
                         scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
                         gteam = pid_team_map.get(scorer_pid, "Blue")
                         meta_goals[gteam].append(gf / 30.0)
-                for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                     team_shots = sorted_shots[sorted_shots['Team'] == team]
                     if not team_shots.empty:
                         times = [0] + team_shots['Time'].tolist()
@@ -2369,7 +2372,7 @@ if app_mode == "🔍 Single Match Analysis":
                 fig.update_layout(get_field_layout("Shot Map"))
 
                 # Team-colored shots and goals
-                for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                     t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
                     t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
                     if not t_shots.empty:
@@ -2414,7 +2417,7 @@ if app_mode == "🔍 Single Match Analysis":
                     if p.name in game_df and frame in game_df.index:
                         try:
                             p_data = game_df[p.name].loc[frame]
-                            color = '#007bff' if not p.is_orange else '#ff9900'
+                            color = TEAM_COLORS["Blue"]["primary"] if not p.is_orange else TEAM_COLORS["Orange"]["primary"]
                             marker_sym = 'diamond' if p.name == shot_row['Player'] else 'circle'
                             marker_size = 16 if p.name == shot_row['Player'] else 12
                             fig_ff.add_trace(go.Scatter(x=[p_data['pos_x']], y=[p_data['pos_y']], mode='markers+text', marker=dict(size=marker_size, color=color, symbol=marker_sym, line=dict(width=1, color='white')), text=[p.name], textposition='top center', textfont=dict(size=9, color='white'), name=p.name, showlegend=False))
@@ -2507,10 +2510,10 @@ if app_mode == "🔍 Single Match Analysis":
         with t6:
             c1, c2 = st.columns(2)
             with c1:
-                fig = px.bar(df, x='Name', y='Time Supersonic', color='Team', title="Time Supersonic (s)", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9000"})
+                fig = px.bar(df, x='Name', y='Time Supersonic', color='Team', title="Time Supersonic (s)", color_discrete_map=TEAM_COLOR_MAP)
                 st.plotly_chart(fig, use_container_width=True)
             with c2:
-                fig = px.bar(df, x='Name', y='Boost Used', color='Team', title="Total Boost Used", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9000"})
+                fig = px.bar(df, x='Name', y='Boost Used', color='Team', title="Total Boost Used", color_discrete_map=TEAM_COLOR_MAP)
                 st.plotly_chart(fig, use_container_width=True)
 
         with t8:
@@ -2522,13 +2525,13 @@ if app_mode == "🔍 Single Match Analysis":
                 ac1, ac2 = st.columns(2)
                 with ac1:
                     fig_aer = px.bar(aerial_df, x='Name', y='Aerial Hits', color='Team',
-                        title="Aerial Hits", color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        title="Aerial Hits", color_discrete_map=TEAM_COLOR_MAP)
                     fig_aer.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_aer, use_container_width=True)
                 with ac2:
                     fig_air = go.Figure()
                     for _, row in aerial_df.iterrows():
-                        color = '#007bff' if row['Team'] == 'Blue' else '#ff9900'
+                        color = TEAM_COLORS["Blue"]["primary"] if row['Team'] == 'Blue' else TEAM_COLORS["Orange"]["primary"]
                         fig_air.add_trace(go.Bar(x=[row['Name']], y=[row['Time Airborne (s)']],
                             name=row['Name'], marker_color=color, showlegend=False))
                     fig_air.update_layout(title="Time Airborne (s)",
@@ -2545,13 +2548,13 @@ if app_mode == "🔍 Single Match Analysis":
                 with rc1:
                     fig_rec = px.bar(recovery_df, x='Name', y='Avg Recovery (s)', color='Team',
                         title="Avg Time to Supersonic After Hit",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_rec.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_rec, use_container_width=True)
                 with rc2:
                     fig_fast = px.bar(recovery_df, x='Name', y='Recovery < 1s %', color='Team',
                         title="Fast Recovery Rate (< 1s)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_fast.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_fast, use_container_width=True)
                 rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
@@ -2575,7 +2578,7 @@ if app_mode == "🔍 Single Match Analysis":
                         team = chain_df[chain_df['Sender'] == n]['Team'].values
                         if len(team) == 0:
                             team = chain_df[chain_df['Receiver'] == n]['Team'].values
-                        node_colors.append('#007bff' if (len(team) > 0 and team[0] == 'Blue') else '#ff9900')
+                        node_colors.append(TEAM_COLORS["Blue"]["primary"] if (len(team) > 0 and team[0] == 'Blue') else TEAM_COLORS["Orange"]["primary"])
                     link_colors = []
                     for _, row in chain_df.iterrows():
                         if row['Team'] == 'Blue':
@@ -2611,13 +2614,13 @@ if app_mode == "🔍 Single Match Analysis":
                 with dc1:
                     fig_shadow = px.bar(defense_df, x='Name', y='Shadow %', color='Team',
                         title="Shadow Defense Time %",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_shadow.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_shadow, use_container_width=True)
                 with dc2:
                     fig_pres = px.bar(defense_df, x='Name', y='Pressure Time (s)', color='Team',
                         title="Total Pressure Time (s)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_pres.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_pres, use_container_width=True)
                 st.dataframe(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']].sort_values('Shadow %', ascending=False),
@@ -2632,13 +2635,13 @@ if app_mode == "🔍 Single Match Analysis":
                 with xc1:
                     fig_xga = px.bar(xga_df, x='Name', y='xGA', color='Team',
                         title="Expected Goals Against (as nearest defender)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_xga.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_xga, use_container_width=True)
                 with xc2:
                     fig_dist = px.bar(xga_df, x='Name', y='Avg Dist to Shot', color='Team',
                         title="Avg Distance to Shot When Nearest Defender",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_dist.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_dist, use_container_width=True)
                 xga_cols = ['Name', 'Team', 'Shots Faced', 'xGA', 'Goals Conceded (nearest)', 'Avg Dist to Shot', 'High xG Faced']
@@ -2654,13 +2657,13 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_vaep_bar = px.bar(vaep_summary.sort_values('Total_VAEP', ascending=False),
                         x='Name', y='Total_VAEP', color='Team',
                         title="Total VAEP per Player",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_vaep_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_vaep_bar, use_container_width=True)
                 with vc2:
                     if not vaep_df.empty:
                         fig_vaep_scatter = go.Figure()
-                        for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                             t_data = vaep_df[vaep_df['Team'] == team]
                             if not t_data.empty:
                                 colors_arr = ['#00cc96' if v > 0 else '#EF553B' for v in t_data['VAEP']]
@@ -2690,14 +2693,14 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_xs_bar = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Total_xS', ascending=False),
                         x='Name', y='Total_xS', color='Team',
                         title="Total xS (Save Difficulty)",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_xs_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_xs_bar, use_container_width=True)
                 with xs2:
                     fig_xs_avg = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Avg_xS', ascending=False),
                         x='Name', y='Avg_xS', color='Team',
                         title="Avg xS per Save",
-                        color_discrete_map={"Blue": "#007bff", "Orange": "#ff9900"})
+                        color_discrete_map=TEAM_COLOR_MAP)
                     fig_xs_avg.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
                     st.plotly_chart(fig_xs_avg, use_container_width=True)
                 xs_show_cols = ['Name', 'Team', 'Saves_Nearby', 'Total_xS', 'Avg_xS', 'Hard_Saves']
@@ -2731,7 +2734,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(fig_roles, use_container_width=True)
                 with rc2:
                     # Team comparison
-                    for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                    for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                         team_data = rotation_summary[rotation_summary['Team'] == team]
                         if not team_data.empty:
                             st.markdown(f"**{team} Team**")
@@ -2772,7 +2775,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.markdown(f"#### Double Commits ({len(double_commits_df)} detected)")
                     fig_dc = go.Figure()
                     fig_dc.update_layout(get_field_layout("Double Commit Locations"))
-                    for team, color in [("Blue", "#007bff"), ("Orange", "#ff9900")]:
+                    for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                         t_dc = double_commits_df[double_commits_df['Team'] == team] if 'Team' in double_commits_df.columns else pd.DataFrame()
                         if not t_dc.empty:
                             fig_dc.add_trace(go.Scatter(
