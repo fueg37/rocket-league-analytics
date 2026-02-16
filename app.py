@@ -14,10 +14,9 @@ from datetime import datetime, timedelta
 from constants import (
     REPLAY_FPS, DB_FILE, KICKOFF_DB_FILE, WIN_PROB_MODEL_FILE,
     MAX_STORED_MATCHES, FIELD_HALF_X, FIELD_HALF_Y, WALL_HEIGHT,
-    GOAL_HALF_WIDTH, GOAL_DEPTH, GOAL_HEIGHT, CENTER_CIRCLE_R,
+    GOAL_HALF_W, GOAL_DEPTH, GOAL_HEIGHT, CENTER_CIRCLE_R,
     AXIS_PAD_X, AXIS_PAD_Y, TEAM_COLORS, TEAM_COLOR_MAP,
 )
-from analytics.geometry import goal_mouth_x_bounds
 from utils import (
     build_pid_team_map, build_pid_name_map, build_player_team_map,
     get_team_players, build_player_positions,
@@ -223,12 +222,11 @@ def get_field_layout(title=""):
             layer="below"
         )]
     else:
-        goal_left_x, goal_right_x = goal_mouth_x_bounds()
         layout['plot_bgcolor'] = '#1a241a'
         layout['shapes'] = [
             dict(type="rect", x0=-FIELD_HALF_X, y0=-FIELD_HALF_Y, x1=FIELD_HALF_X, y1=FIELD_HALF_Y, line=dict(color="rgba(255,255,255,0.8)", width=2)),
-            dict(type="rect", x0=goal_left_x, y0=FIELD_HALF_Y, x1=goal_right_x, y1=FIELD_HALF_Y + GOAL_DEPTH, line=dict(color=TEAM_COLORS["Orange"]["primary"], width=2)),
-            dict(type="rect", x0=goal_left_x, y0=-(FIELD_HALF_Y + GOAL_DEPTH), x1=goal_right_x, y1=-FIELD_HALF_Y, line=dict(color=TEAM_COLORS["Blue"]["primary"], width=2)),
+            dict(type="rect", x0=-893, y0=FIELD_HALF_Y, x1=893, y1=FIELD_HALF_Y + GOAL_DEPTH, line=dict(color=TEAM_COLORS["Orange"]["primary"], width=2)),
+            dict(type="rect", x0=-893, y0=-(FIELD_HALF_Y + GOAL_DEPTH), x1=893, y1=-FIELD_HALF_Y, line=dict(color=TEAM_COLORS["Blue"]["primary"], width=2)),
             dict(type="line", x0=-FIELD_HALF_X, y0=0, x1=FIELD_HALF_X, y1=0, line=dict(color="rgba(255,255,255,0.5)", width=2, dash="dot")),
             dict(type="circle", x0=-CENTER_CIRCLE_R, y0=-CENTER_CIRCLE_R, x1=CENTER_CIRCLE_R, y1=CENTER_CIRCLE_R, line=dict(color="rgba(255,255,255,0.5)", width=2))
         ]
@@ -263,7 +261,7 @@ def get_3d_field_traces():
         showlegend=False, hoverinfo='skip'))
 
     # Goal frames (blue at -Y, orange at +Y)
-    gw = GOAL_HALF_WIDTH
+    gw = GOAL_HALF_W
     gh = GOAL_HEIGHT
     for sign, color in [(-1, 'rgba(0,123,255,0.5)'), (1, 'rgba(255,153,0,0.5)')]:
         gy = sign * fy
