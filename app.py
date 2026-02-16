@@ -25,6 +25,24 @@ from utils import (
 
 from charts.theme import apply_chart_theme
 from charts.factory import comparison_dumbbell, player_rank_lollipop
+from analytics.shot_quality import (
+    COL_ON_TARGET,
+    COL_TARGET_X,
+    COL_TARGET_Z,
+    COL_XG,
+    COL_XGOT,
+    SHOT_COL_FRAME,
+    SHOT_COL_PLAYER,
+    SHOT_COL_RESULT,
+    SHOT_COL_TEAM,
+    SHOT_COL_X,
+    SHOT_COL_Y,
+    SHOT_EVENT_COLUMNS,
+    calculate_xg_probability,
+    calculate_xgot_probability,
+    compute_shot_features,
+    validate_shot_metric_columns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -306,37 +324,15 @@ def get_parsed_replay_data(file_bytes, file_name):
             try: os.unlink(tmp_path)
             except OSError: pass
 
-# --- 6. MATH: PROBABILITY (xG) ---
-def calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y):
-    dist = np.sqrt(shot_x**2 + (target_y - shot_y)**2)
-    vec_l = np.array([-893 - shot_x, target_y - shot_y])
-    vec_r = np.array([893 - shot_x, target_y - shot_y])
-    try:
-        norm_l = np.linalg.norm(vec_l)
-        norm_r = np.linalg.norm(vec_r)
-        if norm_l == 0 or norm_r == 0: return 0
-        unit_l = vec_l / norm_l
-        unit_r = vec_r / norm_r
-        dot = np.dot(unit_l, unit_r)
-        angle = np.arccos(np.clip(dot, -1.0, 1.0))
-    except (ValueError, FloatingPointError): angle = 0
-    base_xg = (angle * 0.85) * np.exp(-0.00045 * dist)
-    speed = np.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
-    speed_factor = 1.0 + (speed - 1400) / 2000.0
-    speed_factor = max(0.5, min(speed_factor, 1.5))
-    height_factor = 1.15 if shot_z > 150 else 1.0
-    xg = base_xg * speed_factor * height_factor
-    return min(max(xg, 0.01), 0.99)
-
 # --- 6b. MATH: LUCK % (POISSON BINOMIAL) ---
 def calculate_luck_percentage(shot_df, team, actual_goals):
     """Computes Luck % using Poisson Binomial distribution.
     Each shot has a different xG probability. We compute P(scoring >= actual_goals)
     from those individual probabilities, then Luck = (1 - P) * 100 for winners."""
-    team_shots = shot_df[shot_df['Team'] == team] if not shot_df.empty else pd.DataFrame()
+    team_shots = shot_df[shot_df[SHOT_COL_TEAM] == team] if not shot_df.empty else pd.DataFrame()
     if team_shots.empty or actual_goals == 0:
         return 0.0
-    probs = team_shots['xG'].values.tolist()
+    probs = team_shots[COL_XG].values.tolist()
     n = len(probs)
     # Iterative Poisson Binomial: dp[k] = P(exactly k goals)
     dp = [0.0] * (n + 1)
@@ -850,6 +846,17 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
 
             if ball_pos and ball_vel:
                 xg = calculate_xg_probability(ball_pos[0], ball_pos[1], ball_pos[2], ball_vel[0], ball_vel[1], ball_vel[2], target_y)
+                xgot = calculate_xgot_probability(ball_pos[0], ball_pos[1], ball_pos[2], ball_vel[0], ball_vel[1], ball_vel[2], target_y)
+                shot_features = compute_shot_features(
+                    ball_pos[0], ball_pos[1], ball_pos[2],
+                    ball_vel[0], ball_vel[1], ball_vel[2],
+                    target_y,
+                    goal_half_w=GOAL_HALF_W,
+                    goal_height=GOAL_HEIGHT,
+                )
+                target_x = shot_features[COL_TARGET_X]
+                target_z = shot_features[COL_TARGET_Z]
+                on_target = shot_features[COL_ON_TARGET]
                 is_big_chance = False
                 defender_dist = 99999
                 if xg > 0.40:
@@ -869,7 +876,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                 result = "Goal" if (is_lib_goal or is_goal_hit) else "Shot"
                 shot_list.append({
                     "Player": player_name, "Team": shooter_team, "Frame": frame,
-                    "xG": round(xg, 2), "Result": result, "BigChance": is_big_chance,
+                    COL_XG: round(xg, 2), COL_XGOT: round(xgot, 2), COL_ON_TARGET: bool(on_target), COL_TARGET_X: target_x, COL_TARGET_Z: target_z, "Result": result, "BigChance": is_big_chance,
                     "X": ball_pos[0], "Y": ball_pos[1],
                     "Speed": int(np.sqrt(ball_vel[0]**2 + ball_vel[1]**2 + ball_vel[2]**2))
                 })
@@ -878,34 +885,34 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         raw_df = pd.DataFrame(shot_list)
 
         # Deduplicate: within 1-second windows, keep highest xG per team
-        raw_df['TimeGroup'] = (raw_df['Frame'] // REPLAY_FPS)
+        raw_df['TimeGroup'] = (raw_df[SHOT_COL_FRAME] // REPLAY_FPS)
         # Prefer goals over shots, then highest xG
-        raw_df['_sort'] = raw_df['Result'].map({'Goal': 0, 'Shot': 1})
-        final_df = raw_df.sort_values(['_sort', 'xG'], ascending=[True, False]).drop_duplicates(subset=['Team', 'TimeGroup'])
+        raw_df['_sort'] = raw_df[SHOT_COL_RESULT].map({'Goal': 0, 'Shot': 1})
+        final_df = raw_df.sort_values(['_sort', COL_XG], ascending=[True, False]).drop_duplicates(subset=[SHOT_COL_TEAM, 'TimeGroup'])
         final_df = final_df.drop(columns=['_sort'])
 
         # Dedup shots within 0.5s windows per player
-        raw_df['TimeGroup'] = (raw_df['Frame'] // (REPLAY_FPS // 2))
-        shots_only = raw_df[raw_df['Result'] == 'Shot'].sort_values('xG', ascending=False).drop_duplicates(subset=['Player', 'TimeGroup', 'Result'])
+        raw_df['TimeGroup'] = (raw_df[SHOT_COL_FRAME] // (REPLAY_FPS // 2))
+        shots_only = raw_df[raw_df[SHOT_COL_RESULT] == 'Shot'].sort_values(COL_XG, ascending=False).drop_duplicates(subset=[SHOT_COL_PLAYER, 'TimeGroup', SHOT_COL_RESULT])
         # Dedup goals using proximity — a single goal event can trigger
         # multiple detections across nearby frames. Keep the highest-xG
         # entry per cluster of goals within 90 frames (3s) of each other.
-        goals_raw = raw_df[raw_df['Result'] == 'Goal'].sort_values('Frame').copy()
+        goals_raw = raw_df[raw_df[SHOT_COL_RESULT] == 'Goal'].sort_values(SHOT_COL_FRAME).copy()
         goals_deduped = []
         last_kept_frame = -9999
         for _, row in goals_raw.iterrows():
-            if row['Frame'] - last_kept_frame > 90:
+            if row[SHOT_COL_FRAME] - last_kept_frame > 90:
                 goals_deduped.append(row)
-                last_kept_frame = row['Frame']
+                last_kept_frame = row[SHOT_COL_FRAME]
             else:
                 # Same goal event — keep higher xG
-                if row['xG'] > goals_deduped[-1]['xG']:
+                if row[COL_XG] > goals_deduped[-1][COL_XG]:
                     goals_deduped[-1] = row
         goals_only = pd.DataFrame(goals_deduped) if goals_deduped else pd.DataFrame(columns=raw_df.columns)
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
  
         return final_df
-    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y"])
+    return pd.DataFrame(columns=list(SHOT_EVENT_COLUMNS))
 
 def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, max_time_diff=2.0):
     hits = proto.game_stats.hits
@@ -915,8 +922,8 @@ def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, ma
     last_hit_frame = 0
     shot_frames_by_team = {}
     if not shot_df.empty:
-        for team_name in shot_df['Team'].unique():
-            shot_frames_by_team[team_name] = set(shot_df[shot_df['Team'] == team_name]['Frame'].tolist())
+        for team_name in shot_df[SHOT_COL_TEAM].unique():
+            shot_frames_by_team[team_name] = set(shot_df[shot_df[SHOT_COL_TEAM] == team_name][SHOT_COL_FRAME].tolist())
     
     for hit in hits:
         if not hit.player_id: continue
@@ -1157,9 +1164,9 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
         xga_per_player[p.name] = []
 
     for _, shot in shot_df.iterrows():
-        frame = int(shot['Frame'])
+        frame = int(shot[SHOT_COL_FRAME])
         shooter_team = shot['Team']
-        xg = shot['xG']
+        xg = shot[COL_XG]
         # Defenders are the opposing team
         defenders = blue_players if shooter_team == "Orange" else orange_players
 
@@ -1170,7 +1177,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
         closest_defender = None
         min_dist = 99999
         try:
-            ball_x, ball_y = shot['X'], shot['Y']
+            ball_x, ball_y = shot[SHOT_COL_X], shot[SHOT_COL_Y]
             for d_name in defenders:
                 if d_name in game_df:
                     d_data = game_df[d_name].loc[frame]
@@ -1183,7 +1190,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
 
         if closest_defender:
             xga_per_player[closest_defender].append({
-                'xG': xg, 'result': shot['Result'], 'dist': round(min_dist),
+                COL_XG: xg, 'result': shot[SHOT_COL_RESULT], 'dist': round(min_dist),
                 'frame': frame
             })
 
@@ -1192,7 +1199,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
         name = p.name
         team = "Orange" if p.is_orange else "Blue"
         events = xga_per_player.get(name, [])
-        xg_vals = [e['xG'] for e in events]
+        xg_vals = [e[COL_XG] for e in events]
         goals_conceded = sum(1 for e in events if e['result'] == 'Goal')
         results.append({
             'Name': name, 'Team': team,
@@ -1200,7 +1207,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
             'xGA': round(sum(xg_vals), 2),
             'Goals Conceded (nearest)': goals_conceded,
             'Avg Dist to Shot': int(np.mean([e['dist'] for e in events])) if events else 0,
-            'High xG Faced': sum(1 for e in events if e['xG'] > 0.3),
+            'High xG Faced': sum(1 for e in events if e[COL_XG] > 0.3),
         })
     return pd.DataFrame(results)
 
@@ -1374,9 +1381,9 @@ def calculate_rotation_analysis(game_df, proto, player_pos, sample_step=5):
             team_dc = dc_raw_df[dc_raw_df['Team'] == team].sort_values('Frame')
             prev_frame = -100
             for _, row in team_dc.iterrows():
-                if row['Frame'] - prev_frame > 30:
+                if row[SHOT_COL_FRAME] - prev_frame > 30:
                     dc_clustered.append(row.to_dict())
-                prev_frame = row['Frame']
+                prev_frame = row[SHOT_COL_FRAME]
     double_commits_df = pd.DataFrame(dc_clustered) if dc_clustered else pd.DataFrame()
 
     # Build summary
@@ -1464,7 +1471,7 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
     # For each team: fraction of saved shots in last minute → scale each player's saves
     saves_last_min = {p.name: 0 for p in proto.players}
     if shot_df is not None and not shot_df.empty:
-        saved = shot_df[shot_df['Result'] == 'Shot']
+        saved = shot_df[shot_df[SHOT_COL_RESULT] == 'Shot']
         for team in ("Blue", "Orange"):
             opp = "Orange" if team == "Blue" else "Blue"
             team_saved = saved[saved['Team'] == opp]  # shots BY opponent that were saved
@@ -1525,21 +1532,21 @@ def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
     if shot_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    saved_shots = shot_df[shot_df['Result'] == 'Shot'].copy()
+    saved_shots = shot_df[shot_df[SHOT_COL_RESULT] == 'Shot'].copy()
     if saved_shots.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     events = []
     for _, shot in saved_shots.iterrows():
-        frame = shot['Frame']
+        frame = shot[SHOT_COL_FRAME]
         shot_team = shot['Team']
         defending_team = "Orange" if shot_team == "Blue" else "Blue"
         target_y = 5120.0 if shot_team == "Blue" else -5120.0
 
         # Shot properties — shot_df stores Speed (scalar), X, Y only
         shot_speed = shot['Speed']
-        dist_to_goal = np.sqrt(shot['X']**2 + (target_y - shot['Y'])**2)
-        angle_off_center = np.arctan2(abs(shot['X']), abs(target_y - shot['Y']))
+        dist_to_goal = np.sqrt(shot[SHOT_COL_X]**2 + (target_y - shot[SHOT_COL_Y])**2)
+        angle_off_center = np.arctan2(abs(shot[SHOT_COL_X]), abs(target_y - shot[SHOT_COL_Y]))
         # Get ball Z from game_df since shot_df only stores X, Y
         shot_z = 0
         if 'ball' in game_df and frame in game_df.index:
@@ -1559,7 +1566,7 @@ def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
                 continue
             px, py = pd_info['x'][pi], pd_info['y'][pi]
             # Distance from defender to ball
-            dist = np.sqrt((px - shot['X'])**2 + (py - shot['Y'])**2)
+            dist = np.sqrt((px - shot[SHOT_COL_X])**2 + (py - shot[SHOT_COL_Y])**2)
             if dist < nearest_dist:
                 nearest_dist = dist
                 nearest_defender = pname
@@ -1618,8 +1625,8 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
         for player in proto.players:
             name = player.name
             team = "Orange" if player.is_orange else "Blue"
-            p_shots = shot_df[shot_df['Player'] == name] if not shot_df.empty else pd.DataFrame()
-            xg_sum = p_shots['xG'].sum() if not p_shots.empty else 0
+            p_shots = shot_df[shot_df[SHOT_COL_PLAYER] == name] if not shot_df.empty else pd.DataFrame()
+            xg_sum = p_shots[COL_XG].sum() if not p_shots.empty else 0
             big_chances = len(p_shots[p_shots['BigChance'] == True]) if not p_shots.empty else 0
             p_passes = pass_df[pass_df['Sender'] == name] if not pass_df.empty else pd.DataFrame()
             xa_sum = p_passes['xA'].sum() if not p_passes.empty else 0
@@ -1800,20 +1807,23 @@ def build_export_shot_map(shot_df, proto):
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if not shot_df.empty:
+        ok, _ = validate_shot_metric_columns(shot_df.columns)
+        if not ok:
+            return fig
         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-            t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
-            t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
+            t_shots = shot_df[(shot_df[SHOT_COL_TEAM] == team) & (shot_df[SHOT_COL_RESULT] == 'Shot')]
+            t_goals = shot_df[(shot_df[SHOT_COL_TEAM] == team) & (shot_df[SHOT_COL_RESULT] == 'Goal')]
             if not t_shots.empty:
-                fig.add_trace(go.Scatter(x=t_shots['X'], y=t_shots['Y'], mode='markers',
+                fig.add_trace(go.Scatter(x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
                     marker=dict(size=10, color=color, opacity=0.6, line=dict(width=1, color='white')),
                     name=f'{team} Shot', showlegend=False))
             if not t_goals.empty:
-                fig.add_trace(go.Scatter(x=t_goals['X'], y=t_goals['Y'], mode='markers',
+                fig.add_trace(go.Scatter(x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
                     marker=dict(size=16, color=color, symbol='star', line=dict(width=2, color='white')),
                     name=f'{team} Goal', showlegend=False))
         big_chances = shot_df[shot_df['BigChance'] == True]
         if not big_chances.empty:
-            fig.add_trace(go.Scatter(x=big_chances['X'], y=big_chances['Y'], mode='markers',
+            fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers',
                 marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
                 showlegend=False))
     return fig
@@ -1886,8 +1896,11 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
     """Cumulative xG timeline for export."""
     fig = themed_figure()
     if not shot_df.empty:
-        sorted_shots = shot_df.sort_values('Frame').copy()
-        sorted_shots['Time'] = sorted_shots['Frame'] / float(REPLAY_FPS)
+        ok, _ = validate_shot_metric_columns(shot_df.columns, required=[SHOT_COL_TEAM, SHOT_COL_FRAME, COL_XG])
+        if not ok:
+            return fig
+        sorted_shots = shot_df.sort_values(SHOT_COL_FRAME).copy()
+        sorted_shots['Time'] = sorted_shots[SHOT_COL_FRAME] / float(REPLAY_FPS)
         meta_goals = {"Blue": [], "Orange": []}
         if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
             for g in proto.game_metadata.goals:
@@ -1897,10 +1910,10 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
                 meta_goals[gteam].append(gf / float(REPLAY_FPS))
         match_end = game_df.index.max() / float(REPLAY_FPS)
         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-            team_shots = sorted_shots[sorted_shots['Team'] == team]
+            team_shots = sorted_shots[sorted_shots[SHOT_COL_TEAM] == team]
             if not team_shots.empty:
                 times = [0] + team_shots['Time'].tolist() + [match_end]
-                cum_xg = [0] + team_shots['xG'].cumsum().tolist()
+                cum_xg = [0] + team_shots[COL_XG].cumsum().tolist()
                 cum_xg.append(cum_xg[-1])
                 fig.add_trace(go.Scatter(x=times, y=cum_xg, mode='lines', name=f"{team} xG",
                     line=dict(color=color, width=3, shape='hv'), showlegend=True))
@@ -1908,7 +1921,7 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
                 goal_times = sorted(meta_goals[team])
                 goal_cum = []
                 for gt in goal_times:
-                    prior = team_shots[team_shots['Time'] <= gt]['xG'].sum() if not team_shots.empty else 0
+                    prior = team_shots[team_shots['Time'] <= gt][COL_XG].sum() if not team_shots.empty else 0
                     goal_cum.append(prior)
                 fig.add_trace(go.Scatter(x=goal_times, y=goal_cum, mode='markers', name=f"{team} ⚽",
                     marker=dict(size=12, color=color, symbol='star', line=dict(width=2, color='white')), showlegend=False))
@@ -2360,8 +2373,8 @@ if app_mode == "🔍 Single Match Analysis":
             # --- A2. CUMULATIVE xG TIMELINE ---
             st.markdown("#### 📈 Cumulative xG Timeline")
             if not shot_df.empty:
-                sorted_shots = shot_df.sort_values('Frame').copy()
-                sorted_shots['Time'] = sorted_shots['Frame'] / float(REPLAY_FPS)
+                sorted_shots = shot_df.sort_values(SHOT_COL_FRAME).copy()
+                sorted_shots['Time'] = sorted_shots[SHOT_COL_FRAME] / float(REPLAY_FPS)
                 fig_xg = themed_figure(tier="detail")
                 # Build goal list from proto metadata (authoritative source for all goals)
                 meta_goals = {"Blue": [], "Orange": []}
@@ -2372,10 +2385,10 @@ if app_mode == "🔍 Single Match Analysis":
                         gteam = pid_team.get(scorer_pid, "Blue")
                         meta_goals[gteam].append(gf / float(REPLAY_FPS))
                 for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                    team_shots = sorted_shots[sorted_shots['Team'] == team]
+                    team_shots = sorted_shots[sorted_shots[SHOT_COL_TEAM] == team]
                     if not team_shots.empty:
                         times = [0] + team_shots['Time'].tolist()
-                        cum_xg = [0] + team_shots['xG'].cumsum().tolist()
+                        cum_xg = [0] + team_shots[COL_XG].cumsum().tolist()
                         # Extend to end of match
                         match_end = game_df.index.max() / float(REPLAY_FPS)
                         times.append(match_end)
@@ -2387,7 +2400,7 @@ if app_mode == "🔍 Single Match Analysis":
                         goal_cum = []
                         for gt in goal_times:
                             if not team_shots.empty:
-                                prior = team_shots[team_shots['Time'] <= gt]['xG'].sum()
+                                prior = team_shots[team_shots['Time'] <= gt][COL_XG].sum()
                             else:
                                 prior = 0
                             goal_cum.append(prior)
@@ -2421,44 +2434,51 @@ if app_mode == "🔍 Single Match Analysis":
                 fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
+        shot_schema_ok, shot_schema_missing = (True, [])
+        if not shot_df.empty:
+            shot_schema_ok, shot_schema_missing = validate_shot_metric_columns(shot_df.columns)
+
         with t3:
             if not shot_df.empty:
-                fig = themed_figure()
-                fig.update_layout(get_field_layout("Shot Map"))
+                if not shot_schema_ok:
+                    st.warning(f"Shot metrics unavailable for shot map: missing columns {', '.join(shot_schema_missing)}")
+                else:
+                    fig = themed_figure()
+                    fig.update_layout(get_field_layout("Shot Map"))
 
-                # Team-colored shots and goals
-                for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                    t_shots = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Shot')]
-                    t_goals = shot_df[(shot_df['Team'] == team) & (shot_df['Result'] == 'Goal')]
-                    if not t_shots.empty:
-                        fig.add_trace(go.Scatter(x=t_shots['X'], y=t_shots['Y'], mode='markers',
-                            marker=dict(size=10, color=color, opacity=0.5),
-                            name=f'{team} Shot', text=t_shots['Player'],
-                            customdata=t_shots['xG'], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
-                    if not t_goals.empty:
-                        fig.add_trace(go.Scatter(x=t_goals['X'], y=t_goals['Y'], mode='markers',
-                            marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
-                            name=f'{team} Goal', text=t_goals['Player'],
-                            customdata=t_goals['xG'], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
-                big_chances = shot_df[shot_df['BigChance'] == True]
-                if not big_chances.empty:
-                    fig.add_trace(go.Scatter(x=big_chances['X'], y=big_chances['Y'], mode='markers',
-                        marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
-                        name='Big Chance', hoverinfo='skip'))
+                    # Team-colored shots and goals
+                    for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
+                        t_shots = shot_df[(shot_df[SHOT_COL_TEAM] == team) & (shot_df[SHOT_COL_RESULT] == 'Shot')]
+                        t_goals = shot_df[(shot_df[SHOT_COL_TEAM] == team) & (shot_df[SHOT_COL_RESULT] == 'Goal')]
+                        if not t_shots.empty:
+                            fig.add_trace(go.Scatter(x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
+                                marker=dict(size=10, color=color, opacity=0.5),
+                                name=f'{team} Shot', text=t_shots[SHOT_COL_PLAYER],
+                                customdata=t_shots[COL_XG], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
+                        if not t_goals.empty:
+                            fig.add_trace(go.Scatter(x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
+                                marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
+                                name=f'{team} Goal', text=t_goals[SHOT_COL_PLAYER],
+                                customdata=t_goals[COL_XG], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
+                    big_chances = shot_df[shot_df['BigChance'] == True]
+                    if not big_chances.empty:
+                        fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers',
+                            marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
+                            name='Big Chance', hoverinfo='skip'))
 
-                st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True)
 
         with t3b:
             st.subheader("Frozen Frame Shot Viewer")
             if not shot_df.empty:
-                sorted_shots_ff = shot_df.sort_values('Frame').reset_index(drop=True)
-                shot_labels = [f"#{i+1}: {row['Player']} ({row['Result']}) - xG {row['xG']:.2f}" for i, row in sorted_shots_ff.iterrows()]
+                sorted_shots_ff = shot_df.sort_values(SHOT_COL_FRAME).reset_index(drop=True)
+                shot_labels = [f"#{i+1}: {row[SHOT_COL_PLAYER]} ({row[SHOT_COL_RESULT]}) - xG {row[COL_XG]:.2f}" for i, row in sorted_shots_ff.iterrows()]
                 selected_shot_idx = st.selectbox("Select Shot:", range(len(shot_labels)), format_func=lambda i: shot_labels[i])
                 shot_row = sorted_shots_ff.iloc[selected_shot_idx]
-                frame = int(shot_row['Frame'])
+                frame = int(shot_row[SHOT_COL_FRAME])
                 # Build field with all player positions at this frame
                 fig_ff = themed_figure()
-                fig_ff.update_layout(get_field_layout(f"Frame {frame} | {shot_row['Player']} ({shot_row['Result']})"))
+                fig_ff.update_layout(get_field_layout(f"Frame {frame} | {shot_row[SHOT_COL_PLAYER]} ({shot_row[SHOT_COL_RESULT]})"))
                 # Ball position
                 if 'ball' in game_df and frame in game_df.index:
                     ball_data = game_df['ball'].loc[frame]
@@ -2473,17 +2493,17 @@ if app_mode == "🔍 Single Match Analysis":
                         try:
                             p_data = game_df[p.name].loc[frame]
                             color = TEAM_COLORS["Blue"]["primary"] if not p.is_orange else TEAM_COLORS["Orange"]["primary"]
-                            marker_sym = 'diamond' if p.name == shot_row['Player'] else 'circle'
-                            marker_size = 16 if p.name == shot_row['Player'] else 12
+                            marker_sym = 'diamond' if p.name == shot_row[SHOT_COL_PLAYER] else 'circle'
+                            marker_size = 16 if p.name == shot_row[SHOT_COL_PLAYER] else 12
                             fig_ff.add_trace(go.Scatter(x=[p_data['pos_x']], y=[p_data['pos_y']], mode='markers+text', marker=dict(size=marker_size, color=color, symbol=marker_sym, line=dict(width=1, color='white')), text=[p.name], textposition='top center', textfont=dict(size=9, color='white'), name=p.name, showlegend=False))
                         except:
                             pass
                 st.plotly_chart(fig_ff, use_container_width=True)
                 # Metadata panel
                 mc1, mc2, mc3, mc4 = st.columns(4)
-                mc1.metric("Shooter", shot_row['Player'])
-                mc2.metric("xG", f"{shot_row['xG']:.2f}")
-                mc3.metric("Result", shot_row['Result'])
+                mc1.metric("Shooter", shot_row[SHOT_COL_PLAYER])
+                mc2.metric("xG", f"{shot_row[COL_XG]:.2f}")
+                mc3.metric("Result", shot_row[SHOT_COL_RESULT])
                 mc4.metric("Speed", f"{shot_row.get('Speed', 'N/A')} uu/s")
                 if shot_row.get('BigChance', False):
                     st.warning("Big Chance!")
