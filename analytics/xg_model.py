@@ -36,45 +36,9 @@ class XGScorer:
     def _resolve_feature_columns(configured: list[str] | None, fallback: list[str]) -> list[str]:
         return [str(col) for col in configured] if configured else list(fallback)
 
-    @classmethod
-    def _extract_model_feature_columns(cls, model, fallback: list[str]) -> list[str]:
-        candidates = [model]
-        seen_ids: set[int] = set()
-        while candidates:
-            cur = candidates.pop(0)
-            if cur is None:
-                continue
-            obj_id = id(cur)
-            if obj_id in seen_ids:
-                continue
-            seen_ids.add(obj_id)
-
-            names = getattr(cur, "feature_names_in_", None)
-            if names is not None and len(names) > 0:
-                return [str(n) for n in list(names)]
-
-            steps = getattr(cur, "steps", None)
-            if steps:
-                for _, step in steps:
-                    candidates.append(step)
-
-            cal_clfs = getattr(cur, "calibrated_classifiers_", None)
-            if cal_clfs:
-                for clf in cal_clfs:
-                    candidates.append(getattr(clf, "estimator", None))
-                    candidates.append(getattr(clf, "base_estimator", None))
-
-            candidates.append(getattr(cur, "estimator", None))
-            candidates.append(getattr(cur, "base_estimator", None))
-            candidates.append(getattr(cur, "best_estimator_", None))
-
-        return list(fallback)
-
     def predict(self, pre_features: Dict[str, float], post_features: Dict[str, float]) -> Tuple[float, float]:
-        pre_meta_cols = self._resolve_feature_columns(getattr(self.metadata, "pre_features", None), PRE_SHOT_FEATURE_COLUMNS)
-        post_meta_cols = self._resolve_feature_columns(getattr(self.metadata, "post_features", None), POST_SHOT_FEATURE_COLUMNS)
-        pre_cols = self._extract_model_feature_columns(self.pre_model, pre_meta_cols)
-        post_cols = self._extract_model_feature_columns(self.post_model, post_meta_cols)
+        pre_cols = self._resolve_feature_columns(getattr(self.metadata, "pre_features", None), PRE_SHOT_FEATURE_COLUMNS)
+        post_cols = self._resolve_feature_columns(getattr(self.metadata, "post_features", None), POST_SHOT_FEATURE_COLUMNS)
 
         pre_x = pd.DataFrame([{k: pre_features.get(k, np.nan) for k in pre_cols}])
         post_x = pd.DataFrame([{k: post_features.get(k, np.nan) for k in post_cols}])
