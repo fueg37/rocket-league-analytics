@@ -346,7 +346,19 @@ def get_xg_scorer():
 def calculate_xg_probability(pre_shot_features, post_shot_features):
     scorer = get_xg_scorer()
     xg_pre, xg_post = scorer.predict(pre_shot_features, post_shot_features)
-    return xg_pre, xg_post, scorer.metadata.model_version, scorer.metadata.calibration_version
+    # Foundational model contract: xGOT is the on-target execution component.
+    # Current implementation aliases to post-shot probability until dedicated
+    # xGOT artifacts are introduced.
+    xgot = xg_post
+    return (
+        xg_pre,
+        xg_post,
+        xgot,
+        scorer.metadata.model_version,
+        scorer.metadata.calibration_version,
+        scorer.metadata.model_version,
+        scorer.metadata.calibration_version,
+    )
 
 # --- 6b. MATH: LUCK % (POISSON BINOMIAL) ---
 def calculate_luck_percentage(shot_df, team, actual_goals):
@@ -1025,13 +1037,14 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                     keeper_line_offset=keeper_line_offset if not np.isnan(keeper_line_offset) else 1200.0,
                     team=shooter_team,
                 )
-                xg_pre, xg_post, model_version, calibration_version = calculate_xg_probability(pre_features, post_features)
+                xg_pre, xg_post, xgot, model_version, calibration_version, xgot_model_version, xgot_calibration_version = calculate_xg_probability(pre_features, post_features)
                 is_big_chance = bool(xg_pre > 0.40 and (np.isnan(defender_dist) or defender_dist > 500))
                 result = "Goal" if (is_lib_goal or is_goal_hit) else "Shot"
                 shot_list.append({
                     "Player": player_name, "Team": shooter_team, "Frame": frame,
-                    "xG": round(xg_pre, 3), "xG_pre": round(xg_pre, 3), "xG_post": round(xg_post, 3),
+                    "xG": round(xg_pre, 3), "xG_pre": round(xg_pre, 3), "xG_post": round(xg_post, 3), "xGOT": round(xgot, 3),
                     "xGModelVersion": model_version, "xGCalibrationVersion": calibration_version,
+                    "xGOTModelVersion": xgot_model_version, "xGOTCalibrationVersion": xgot_calibration_version,
                     "Result": result, "BigChance": is_big_chance,
                     "X": ball_pos[0], "Y": ball_pos[1],
                     "Speed": int(shot_speed),
@@ -1077,7 +1090,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
  
         return final_df
-    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "xG_pre", "xG_post", "xGModelVersion", "xGCalibrationVersion", "Result", "BigChance", "X", "Y", "Speed", "PressureContext", "NearestDefenderDistance", "ShooterBoost", "ChainID", "TouchesInChain", "ChainDuration", "AvgBallSpeed", "FinalThirdEntries", "TurnoversForced"])
+    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "xG_pre", "xG_post", "xGOT", "xGModelVersion", "xGCalibrationVersion", "xGOTModelVersion", "xGOTCalibrationVersion", "Result", "BigChance", "X", "Y", "Speed", "PressureContext", "NearestDefenderDistance", "ShooterBoost", "ChainID", "TouchesInChain", "ChainDuration", "AvgBallSpeed", "FinalThirdEntries", "TurnoversForced"])
 
 def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, event_df=None, max_time_diff=2.0):
     """Build pass table from canonical pass events with shot-linked key pass attribution."""
@@ -2647,12 +2660,14 @@ if app_mode == "🔍 Single Match Analysis":
                         fig.add_trace(go.Scatter(x=t_shots['X'], y=t_shots['Y'], mode='markers',
                             marker=dict(size=10, color=color, opacity=0.5),
                             name=f'{team} Shot', text=t_shots['Player'],
-                            customdata=t_shots['xG'], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
+                            customdata=np.stack([t_shots['xG'].to_numpy(), t_shots.get('xGOT', t_shots['xG_post']).to_numpy()], axis=-1),
+                            hovertemplate="%{text}<br>xG: %{customdata[0]:.2f}<br>xGOT: %{customdata[1]:.2f}<extra></extra>"))
                     if not t_goals.empty:
                         fig.add_trace(go.Scatter(x=t_goals['X'], y=t_goals['Y'], mode='markers',
                             marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
                             name=f'{team} Goal', text=t_goals['Player'],
-                            customdata=t_goals['xG'], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
+                            customdata=np.stack([t_goals['xG'].to_numpy(), t_goals.get('xGOT', t_goals['xG_post']).to_numpy()], axis=-1),
+                            hovertemplate="%{text}<br>xG: %{customdata[0]:.2f}<br>xGOT: %{customdata[1]:.2f}<extra></extra>"))
                 big_chances = shot_df[shot_df['BigChance'] == True]
                 if not big_chances.empty:
                     fig.add_trace(go.Scatter(x=big_chances['X'], y=big_chances['Y'], mode='markers',
@@ -2665,7 +2680,10 @@ if app_mode == "🔍 Single Match Analysis":
             st.subheader("Frozen Frame Shot Viewer")
             if not shot_df.empty:
                 sorted_shots_ff = shot_df.sort_values('Frame').reset_index(drop=True)
-                shot_labels = [f"#{i+1}: {row['Player']} ({row['Result']}) - xG {row['xG']:.2f}" for i, row in sorted_shots_ff.iterrows()]
+                shot_labels = [
+                    f"#{i+1}: {row['Player']} ({row['Result']}) - xG {row['xG']:.2f} | xGOT {float(row.get('xGOT', row.get('xG_post', row['xG']))):.2f}"
+                    for i, row in sorted_shots_ff.iterrows()
+                ]
                 selected_shot_idx = st.selectbox("Select Shot:", range(len(shot_labels)), format_func=lambda i: shot_labels[i])
                 shot_row = sorted_shots_ff.iloc[selected_shot_idx]
                 frame = int(shot_row['Frame'])
@@ -2692,14 +2710,47 @@ if app_mode == "🔍 Single Match Analysis":
                         except:
                             pass
                 st.plotly_chart(fig_ff, use_container_width=True)
-                # Metadata panel
-                mc1, mc2, mc3, mc4 = st.columns(4)
-                mc1.metric("Shooter", shot_row['Player'])
-                mc2.metric("xG", f"{shot_row['xG']:.2f}")
-                mc3.metric("Result", shot_row['Result'])
-                mc4.metric("Speed", f"{shot_row.get('Speed', 'N/A')} uu/s")
-                if shot_row.get('BigChance', False):
-                    st.warning("Big Chance!")
+                # Chance card: foundational xG/xGOT narrative
+                xgot_value = float(pd.to_numeric(shot_row.get('xGOT', shot_row.get('xG_post', shot_row['xG'])), errors='coerce'))
+                xg_value = float(pd.to_numeric(shot_row.get('xG', 0.0), errors='coerce'))
+                delta_xgot = xgot_value - xg_value
+
+                card_left, card_right = st.columns([1.6, 1.4])
+                with card_left:
+                    st.markdown("#### Shot Detail")
+                    st.write(f"**Player:** {shot_row['Player']}")
+                    st.write(f"**Result:** {shot_row['Result']}")
+                    st.write(f"**Situation:** {'Big Chance' if bool(shot_row.get('BigChance', False)) else 'Regular play'}")
+                    st.write(f"**Pressure:** {shot_row.get('PressureContext', 'unknown')}")
+                    st.write(f"**Speed:** {shot_row.get('Speed', 'N/A')} uu/s")
+                with card_right:
+                    st.markdown("#### Goalmouth Quality")
+                    gm_fig = themed_figure()
+                    gm_fig.update_layout(
+                        title=None,
+                        xaxis=dict(range=[-GOAL_HALF_W, GOAL_HALF_W], visible=False),
+                        yaxis=dict(range=[0, GOAL_HEIGHT], visible=False),
+                        height=210,
+                        margin=dict(l=20, r=20, t=10, b=10),
+                        plot_bgcolor='rgba(255,255,255,0.02)',
+                    )
+                    gm_fig.add_shape(type='rect', x0=-GOAL_HALF_W, x1=GOAL_HALF_W, y0=0, y1=GOAL_HEIGHT, line=dict(color='rgba(255,255,255,0.6)', width=2))
+                    ball_state = game_df['ball'].loc[frame] if 'ball' in game_df and frame in game_df.index else None
+                    shot_z = float(ball_state.get('pos_z', 0.0)) if ball_state is not None else 0.0
+                    placement_x = float(pd.to_numeric(shot_row.get('X', 0.0), errors='coerce'))
+                    projected_x = float(np.clip(placement_x * 0.22, -GOAL_HALF_W, GOAL_HALF_W))
+                    projected_z = float(np.clip(shot_z, 0.0, GOAL_HEIGHT))
+                    gm_fig.add_trace(go.Scatter(
+                        x=[projected_x], y=[projected_z], mode='markers',
+                        marker=dict(size=15, color='#8B1E2D', line=dict(width=2, color='white')),
+                        hovertemplate='Projected impact<extra></extra>', showlegend=False,
+                    ))
+                    st.plotly_chart(gm_fig, use_container_width=True)
+                    m1, m2, m3 = st.columns(3)
+                    m1.metric("xG", f"{xg_value:.2f}")
+                    m2.metric("xGOT", f"{xgot_value:.2f}")
+                    m3.metric("Δ", f"{delta_xgot:+.2f}")
+
                 # Navigation
                 nav1, nav2, nav3 = st.columns([1, 2, 1])
                 with nav1:

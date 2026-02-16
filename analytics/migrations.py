@@ -29,6 +29,12 @@ EVENT_V4_DEFAULTS = {
     "source_shot_event_id": "",
 }
 
+EVENT_V6_DEFAULTS = {
+    "xgot": 0.0,
+    "xgot_model_version": "legacy",
+    "xgot_calibration_version": "legacy",
+}
+
 def _apply_schema_version(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "schema_version" not in out.columns:
@@ -116,7 +122,23 @@ def migrate_dataframe(df: pd.DataFrame, table_kind: str) -> pd.DataFrame:
             out = _migrate_event_v2_to_v3(out)
         if int(out["schema_version"].min()) < 4:
             out = _migrate_event_v3_to_v4(out)
+        if int(out["schema_version"].min()) < 6:
+            out = _migrate_event_v5_to_v6(out)
 
     if "schema_version" in out.columns:
         out["schema_version"] = SCHEMA_VERSION
+    return out
+
+
+def _migrate_event_v5_to_v6(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col, default in EVENT_V6_DEFAULTS.items():
+        if col not in out.columns:
+            out[col] = default
+        else:
+            out[col] = out[col].fillna(default)
+    if "xgot" in out.columns:
+        xg_post = pd.to_numeric(out.get("xg_post", 0.0), errors="coerce").fillna(0.0)
+        out["xgot"] = pd.to_numeric(out["xgot"], errors="coerce").fillna(xg_post)
+    out["schema_version"] = SCHEMA_VERSION
     return out

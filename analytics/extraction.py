@@ -297,6 +297,9 @@ def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType,
         "xg_model_version": None,
         "xg_calibration_version": None,
         "xg": np.nan,
+        "xgot": np.nan,
+        "xgot_model_version": None,
+        "xgot_calibration_version": None,
         "xa": np.nan,
         "segment_id": None,
         "chain_id": None,
@@ -628,6 +631,7 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
             xg_pre = float(pd.to_numeric(row.get("xG_pre", row.get("xG", 0.0)), errors="coerce"))
             xg_post = float(pd.to_numeric(row.get("xG_post", row.get("xG", 0.0)), errors="coerce"))
             xg = xg_pre
+            xgot = xg_post
             nearest_defender_distance = _nearest_defender_distance(game_df, proto, frame, team, x, y)
             shot_angle = _shot_angle(x, y, team) if team in {"Blue", "Orange"} else np.nan
             shooter_boost = _shooter_boost(game_df, player, frame)
@@ -663,6 +667,9 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                 "xg_model_version": str(row.get("xGModelVersion", "legacy")),
                 "xg_calibration_version": str(row.get("xGCalibrationVersion", "legacy")),
                 "xg": xg,
+                "xgot": xgot,
+                "xgot_model_version": str(row.get("xGOTModelVersion", row.get("xGModelVersion", "legacy"))),
+                "xgot_calibration_version": str(row.get("xGOTCalibrationVersion", row.get("xGCalibrationVersion", "legacy"))),
                 "chain_id": shot_chain_id,
                 "touches_in_chain": touches_in_chain,
                 "chain_duration": chain_duration,
@@ -795,7 +802,7 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
 def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
     typed_columns = [
         "Player", "Team", "Frame", "Time", "Result", "OutcomeType", "OnTarget",
-        "xG", "xG_pre", "xG_post", "XGModelVersion", "XGCalibrationVersion", "XA", "Speed", "PressureContext", "NearestDefenderDistance", "ShotAngle",
+        "xG", "xG_pre", "xG_post", "xGOT", "XGModelVersion", "XGCalibrationVersion", "XGOTModelVersion", "XGOTCalibrationVersion", "XA", "Speed", "PressureContext", "NearestDefenderDistance", "ShotAngle",
         "ShooterBoost", "DistanceToGoal", "BigChance", "X", "Y", "Z",
         "SegmentID", "ChainID", "TouchesInChain", "ChainDuration", "AvgBallSpeed", "FinalThirdEntries", "TurnoversForced",
     ]
@@ -818,6 +825,9 @@ def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
         "xg_post": "xG_post",
         "xg_model_version": "XGModelVersion",
         "xg_calibration_version": "XGCalibrationVersion",
+        "xgot": "xGOT",
+        "xgot_model_version": "XGOTModelVersion",
+        "xgot_calibration_version": "XGOTCalibrationVersion",
         "xa": "XA",
         "speed": "Speed",
         "pressure_context": "PressureContext",
