@@ -6,14 +6,6 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from constants import TEAM_COLORS
-from charts.formatters import (
-    format_duration,
-    format_metric_series,
-    format_metric_value,
-    hover_template,
-    infer_metric_style,
-)
-from charts.rules import sort_rank_desc, sort_time_asc
 from charts.theme import apply_chart_theme
 
 _TEAM_ACCENT = {
@@ -25,6 +17,22 @@ _STEM_COLOR = {
     "Blue": "rgba(74, 124, 196, 0.35)",
     "Orange": "rgba(196, 138, 74, 0.35)",
 }
+
+
+def _format_values(series: pd.Series) -> list[str]:
+    values = pd.to_numeric(series, errors="coerce").fillna(0)
+    if (values % 1 == 0).all():
+        return [f"{v:,.0f}" for v in values]
+    if values.abs().max() < 10:
+        return [f"{v:,.2f}" for v in values]
+    return [f"{v:,.1f}" for v in values]
+
+
+def _format_seconds(seconds: float) -> str:
+    value = int(round(float(seconds)))
+    minutes, secs = divmod(max(value, 0), 60)
+    return f"{minutes}:{secs:02d}"
+
 
 def _time_tick_values(max_time: float, step: int = 60) -> list[int]:
     max_floor = int(max(0, max_time))
@@ -70,7 +78,8 @@ def time_series_chart(
         fig.update_yaxes(title=y_title)
         return apply_chart_theme(fig, tier=tier)
 
-    plot_df = sort_time_asc(plot_df, x_col)
+    plot_df[x_col] = pd.to_numeric(plot_df[x_col], errors="coerce")
+    plot_df = plot_df.dropna(subset=[x_col]).sort_values(x_col).reset_index(drop=True)
 
     label_map = (
         {col: labels.get(col, col) for col in y_cols}
@@ -81,7 +90,7 @@ def time_series_chart(
     line_width = 2.6
     x_vals = plot_df[x_col]
     if time_axis:
-        x_labels = [format_duration(v) for v in x_vals]
+        x_labels = [_format_seconds(v) for v in x_vals]
     else:
         x_labels = [f"{v:.0f}" if float(v).is_integer() else f"{v:.2f}" for v in x_vals]
 
@@ -90,17 +99,12 @@ def time_series_chart(
             continue
 
         style = series_styles.get(y_col, {})
-        metric_style = infer_metric_style(y_col)
         y_vals = pd.to_numeric(plot_df[y_col], errors="coerce")
-        y_labels = format_metric_series(y_vals, metric_name=y_col)
         mode = style.get("mode", "lines")
         if "markers" not in mode and len(plot_df) <= 18:
             mode = "lines+markers"
 
         trace_name = label_map.get(y_col, y_col)
-        custom_data = list(zip(x_labels, y_labels))
-        units = style.get("units", metric_style.units)
-        source_note = style.get("source_note")
         fig.add_trace(
             go.Scatter(
                 x=x_vals,
@@ -117,14 +121,8 @@ def time_series_chart(
                 fill=style.get("fill"),
                 fillcolor=style.get("fillcolor"),
                 opacity=style.get("opacity", 1),
-                customdata=custom_data,
-                hovertemplate=hover_template(
-                    entity=trace_name,
-                    primary_label=f"{trace_name}: %{{customdata[1]}}",
-                    context_label=f"{x_title}: %{{customdata[0]}}",
-                    units=units,
-                    source_note=source_note,
-                ),
+                customdata=x_labels,
+                hovertemplate=f"{x_title}: %{{customdata}}<br>{trace_name}: %{{y:.{hover_precision}f}}<extra></extra>",
                 showlegend=style.get("showlegend", True),
             )
         )
@@ -137,7 +135,7 @@ def time_series_chart(
                 fig.add_annotation(
                     x=x_last,
                     y=y_last,
-                    text=f"{trace_name} {format_metric_value(y_last, metric_name=y_col)}",
+                    text=f"{trace_name} {y_last:.{hover_precision}f}",
                     showarrow=False,
                     xanchor="left",
                     xshift=8,
@@ -160,7 +158,7 @@ def time_series_chart(
             title=x_title,
             tickmode="array",
             tickvals=ticks,
-            ticktext=[format_duration(v) for v in ticks],
+            ticktext=[_format_seconds(v) for v in ticks],
             showgrid=True,
         )
     else:
@@ -176,11 +174,12 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
     Sorts descending by metric and uses muted stems with team-color marker accents.
     """
     cols = [name_col, team_col, metric_col]
-    rank_df = sort_rank_desc(df[cols].copy(), metric_col, player_col=name_col, team_col=team_col)
+    rank_df = df[cols].copy()
+    rank_df[metric_col] = pd.to_numeric(rank_df[metric_col], errors="coerce").fillna(0)
+    rank_df = rank_df.sort_values(metric_col, ascending=False).reset_index(drop=True)
 
     fig = go.Figure()
-    labels = format_metric_series(rank_df[metric_col], metric_name=metric_col)
-    units = infer_metric_style(metric_col).units
+    labels = _format_values(rank_df[metric_col])
 
     for i, row in rank_df.iterrows():
         team = row[team_col]
@@ -205,12 +204,7 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
                 text=[labels[i]],
                 textposition="middle right",
                 textfont=dict(color=accent, size=11),
-                hovertemplate=hover_template(
-                    entity=str(row[name_col]),
-                    primary_label=f"{metric_col}: {labels[i]}",
-                    context_label=f"Team: {team}",
-                    units=units,
-                ),
+                hovertemplate=f"<b>{row[name_col]}</b><br>{metric_col}: %{{x}}<extra>{team}</extra>",
                 showlegend=False,
             )
         )
@@ -289,7 +283,7 @@ def comparison_dumbbell(
                 y=[i],
                 mode="markers+text",
                 marker=dict(size=11, color="white", line=dict(color=left_color, width=2.5)),
-                text=[format_metric_value(left_val, metric_name=left_col)],
+                text=[_format_values(pd.Series([left_val]))[0]],
                 textposition="middle left",
                 textfont=dict(size=10, color=left_color),
                 hovertemplate=f"<b>{row[entity_col]}</b><br>{left_label}: %{{x}}<extra></extra>",
@@ -302,7 +296,7 @@ def comparison_dumbbell(
                 y=[i],
                 mode="markers+text",
                 marker=dict(size=11, color="white", line=dict(color=right_color, width=2.5)),
-                text=[format_metric_value(right_val, metric_name=right_col)],
+                text=[_format_values(pd.Series([right_val]))[0]],
                 textposition="middle right",
                 textfont=dict(size=10, color=right_color),
                 hovertemplate=f"<b>{row[entity_col]}</b><br>{right_label}: %{{x}}<extra></extra>",
