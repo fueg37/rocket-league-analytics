@@ -24,6 +24,30 @@ class XGMetadata:
     calibration_method: str
     pre_features: list[str]
     post_features: list[str]
+    pre_training_mode: str
+    post_training_mode: str
+    pre_label_unique_count: int
+    post_label_unique_count: int
+
+
+@dataclass
+class TrainModelResult:
+    model: object
+    training_mode: str
+    label_unique_count: int
+
+
+class ConstantProbabilityModel:
+    """Degenerate classifier fallback for one-class training labels."""
+
+    def __init__(self, positive_probability: float):
+        self.positive_probability = float(np.clip(positive_probability, 0.0, 1.0))
+
+    def predict_proba(self, X):
+        n_rows = len(X)
+        p1 = np.full((n_rows, 1), self.positive_probability, dtype=float)
+        p0 = 1.0 - p1
+        return np.hstack((p0, p1))
 
 
 class XGScorer:
@@ -48,7 +72,7 @@ class XGScorer:
 
 
 
-def _train_model(df: pd.DataFrame, feature_cols: list[str], calibration_method: str):
+def _train_model(df: pd.DataFrame, feature_cols: list[str], calibration_method: str) -> TrainModelResult:
     from sklearn.calibration import CalibratedClassifierCV
     from sklearn.impute import SimpleImputer
     from sklearn.linear_model import LogisticRegression
@@ -58,6 +82,17 @@ def _train_model(df: pd.DataFrame, feature_cols: list[str], calibration_method: 
     work = df.copy()
     y = pd.to_numeric(work["is_goal"], errors="coerce").fillna(0).astype(int)
     X = work[feature_cols]
+    unique_label_count = int(y.nunique(dropna=True))
+
+    if unique_label_count < 2:
+        positive_probability = float(y.mean()) if not y.empty else 0.0
+        fallback_model = ConstantProbabilityModel(positive_probability=positive_probability)
+        return TrainModelResult(
+            model=fallback_model,
+            training_mode="degenerate_constant_probability",
+            label_unique_count=unique_label_count,
+        )
+
     base = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
         ("scaler", StandardScaler()),
@@ -71,7 +106,12 @@ def _train_model(df: pd.DataFrame, feature_cols: list[str], calibration_method: 
     else:
         model = base
     model.fit(X, y)
-    return model
+    return TrainModelResult(model=model, training_mode="standard", label_unique_count=unique_label_count)
+
+
+def label_unique_count(df: pd.DataFrame) -> int:
+    y = pd.to_numeric(df.get("is_goal"), errors="coerce").fillna(0).astype(int)
+    return int(y.nunique(dropna=True))
 
 
 def _bootstrap_training_data(n: int = 1600) -> pd.DataFrame:
@@ -128,8 +168,10 @@ def train_and_persist(training_df: pd.DataFrame | None = None, model_version: st
     if "is_goal" not in df.columns:
         raise ValueError("training data must include is_goal label")
 
-    pre_model = _train_model(df, PRE_SHOT_FEATURE_COLUMNS, calibration_method)
-    post_model = _train_model(df, POST_SHOT_FEATURE_COLUMNS, calibration_method)
+    pre_result = _train_model(df, PRE_SHOT_FEATURE_COLUMNS, calibration_method)
+    post_result = _train_model(df, POST_SHOT_FEATURE_COLUMNS, calibration_method)
+    pre_model = pre_result.model
+    post_model = post_result.model
 
     metadata = XGMetadata(
         model_version=model_version,
@@ -139,6 +181,10 @@ def train_and_persist(training_df: pd.DataFrame | None = None, model_version: st
         calibration_method=calibration_method,
         pre_features=PRE_SHOT_FEATURE_COLUMNS,
         post_features=POST_SHOT_FEATURE_COLUMNS,
+        pre_training_mode=pre_result.training_mode,
+        post_training_mode=post_result.training_mode,
+        pre_label_unique_count=pre_result.label_unique_count,
+        post_label_unique_count=post_result.label_unique_count,
     )
 
     artifact_name = f"xg_model_{metadata.model_version}_{metadata.calibration_method}.joblib"
@@ -172,6 +218,10 @@ def _coerce_metadata(raw: dict) -> XGMetadata:
         calibration_method=str(metadata.get("calibration_method", "isotonic")),
         pre_features=[str(c) for c in metadata.get("pre_features", PRE_SHOT_FEATURE_COLUMNS)],
         post_features=[str(c) for c in metadata.get("post_features", POST_SHOT_FEATURE_COLUMNS)],
+        pre_training_mode=str(metadata.get("pre_training_mode", "legacy")),
+        post_training_mode=str(metadata.get("post_training_mode", "legacy")),
+        pre_label_unique_count=int(metadata.get("pre_label_unique_count", -1)),
+        post_label_unique_count=int(metadata.get("post_label_unique_count", -1)),
     )
 
 
