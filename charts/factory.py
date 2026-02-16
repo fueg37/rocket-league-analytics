@@ -11,6 +11,7 @@ from analytics.shot_quality import (
     COL_ON_TARGET,
     COL_TARGET_X,
     COL_TARGET_Z,
+    COL_SHOT_Z,
     COL_XG,
     COL_XGOT,
     SHOT_COL_FRAME,
@@ -257,8 +258,23 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
     if player:
         shots = shots[shots[SHOT_COL_PLAYER] == player]
     if on_target_only and COL_ON_TARGET in shots.columns:
-        shots = shots[shots[COL_ON_TARGET] == True]
+        shots = shots[(shots[COL_ON_TARGET] == True) | (shots[SHOT_COL_RESULT] == "Goal")]
 
+    # Preserve goals even when target reconstruction failed by backfilling
+    # a neutral in-frame estimate so every goal remains inspectable.
+    goal_mask = shots[SHOT_COL_RESULT] == "Goal"
+    missing_x = goal_mask & shots[COL_TARGET_X].isna()
+    missing_z = goal_mask & shots[COL_TARGET_Z].isna()
+    if missing_x.any():
+        shots.loc[missing_x, COL_TARGET_X] = 0.0
+    if missing_z.any():
+        if COL_SHOT_Z in shots.columns:
+            shots.loc[missing_z, COL_TARGET_Z] = pd.to_numeric(shots.loc[missing_z, COL_SHOT_Z], errors="coerce").fillna(GOAL_HEIGHT * 0.35)
+        else:
+            shots.loc[missing_z, COL_TARGET_Z] = GOAL_HEIGHT * 0.35
+
+    shots[COL_TARGET_X] = pd.to_numeric(shots[COL_TARGET_X], errors="coerce")
+    shots[COL_TARGET_Z] = pd.to_numeric(shots[COL_TARGET_Z], errors="coerce").clip(lower=0, upper=GOAL_HEIGHT)
     shots = shots.dropna(subset=[COL_TARGET_X, COL_TARGET_Z])
     if shots.empty:
         fig.update_layout(title="Goal Mouth")
@@ -293,14 +309,10 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
                 name=team_name,
                 marker=dict(
                     size=marker_size.loc[team_rows.index] if include_xgot else marker_size,
-                    color=team_rows["_xgot"] if include_xgot else team_color,
-                    colorscale="Turbo",
-                    cmin=0,
-                    cmax=max(0.01, float(shots["_xgot"].max())),
+                    color=team_color,
                     symbol=[result_symbol.get(r, default_symbol) for r in team_rows[SHOT_COL_RESULT]],
                     line=dict(width=1, color="white"),
-                    opacity=0.9,
-                    showscale=False,
+                    opacity=0.92,
                 ),
                 customdata=list(
                     zip(
