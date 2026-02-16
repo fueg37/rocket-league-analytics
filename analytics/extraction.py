@@ -283,6 +283,7 @@ def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType,
         "metric_value": np.nan,
         "is_key_play": False,
         "outcome_type": None,
+        "source_shot_event_id": None,
         "is_on_target": False,
         "is_big_chance": False,
         "speed": np.nan,
@@ -610,6 +611,7 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
             turnovers_forced = float(pd.to_numeric(row.get("TurnoversForced", np.nan), errors="coerce"))
 
             shot_row = _event_base(match_id, f"shot-taken-{idx}", frame, EventType.SHOT_TAKEN, None, player, team)
+            shot_event_id = str(shot_row["event_id"])
             shot_row.update({
                 "x": x,
                 "y": y,
@@ -662,16 +664,18 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                     attacker_team=team,
                 )
                 if save_defender is not None:
-                    _, save_pid, save_name, save_team = save_defender
-                    save_row = _event_base(match_id, f"save-{idx}", frame, EventType.SAVE, save_pid, save_name, save_team)
+                    resolved_frame, save_pid, save_name, save_team = save_defender
+                    save_event_id = f"save-{idx}-{resolved_frame}"
+                    save_row = _event_base(match_id, save_event_id, resolved_frame, EventType.SAVE, save_pid, save_name, save_team)
                     save_row.update({
                         "x": x,
                         "y": y,
                         "z": z,
-                        "event_id": f"save-{idx}",
+                        "event_id": save_event_id,
                         "event_type": EventType.SAVE.value,
                         "is_on_target": True,
                         "outcome_type": result.lower(),
+                        "source_shot_event_id": shot_event_id,
                     })
                     event_rows.append(save_row)
                 if pressure_context == "high":
@@ -685,16 +689,18 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                         attacker_team=team,
                     )
                     if block_defender is not None:
-                        _, block_pid, block_name, block_team = block_defender
-                        block_row = _event_base(match_id, f"block-{idx}", frame, EventType.BLOCK, block_pid, block_name, block_team)
+                        resolved_frame, block_pid, block_name, block_team = block_defender
+                        block_event_id = f"block-{idx}-{resolved_frame}"
+                        block_row = _event_base(match_id, block_event_id, resolved_frame, EventType.BLOCK, block_pid, block_name, block_team)
                         block_row.update({
                             "x": x,
                             "y": y,
                             "z": z,
-                            "event_id": f"block-{idx}",
+                            "event_id": block_event_id,
                             "event_type": EventType.BLOCK.value,
                             "outcome_type": result.lower(),
                             "is_on_target": False,
+                            "source_shot_event_id": shot_event_id,
                         })
                         event_rows.append(block_row)
 
