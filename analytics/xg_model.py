@@ -32,9 +32,16 @@ class XGScorer:
         self.post_model = post_model
         self.metadata = metadata
 
+    @staticmethod
+    def _resolve_feature_columns(configured: list[str] | None, fallback: list[str]) -> list[str]:
+        return [str(col) for col in configured] if configured else list(fallback)
+
     def predict(self, pre_features: Dict[str, float], post_features: Dict[str, float]) -> Tuple[float, float]:
-        pre_x = pd.DataFrame([{k: pre_features.get(k, np.nan) for k in PRE_SHOT_FEATURE_COLUMNS}])
-        post_x = pd.DataFrame([{k: post_features.get(k, np.nan) for k in POST_SHOT_FEATURE_COLUMNS}])
+        pre_cols = self._resolve_feature_columns(getattr(self.metadata, "pre_features", None), PRE_SHOT_FEATURE_COLUMNS)
+        post_cols = self._resolve_feature_columns(getattr(self.metadata, "post_features", None), POST_SHOT_FEATURE_COLUMNS)
+
+        pre_x = pd.DataFrame([{k: pre_features.get(k, np.nan) for k in pre_cols}])
+        post_x = pd.DataFrame([{k: post_features.get(k, np.nan) for k in post_cols}])
         xg_pre = float(self.pre_model.predict_proba(pre_x)[:, 1][0])
         xg_post = float(self.post_model.predict_proba(post_x)[:, 1][0])
         return float(np.clip(xg_pre, 0.001, 0.999)), float(np.clip(xg_post, 0.001, 0.999))
@@ -78,6 +85,11 @@ def _bootstrap_training_data(n: int = 1600) -> pd.DataFrame:
         "nearest_defender_distance": rng.uniform(120, 2600, n),
         "shooter_boost": rng.uniform(0, 100, n),
         "buildup_seconds": rng.uniform(0, 8, n),
+        "touches_in_chain": rng.integers(1, 8, n),
+        "chain_duration": rng.uniform(0.1, 12, n),
+        "chain_avg_ball_speed": rng.uniform(300, 3000, n),
+        "chain_final_third_entries": rng.integers(0, 4, n),
+        "chain_turnovers_forced": rng.integers(0, 2, n),
     })
     post = pd.DataFrame({
         "shot_speed": rng.uniform(200, 3500, n),
@@ -149,6 +161,23 @@ def train_and_persist(training_df: pd.DataFrame | None = None, model_version: st
     return XGScorer(pre_model, post_model, metadata)
 
 
+
+def _coerce_metadata(raw: dict) -> XGMetadata:
+    metadata = dict(raw or {})
+    return XGMetadata(
+        model_version=str(metadata.get("model_version", "v1")),
+        calibration_version=str(metadata.get("calibration_version", "legacy")),
+        feature_version=str(metadata.get("feature_version", "legacy")),
+        trained_at_utc=str(metadata.get("trained_at_utc", datetime.now(timezone.utc).isoformat())),
+        calibration_method=str(metadata.get("calibration_method", "isotonic")),
+        pre_features=[str(c) for c in metadata.get("pre_features", PRE_SHOT_FEATURE_COLUMNS)],
+        post_features=[str(c) for c in metadata.get("post_features", POST_SHOT_FEATURE_COLUMNS)],
+    )
+
+
+def _is_current_feature_contract(meta: XGMetadata) -> bool:
+    return list(meta.pre_features) == list(PRE_SHOT_FEATURE_COLUMNS) and list(meta.post_features) == list(POST_SHOT_FEATURE_COLUMNS)
+
 def load_or_train_latest() -> XGScorer:
     from joblib import load
 
@@ -160,6 +189,12 @@ def load_or_train_latest() -> XGScorer:
             path = ARTIFACT_DIR / latest
             if path.exists():
                 payload = load(path)
-                meta = XGMetadata(**payload["metadata"])
-                return XGScorer(payload["pre_model"], payload["post_model"], meta)
+                meta = _coerce_metadata(payload.get("metadata", {}))
+                scorer = XGScorer(payload["pre_model"], payload["post_model"], meta)
+                if _is_current_feature_contract(meta):
+                    return scorer
+                return train_and_persist(
+                    model_version=f"{meta.model_version}-fv{FEATURE_VERSION}",
+                    calibration_method=meta.calibration_method,
+                )
     return train_and_persist()

@@ -6,7 +6,14 @@ import numpy as np
 import pandas as pd
 
 from analytics.features import classify_pressure_context
-from analytics.schema import AnalyticsTables, EventType, SCHEMA_VERSION, normalize_tables
+from analytics.schema import (
+    AnalyticsTables,
+    EVENT_CONTRACT,
+    EventType,
+    POSSESSION_SEGMENT_CONTRACT,
+    SCHEMA_VERSION,
+    normalize_tables,
+)
 from constants import REPLAY_FPS
 from utils import build_pid_name_map, build_pid_team_map
 
@@ -124,8 +131,170 @@ def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType,
         "xg_calibration_version": None,
         "xg": np.nan,
         "xa": np.nan,
+        "segment_id": None,
+        "chain_id": None,
+        "touches_in_chain": np.nan,
+        "chain_duration": np.nan,
+        "avg_ball_speed": np.nan,
+        "final_third_entries": np.nan,
+        "turnovers_forced": np.nan,
     }
 
+
+def _build_possession_segments(frame_state_df: pd.DataFrame, match_id: str) -> pd.DataFrame:
+    poss = frame_state_df[["frame", "time_seconds", "possessing_player", "possessing_team"]].dropna(subset=["possessing_player"])
+    segments: List[Dict] = []
+    if poss.empty:
+        return pd.DataFrame(columns=list(POSSESSION_SEGMENT_CONTRACT.columns.keys()))
+
+    seg_start = poss.iloc[0]
+    prev = poss.iloc[0]
+    segment_idx = 0
+    for _, row in poss.iloc[1:].iterrows():
+        changed = int(row["frame"]) != int(prev["frame"]) + 1 or row["possessing_player"] != prev["possessing_player"]
+        if changed:
+            segments.append({
+                "schema_version": SCHEMA_VERSION,
+                "match_id": str(match_id),
+                "segment_id": f"seg-{segment_idx}",
+                "start_frame": int(seg_start["frame"]),
+                "end_frame": int(prev["frame"]),
+                "start_time": float(seg_start["time_seconds"]),
+                "end_time": float(prev["time_seconds"]),
+                "duration_seconds": float(prev["time_seconds"] - seg_start["time_seconds"]),
+                "player_name": seg_start["possessing_player"],
+                "team": seg_start["possessing_team"],
+            })
+            segment_idx += 1
+            seg_start = row
+        prev = row
+
+    segments.append({
+        "schema_version": SCHEMA_VERSION,
+        "match_id": str(match_id),
+        "segment_id": f"seg-{segment_idx}",
+        "start_frame": int(seg_start["frame"]),
+        "end_frame": int(prev["frame"]),
+        "start_time": float(seg_start["time_seconds"]),
+        "end_time": float(prev["time_seconds"]),
+        "duration_seconds": float(prev["time_seconds"] - seg_start["time_seconds"]),
+        "player_name": seg_start["possessing_player"],
+        "team": seg_start["possessing_team"],
+    })
+    return pd.DataFrame(segments)
+
+
+def _build_chain_context(
+    match_id: str,
+    frame_state_df: pd.DataFrame,
+    event_df: pd.DataFrame,
+    possession_segment_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, dict[tuple[str, int], str], dict[str, dict[str, float]]]:
+    if frame_state_df.empty or possession_segment_df.empty:
+        return possession_segment_df.copy(), {}, {}
+
+    seg = possession_segment_df.copy().sort_values("start_frame").reset_index(drop=True)
+    seg["next_team"] = seg["team"].shift(-1)
+    seg["is_turnover_next"] = (seg["team"].notna() & seg["next_team"].notna() & (seg["team"] != seg["next_team"]))
+    chain_ids: list[str] = []
+    chain_index = -1
+    prior_team = None
+    for row in seg.itertuples(index=False):
+        if prior_team is None or row.team != prior_team:
+            chain_index += 1
+        chain_ids.append(f"chain-{chain_index}")
+        prior_team = row.team
+    seg["chain_id"] = chain_ids
+
+    frame_to_chain: dict[int, str] = {}
+    for row in seg.itertuples(index=False):
+        for frame in range(int(row.start_frame), int(row.end_frame) + 1):
+            frame_to_chain[int(frame)] = str(row.chain_id)
+
+    touch_events = event_df[event_df["event_type"] == str(EventType.TOUCH)].copy() if not event_df.empty else pd.DataFrame()
+    touch_by_chain: dict[str, int] = {}
+    if not touch_events.empty:
+        for frame in pd.to_numeric(touch_events["frame"], errors="coerce").dropna().astype(int).tolist():
+            chain_id = frame_to_chain.get(frame)
+            if chain_id is not None:
+                touch_by_chain[chain_id] = touch_by_chain.get(chain_id, 0) + 1
+
+    frame_ctx = frame_state_df[["frame", "ball_vx", "ball_vy", "ball_vz", "ball_y"]].copy()
+    frame_ctx["ball_speed"] = np.linalg.norm(frame_ctx[["ball_vx", "ball_vy", "ball_vz"]].fillna(0.0).values, axis=1)
+
+    chain_summary: dict[str, dict[str, float]] = {}
+    for chain_id, group in seg.groupby("chain_id", sort=False):
+        start_frame = int(group["start_frame"].min())
+        end_frame = int(group["end_frame"].max())
+        team = group["team"].dropna().iloc[0] if not group["team"].dropna().empty else None
+        window = frame_ctx[(frame_ctx["frame"] >= start_frame) & (frame_ctx["frame"] <= end_frame)].copy()
+        avg_ball_speed = float(window["ball_speed"].mean()) if not window.empty else np.nan
+
+        final_threshold = 1700.0
+        if team == "Blue":
+            in_final = window["ball_y"] >= final_threshold
+        elif team == "Orange":
+            in_final = window["ball_y"] <= -final_threshold
+        else:
+            in_final = pd.Series(False, index=window.index)
+        entries = int((in_final.astype(int).diff().fillna(in_final.astype(int)) > 0).sum()) if not window.empty else 0
+
+        turnovers_forced = int(group["is_turnover_next"].sum())
+        chain_summary[chain_id] = {
+            "touches_in_chain": float(touch_by_chain.get(chain_id, 0)),
+            "chain_duration": float((end_frame - start_frame) / float(REPLAY_FPS)),
+            "avg_ball_speed": avg_ball_speed,
+            "final_third_entries": float(entries),
+            "turnovers_forced": float(turnovers_forced),
+        }
+
+    for col in ["touches_in_chain", "chain_duration", "avg_ball_speed", "final_third_entries", "turnovers_forced"]:
+        seg[col] = seg["chain_id"].map(lambda cid: chain_summary.get(cid, {}).get(col, np.nan))
+
+    frame_to_segment: dict[tuple[str, int], str] = {}
+    for row in seg.itertuples(index=False):
+        for frame in range(int(row.start_frame), int(row.end_frame) + 1):
+            frame_to_segment[(str(match_id), frame)] = str(row.segment_id)
+
+    return seg.drop(columns=["next_team", "is_turnover_next"]), frame_to_segment, chain_summary
+
+
+def _attach_chain_context_to_events(
+    event_df: pd.DataFrame,
+    match_id: str,
+    frame_to_segment: dict[tuple[str, int], str],
+    possession_segment_df: pd.DataFrame,
+    chain_summary: dict[str, dict[str, float]],
+) -> pd.DataFrame:
+    if event_df.empty:
+        return event_df
+
+    out = event_df.copy()
+    seg_to_chain = possession_segment_df.set_index("segment_id")["chain_id"].to_dict() if not possession_segment_df.empty else {}
+
+    out["segment_id"] = out.apply(lambda r: frame_to_segment.get((str(r.get("match_id", match_id)), int(r.get("frame", -1)))), axis=1)
+    out["chain_id"] = out["segment_id"].map(seg_to_chain)
+
+    for col in ["touches_in_chain", "chain_duration", "avg_ball_speed", "final_third_entries", "turnovers_forced"]:
+        out[col] = out["chain_id"].map(lambda cid: chain_summary.get(cid, {}).get(col, np.nan))
+
+    return out
+
+
+
+
+def _coerce_table(df: pd.DataFrame, contract) -> pd.DataFrame:
+    if df is None or df.empty:
+        return contract.empty()
+    out = df.copy()
+    for col, dtype in contract.columns.items():
+        if col not in out.columns:
+            out[col] = pd.NA
+        try:
+            out[col] = out[col].astype(dtype)
+        except (TypeError, ValueError):
+            pass
+    return out[list(contract.columns.keys())]
 
 def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, file_name: str, shot_df: pd.DataFrame) -> AnalyticsTables:
     game = manager.game
@@ -238,6 +407,12 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
             distance_to_goal = _distance_to_goal(x, y, team) if team in {"Blue", "Orange"} else np.nan
             pressure_context = classify_pressure_context(nearest_defender_distance)
             is_big_chance = bool(row.get("BigChance", False))
+            shot_chain_id = row.get("ChainID")
+            touches_in_chain = float(pd.to_numeric(row.get("TouchesInChain", np.nan), errors="coerce"))
+            chain_duration = float(pd.to_numeric(row.get("ChainDuration", np.nan), errors="coerce"))
+            avg_ball_speed = float(pd.to_numeric(row.get("AvgBallSpeed", np.nan), errors="coerce"))
+            final_third_entries = float(pd.to_numeric(row.get("FinalThirdEntries", np.nan), errors="coerce"))
+            turnovers_forced = float(pd.to_numeric(row.get("TurnoversForced", np.nan), errors="coerce"))
 
             shot_row = _event_base(match_id, f"shot-taken-{idx}", frame, EventType.SHOT_TAKEN, None, player, team)
             shot_row.update({
@@ -260,6 +435,12 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                 "xg_model_version": str(row.get("xGModelVersion", "legacy")),
                 "xg_calibration_version": str(row.get("xGCalibrationVersion", "legacy")),
                 "xg": xg,
+                "chain_id": shot_chain_id,
+                "touches_in_chain": touches_in_chain,
+                "chain_duration": chain_duration,
+                "avg_ball_speed": avg_ball_speed,
+                "final_third_entries": final_third_entries,
+                "turnovers_forced": turnovers_forced,
             })
             event_rows.append(shot_row)
 
@@ -311,47 +492,29 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
 
     event_df = pd.DataFrame(event_rows)
 
-    poss = frame_state_df[["frame", "time_seconds", "possessing_player", "possessing_team"]].dropna(subset=["possessing_player"])
-    segments: List[Dict] = []
-    if not poss.empty:
-        seg_start = poss.iloc[0]
-        prev = poss.iloc[0]
-        segment_idx = 0
-        for _, row in poss.iloc[1:].iterrows():
-            if int(row["frame"]) != int(prev["frame"]) + 1 or row["possessing_player"] != prev["possessing_player"]:
-                segments.append({
-                    "schema_version": SCHEMA_VERSION,
-                    "match_id": str(match_id),
-                    "segment_id": f"seg-{segment_idx}",
-                    "start_frame": int(seg_start["frame"]),
-                    "end_frame": int(prev["frame"]),
-                    "start_time": float(seg_start["time_seconds"]),
-                    "end_time": float(prev["time_seconds"]),
-                    "duration_seconds": float(prev["time_seconds"] - seg_start["time_seconds"]),
-                    "player_name": seg_start["possessing_player"],
-                    "team": seg_start["possessing_team"],
-                })
-                segment_idx += 1
-                seg_start = row
-            prev = row
-        segments.append({
-            "schema_version": SCHEMA_VERSION,
-            "match_id": str(match_id),
-            "segment_id": f"seg-{segment_idx}",
-            "start_frame": int(seg_start["frame"]),
-            "end_frame": int(prev["frame"]),
-            "start_time": float(seg_start["time_seconds"]),
-            "end_time": float(prev["time_seconds"]),
-            "duration_seconds": float(prev["time_seconds"] - seg_start["time_seconds"]),
-            "player_name": seg_start["possessing_player"],
-            "team": seg_start["possessing_team"],
-        })
+    base_segments = _build_possession_segments(frame_state_df, match_id=str(match_id))
+    event_df = _coerce_table(event_df, EVENT_CONTRACT)
+    base_segments = _coerce_table(base_segments, POSSESSION_SEGMENT_CONTRACT)
+
+    enriched_segments, frame_to_segment, chain_summary = _build_chain_context(
+        match_id=str(match_id),
+        frame_state_df=frame_state_df,
+        event_df=event_df,
+        possession_segment_df=base_segments,
+    )
+    event_df = _attach_chain_context_to_events(
+        event_df=event_df,
+        match_id=str(match_id),
+        frame_to_segment=frame_to_segment,
+        possession_segment_df=enriched_segments,
+        chain_summary=chain_summary,
+    )
 
     return normalize_tables(AnalyticsTables(
         match=match_df,
         frame_state=frame_state_df,
         event=event_df,
-        possession_segment=pd.DataFrame(segments),
+        possession_segment=enriched_segments,
     ))
 
 
@@ -360,6 +523,7 @@ def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
         "Player", "Team", "Frame", "Time", "Result", "OutcomeType", "OnTarget",
         "xG", "xG_pre", "xG_post", "XGModelVersion", "XGCalibrationVersion", "XA", "Speed", "PressureContext", "NearestDefenderDistance", "ShotAngle",
         "ShooterBoost", "DistanceToGoal", "BigChance", "X", "Y", "Z",
+        "SegmentID", "ChainID", "TouchesInChain", "ChainDuration", "AvgBallSpeed", "FinalThirdEntries", "TurnoversForced",
     ]
     if event_df.empty:
         return pd.DataFrame(columns=typed_columns)
@@ -391,6 +555,13 @@ def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
         "x": "X",
         "y": "Y",
         "z": "Z",
+        "segment_id": "SegmentID",
+        "chain_id": "ChainID",
+        "touches_in_chain": "TouchesInChain",
+        "chain_duration": "ChainDuration",
+        "avg_ball_speed": "AvgBallSpeed",
+        "final_third_entries": "FinalThirdEntries",
+        "turnovers_forced": "TurnoversForced",
     })
     subset["Result"] = np.where(subset["OutcomeType"].str.lower() == "goal", "Goal", "Shot")
 
