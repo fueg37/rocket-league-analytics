@@ -29,6 +29,10 @@ from analytics.shot_quality import (
     COL_ON_TARGET,
     COL_TARGET_X,
     COL_TARGET_Z,
+    COL_SHOT_Z,
+    COL_GOALKEEPER_DIST,
+    COL_SHOT_ANGLE,
+    COL_DIST_TO_GOAL,
     COL_XG,
     COL_XGOT,
     SHOT_COL_FRAME,
@@ -40,7 +44,6 @@ from analytics.shot_quality import (
     SHOT_EVENT_COLUMNS,
     calculate_xg_probability,
     calculate_xgot_probability,
-    compute_shot_features,
     validate_shot_metric_columns,
 )
 
@@ -332,7 +335,9 @@ def calculate_luck_percentage(shot_df, team, actual_goals):
     team_shots = shot_df[shot_df[SHOT_COL_TEAM] == team] if not shot_df.empty else pd.DataFrame()
     if team_shots.empty or actual_goals == 0:
         return 0.0
-    probs = team_shots[COL_XG].values.tolist()
+    probs = team_shots[COL_XG].dropna().values.tolist()
+    if not probs:
+        return 0.0
     n = len(probs)
     # Iterative Poisson Binomial: dp[k] = P(exactly k goals)
     dp = [0.0] * (n + 1)
@@ -767,12 +772,19 @@ def calculate_kickoff_stats(game, proto, game_df, player_map, match_id=""):
 def calculate_shot_data(proto, game_df, pid_team, player_map):
     hits = proto.game_stats.hits
     shot_list = []
+    near_zero_vel_y = 1.0
 
+    player_team_lookup = {
+        str(p.id.id): ("Orange" if p.is_orange else "Blue")
+        for p in proto.players
+    }
+    team_players = {
+        "Blue": [p.name for p in proto.players if not p.is_orange],
+        "Orange": [p.name for p in proto.players if p.is_orange],
+    }
 
     # Build a tight goal frame map: only the LAST hit before each goal gets credit
-    # Map each goal to the exact scorer frame from metadata
-    goal_scorer_frames = {}  # frame -> team of scorer
-
+    goal_scorer_frames = {}
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             f = getattr(g, 'frame_number', getattr(g, 'frame', None))
@@ -781,7 +793,6 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                 scorer_team = pid_team.get(scorer_pid, "Blue")
                 goal_scorer_frames[f] = scorer_team
 
-    # For each goal, find the last hit within 10 frames before the goal frame (the actual scoring touch)
     goal_hit_frames = set()
     for goal_frame in goal_scorer_frames:
         best_hit = None
@@ -791,112 +802,126 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         if best_hit is not None:
             goal_hit_frames.add(best_hit)
         else:
-            # Widen to 30 frames if no hit found very close
             for hit in hits:
                 if hit.player_id and goal_frame - 30 <= hit.frame_number <= goal_frame:
                     best_hit = hit.frame_number
             if best_hit is not None:
                 goal_hit_frames.add(best_hit)
- 
 
     for hit in hits:
         frame = hit.frame_number
-        if not hit.player_id: continue
-        # Trust carball's shot/goal detection as primary signal
+        if not hit.player_id:
+            continue
+
+        pid = str(hit.player_id.id)
+        shooter_team = player_team_lookup.get(pid, "Unknown")
+
         is_lib_shot = getattr(hit, 'is_shot', False)
         is_lib_goal = getattr(hit, 'is_goal', False)
         is_goal_hit = frame in goal_hit_frames
         is_physics_shot = False
-        ball_pos, ball_vel = None, None
 
+        ball_pos, ball_vel = None, None
         if 'ball' in game_df and frame in game_df.index:
             try:
                 ball_data = game_df['ball'].loc[frame]
-                ball_pos = (ball_data['pos_x'], ball_data['pos_y'], ball_data['pos_z'])
-                ball_vel = (ball_data['vel_x'], ball_data['vel_y'], ball_data['vel_z'])
-                # Physics fallback: only count as a shot if the ball is in the
-                # attacking third AND moving fast toward goal. This catches real
-                # shots carball misses without flagging mid-field clears.
-                pid = str(hit.player_id.id)
-                shooter_team = "Unknown"
-                for p in proto.players:
-                    if str(p.id.id) == pid:
-                        shooter_team = "Orange" if p.is_orange else "Blue"
-                        break
-                direction_sign = 1 if shooter_team == "Blue" else -1
+                ball_pos = (float(ball_data['pos_x']), float(ball_data['pos_y']), float(ball_data['pos_z']))
+                ball_vel = (float(ball_data['vel_x']), float(ball_data['vel_y']), float(ball_data['vel_z']))
 
-                # Tighter physics check: ball moving fast toward goal AND in attacking half
+                direction_sign = 1 if shooter_team == "Blue" else -1
                 ball_toward_goal = ball_vel[1] * direction_sign > 0
                 fast_enough = abs(ball_vel[1]) > 1200
                 in_attacking_half = (ball_pos[1] * direction_sign) > 0
                 if ball_toward_goal and fast_enough and in_attacking_half:
                     is_physics_shot = True
-            except: pass
+            except Exception:
+                pass
 
-        # Only count if library says it's a shot/goal, or tight physics check passes
-        if is_lib_shot or is_lib_goal or is_goal_hit or is_physics_shot:
-            pid = str(hit.player_id.id)
-            player_name = player_map.get(pid, "Unknown")
-            shooter_team = "Unknown"
-            for p in proto.players:
-                if str(p.id.id) == pid:
-                    shooter_team = "Orange" if p.is_orange else "Blue"
-                    break
-            target_y = 5120 if shooter_team == "Blue" else -5120
+        if not (is_lib_shot or is_lib_goal or is_goal_hit or is_physics_shot):
+            continue
 
-            if ball_pos and ball_vel:
-                xg = calculate_xg_probability(ball_pos[0], ball_pos[1], ball_pos[2], ball_vel[0], ball_vel[1], ball_vel[2], target_y)
-                xgot = calculate_xgot_probability(ball_pos[0], ball_pos[1], ball_pos[2], ball_vel[0], ball_vel[1], ball_vel[2], target_y)
-                shot_features = compute_shot_features(
-                    ball_pos[0], ball_pos[1], ball_pos[2],
-                    ball_vel[0], ball_vel[1], ball_vel[2],
-                    target_y,
-                    goal_half_w=GOAL_HALF_W,
-                    goal_height=GOAL_HEIGHT,
-                )
-                target_x = shot_features[COL_TARGET_X]
-                target_z = shot_features[COL_TARGET_Z]
-                on_target = shot_features[COL_ON_TARGET]
-                is_big_chance = False
-                defender_dist = 99999
-                if xg > 0.40:
-                    orange_players = [p.name for p in proto.players if p.is_orange]
-                    blue_players = [p.name for p in proto.players if not p.is_orange]
-                    defenders = orange_players if shooter_team == "Blue" else blue_players
-                    try:
-                        frame_data = game_df.loc[frame]
-                        for d_name in defenders:
-                            if d_name in frame_data:
-                                d_pos = frame_data[d_name]
-                                dist = np.sqrt((ball_pos[0]-d_pos['pos_x'])**2 + (ball_pos[1]-d_pos['pos_y'])**2)
-                                if dist < defender_dist: defender_dist = dist
-                    except (KeyError, IndexError):
-                        pass
-                    if defender_dist > 500: is_big_chance = True
-                result = "Goal" if (is_lib_goal or is_goal_hit) else "Shot"
-                shot_list.append({
-                    "Player": player_name, "Team": shooter_team, "Frame": frame,
-                    COL_XG: round(xg, 2), COL_XGOT: round(xgot, 2), COL_ON_TARGET: bool(on_target), COL_TARGET_X: target_x, COL_TARGET_Z: target_z, "Result": result, "BigChance": is_big_chance,
-                    "X": ball_pos[0], "Y": ball_pos[1],
-                    "Speed": int(np.sqrt(ball_vel[0]**2 + ball_vel[1]**2 + ball_vel[2]**2))
-                })
+        player_name = player_map.get(pid, "Unknown")
+        target_y = FIELD_HALF_Y if shooter_team == "Blue" else -FIELD_HALF_Y
+
+        xg = 0.01
+        xgot = 0.01
+        shot_x, shot_y = np.nan, np.nan
+        shot_z = np.nan
+        speed = 0
+        dist_to_goal = np.nan
+        shot_angle = np.nan
+        goalkeeper_dist = np.nan
+        target_x = np.nan
+        target_z = np.nan
+        on_target = False
+
+        if ball_pos and ball_vel:
+            shot_x, shot_y, shot_z = ball_pos
+            vel_x, vel_y, vel_z = ball_vel
+            speed = int(np.sqrt(vel_x ** 2 + vel_y ** 2 + vel_z ** 2))
+            dist_to_goal = float(np.sqrt((shot_x ** 2) + ((target_y - shot_y) ** 2)))
+            shot_angle = float(np.arctan2(abs(shot_x), abs(target_y - shot_y)))
+
+            xg = calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y)
+            xgot = calculate_xgot_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y)
+
+            defending_team = "Orange" if shooter_team == "Blue" else "Blue"
+            defenders = team_players.get(defending_team, [])
+            if defenders:
+                try:
+                    frame_data = game_df.loc[frame]
+                    nearest = np.inf
+                    for d_name in defenders:
+                        if d_name not in frame_data:
+                            continue
+                        d_pos = frame_data[d_name]
+                        dist = float(np.sqrt((shot_x - d_pos['pos_x']) ** 2 + (shot_y - d_pos['pos_y']) ** 2))
+                        if dist < nearest:
+                            nearest = dist
+                    if np.isfinite(nearest):
+                        goalkeeper_dist = nearest
+                except (KeyError, IndexError):
+                    pass
+
+            if abs(vel_y) >= near_zero_vel_y:
+                t_goal = (target_y - shot_y) / vel_y
+                if t_goal >= 0:
+                    target_x = float(shot_x + vel_x * t_goal)
+                    target_z = float(shot_z + vel_z * t_goal)
+                    on_target = bool(abs(target_x) <= GOAL_HALF_W and 0 <= target_z <= GOAL_HEIGHT)
+            else:
+                on_target = False
+
+        is_big_chance = bool(xg > 0.40 and pd.notna(goalkeeper_dist) and goalkeeper_dist > 500)
+        result = "Goal" if (is_lib_goal or is_goal_hit) else "Shot"
+        shot_list.append({
+            "Player": player_name,
+            "Team": shooter_team,
+            "Frame": frame,
+            COL_XG: round(float(xg), 2),
+            COL_XGOT: round(float(xgot), 2),
+            COL_ON_TARGET: bool(on_target),
+            COL_TARGET_X: target_x,
+            COL_TARGET_Z: target_z,
+            COL_SHOT_Z: shot_z,
+            COL_GOALKEEPER_DIST: goalkeeper_dist,
+            COL_SHOT_ANGLE: shot_angle,
+            COL_DIST_TO_GOAL: dist_to_goal,
+            "Result": result,
+            "BigChance": is_big_chance,
+            "X": shot_x,
+            "Y": shot_y,
+            "Speed": speed,
+        })
 
     if shot_list:
         raw_df = pd.DataFrame(shot_list)
 
-        # Deduplicate: within 1-second windows, keep highest xG per team
-        raw_df['TimeGroup'] = (raw_df[SHOT_COL_FRAME] // REPLAY_FPS)
-        # Prefer goals over shots, then highest xG
-        raw_df['_sort'] = raw_df[SHOT_COL_RESULT].map({'Goal': 0, 'Shot': 1})
-        final_df = raw_df.sort_values(['_sort', COL_XG], ascending=[True, False]).drop_duplicates(subset=[SHOT_COL_TEAM, 'TimeGroup'])
-        final_df = final_df.drop(columns=['_sort'])
-
         # Dedup shots within 0.5s windows per player
         raw_df['TimeGroup'] = (raw_df[SHOT_COL_FRAME] // (REPLAY_FPS // 2))
         shots_only = raw_df[raw_df[SHOT_COL_RESULT] == 'Shot'].sort_values(COL_XG, ascending=False).drop_duplicates(subset=[SHOT_COL_PLAYER, 'TimeGroup', SHOT_COL_RESULT])
-        # Dedup goals using proximity — a single goal event can trigger
-        # multiple detections across nearby frames. Keep the highest-xG
-        # entry per cluster of goals within 90 frames (3s) of each other.
+
+        # Dedup goals using proximity and keep best xG in each goal cluster.
         goals_raw = raw_df[raw_df[SHOT_COL_RESULT] == 'Goal'].sort_values(SHOT_COL_FRAME).copy()
         goals_deduped = []
         last_kept_frame = -9999
@@ -905,12 +930,11 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                 goals_deduped.append(row)
                 last_kept_frame = row[SHOT_COL_FRAME]
             else:
-                # Same goal event — keep higher xG
                 if row[COL_XG] > goals_deduped[-1][COL_XG]:
                     goals_deduped[-1] = row
         goals_only = pd.DataFrame(goals_deduped) if goals_deduped else pd.DataFrame(columns=raw_df.columns)
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
- 
+
         return final_df
     return pd.DataFrame(columns=list(SHOT_EVENT_COLUMNS))
 
@@ -1543,17 +1567,23 @@ def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
         defending_team = "Orange" if shot_team == "Blue" else "Blue"
         target_y = 5120.0 if shot_team == "Blue" else -5120.0
 
-        # Shot properties — shot_df stores Speed (scalar), X, Y only
         shot_speed = shot['Speed']
-        dist_to_goal = np.sqrt(shot[SHOT_COL_X]**2 + (target_y - shot[SHOT_COL_Y])**2)
-        angle_off_center = np.arctan2(abs(shot[SHOT_COL_X]), abs(target_y - shot[SHOT_COL_Y]))
-        # Get ball Z from game_df since shot_df only stores X, Y
-        shot_z = 0
-        if 'ball' in game_df and frame in game_df.index:
-            try:
-                shot_z = max(game_df['ball'].loc[frame]['pos_z'], 0)
-            except (KeyError, IndexError):
-                pass
+        dist_to_goal = shot.get(COL_DIST_TO_GOAL, np.nan)
+        if pd.isna(dist_to_goal):
+            dist_to_goal = np.sqrt(shot[SHOT_COL_X]**2 + (target_y - shot[SHOT_COL_Y])**2)
+
+        angle_off_center = shot.get(COL_SHOT_ANGLE, np.nan)
+        if pd.isna(angle_off_center):
+            angle_off_center = np.arctan2(abs(shot[SHOT_COL_X]), abs(target_y - shot[SHOT_COL_Y]))
+
+        shot_z = shot.get(COL_SHOT_Z, np.nan)
+        if pd.isna(shot_z):
+            shot_z = 0
+            if 'ball' in game_df and frame in game_df.index:
+                try:
+                    shot_z = max(game_df['ball'].loc[frame]['pos_z'], 0)
+                except (KeyError, IndexError):
+                    pass
 
         # Find nearest defending player at this frame
         nearest_defender = None
@@ -1574,13 +1604,17 @@ def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
         if nearest_defender is None:
             continue
 
-        xs = calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, nearest_dist)
+        saver_dist = shot.get(COL_GOALKEEPER_DIST, np.nan)
+        if pd.isna(saver_dist):
+            saver_dist = nearest_dist
+
+        xs = calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, saver_dist)
         events.append({
             'Saver': nearest_defender, 'Team': defending_team,
             'Frame': frame, 'Time': round(frame / REPLAY_FPS, 1),
             'xS': round(xs, 3), 'ShotSpeed': int(shot_speed),
             'DistToGoal': int(dist_to_goal), 'ShotHeight': int(shot_z),
-            'SaverDist': int(nearest_dist), 'Shooter': shot['Player']
+            'SaverDist': int(saver_dist), 'Shooter': shot['Player']
         })
 
     xs_events_df = pd.DataFrame(events)
