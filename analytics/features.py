@@ -4,7 +4,8 @@ from typing import Dict
 
 import numpy as np
 
-from constants import GOAL_HALF_W
+from constants import GOAL_HALF_WIDTH
+from analytics.geometry import goal_mouth_x_bounds, goal_target_y
 
 FEATURE_VERSION = "2026.02"
 
@@ -72,9 +73,10 @@ def build_pre_shot_features(
     chain_final_third_entries: float = 0.0,
     chain_turnovers_forced: float = 0.0,
 ) -> Dict[str, float]:
-    target_y = 5120.0 if team == "Blue" else -5120.0
-    vec_l = np.array([-893.0 - shot_x, target_y - shot_y], dtype=float)
-    vec_r = np.array([893.0 - shot_x, target_y - shot_y], dtype=float)
+    target_y = goal_target_y(team)
+    goal_left_x, goal_right_x = goal_mouth_x_bounds()
+    vec_l = np.array([goal_left_x - shot_x, target_y - shot_y], dtype=float)
+    vec_r = np.array([goal_right_x - shot_x, target_y - shot_y], dtype=float)
     norm_l, norm_r = _safe_norm(vec_l), _safe_norm(vec_r)
     if norm_l == 0.0 or norm_r == 0.0:
         shot_angle = 0.0
@@ -110,14 +112,14 @@ def build_post_shot_features(
     keeper_line_offset: float,
     team: str,
 ) -> Dict[str, float]:
-    target_y = 5120.0 if team == "Blue" else -5120.0
+    target_y = goal_target_y(team)
     shot_speed = float(np.linalg.norm([vel_x, vel_y, vel_z]))
     if abs(vel_y) > 1e-6:
         t_goal = (target_y - shot_y) / vel_y
     else:
         t_goal = 0.0
     projected_x = float(shot_x + vel_x * max(t_goal, 0.0))
-    placement_x = float(np.clip(abs(projected_x) / GOAL_HALF_W, 0.0, 2.0))
+    placement_x = float(np.clip(abs(projected_x) / GOAL_HALF_WIDTH, 0.0, 2.0))
     if shot_speed > 1e-6:
         vx_n, vy_n, vz_n = vel_x / shot_speed, vel_y / shot_speed, vel_z / shot_speed
     else:
