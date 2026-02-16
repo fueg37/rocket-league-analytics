@@ -1293,6 +1293,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
             'On Target Faced': on_target_faced,
             'xGA': round(sum(xg_vals), 2),
             'Goals Conceded (nearest)': goals_conceded,
+            'Goals Prevented': on_target_faced - goals_conceded,
             'Avg Dist to Shot': int(np.mean([e['dist'] for e in events])) if events else 0,
             'High xG Faced': sum(1 for e in events if e[COL_XG] > 0.3),
         })
