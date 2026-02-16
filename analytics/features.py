@@ -17,11 +17,6 @@ PRE_SHOT_FEATURE_COLUMNS = [
     "nearest_defender_distance",
     "shooter_boost",
     "buildup_seconds",
-    "touches_in_chain",
-    "chain_duration",
-    "chain_avg_ball_speed",
-    "chain_final_third_entries",
-    "chain_turnovers_forced",
 ]
 
 POST_SHOT_FEATURE_COLUMNS = [
@@ -66,11 +61,6 @@ def build_pre_shot_features(
     shooter_boost: float,
     buildup_seconds: float,
     team: str,
-    touches_in_chain: float = 0.0,
-    chain_duration: float = 0.0,
-    chain_avg_ball_speed: float = 0.0,
-    chain_final_third_entries: float = 0.0,
-    chain_turnovers_forced: float = 0.0,
 ) -> Dict[str, float]:
     target_y = 5120.0 if team == "Blue" else -5120.0
     vec_l = np.array([-893.0 - shot_x, target_y - shot_y], dtype=float)
@@ -91,11 +81,6 @@ def build_pre_shot_features(
         "nearest_defender_distance": float(nearest_defender_distance),
         "shooter_boost": float(np.clip(shooter_boost if not np.isnan(shooter_boost) else 0.0, 0.0, 100.0)),
         "buildup_seconds": float(max(0.0, buildup_seconds)),
-        "touches_in_chain": float(max(0.0, touches_in_chain if not np.isnan(touches_in_chain) else 0.0)),
-        "chain_duration": float(max(0.0, chain_duration if not np.isnan(chain_duration) else 0.0)),
-        "chain_avg_ball_speed": float(max(0.0, chain_avg_ball_speed if not np.isnan(chain_avg_ball_speed) else 0.0)),
-        "chain_final_third_entries": float(max(0.0, chain_final_third_entries if not np.isnan(chain_final_third_entries) else 0.0)),
-        "chain_turnovers_forced": float(max(0.0, chain_turnovers_forced if not np.isnan(chain_turnovers_forced) else 0.0)),
     }
 
 
