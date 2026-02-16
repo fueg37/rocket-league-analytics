@@ -732,6 +732,9 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
 
     rows = []
     goal_window_frames = int(5 * REPLAY_FPS)
+    touch_idx = 0
+    goal_idx = 0
+
     for idx, frame in enumerate(kickoff_frames):
         next_kickoff = kickoff_frames[idx + 1] if idx + 1 < len(kickoff_frames) else None
         segment_end = (next_kickoff - 1) if next_kickoff is not None else frame + int(12 * REPLAY_FPS)
@@ -744,7 +747,13 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
         end_x = 0.0
         end_y = 0.0
 
-        first_touch = next((t for t in touches if frame < t[0] <= segment_end), None)
+        while touch_idx < len(touches) and touches[touch_idx][0] <= frame:
+            touch_idx += 1
+
+        first_touch = None
+        if touch_idx < len(touches) and touches[touch_idx][0] <= segment_end:
+            first_touch = touches[touch_idx]
+
         if first_touch is not None:
             touch_frame, touch_player, touch_team, tx, ty = first_touch
             time_to_hit = round((touch_frame - frame) / float(REPLAY_FPS), 2)
@@ -768,7 +777,14 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
 
         kickoff_goal = False
         result = "Neutral"
-        scoring_goal = next((g for g in goals if frame <= g[0] <= frame + goal_window_frames), None)
+
+        while goal_idx < len(goals) and goals[goal_idx][0] < frame:
+            goal_idx += 1
+
+        scoring_goal = None
+        if goal_idx < len(goals) and goals[goal_idx][0] <= frame + goal_window_frames:
+            scoring_goal = goals[goal_idx]
+
         if scoring_goal is not None:
             kickoff_goal = True
             scoring_team = str(scoring_goal[1]) if pd.notna(scoring_goal[1]) else "Unknown"
