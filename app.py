@@ -751,78 +751,6 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
     hits = proto.game_stats.hits
     shot_list = []
 
-    # Foundational chain context (possession runs by same-team touches).
-    chain_by_hit_idx = {}
-    chain_summaries = {}
-    chain_id = -1
-    current = None
-    valid_hits = [(idx, hit) for idx, hit in enumerate(hits) if getattr(hit, "player_id", None)]
-    for list_pos, (idx, hit) in enumerate(valid_hits):
-        frame = int(hit.frame_number)
-        pid = str(hit.player_id.id)
-        team = pid_team.get(pid, "Unknown")
-
-        ball_y, ball_speed = np.nan, np.nan
-        if "ball" in game_df and frame in game_df.index:
-            ball = game_df["ball"].loc[frame]
-            ball_y = float(pd.to_numeric(ball.get("pos_y", np.nan), errors="coerce"))
-            vx = float(pd.to_numeric(ball.get("vel_x", np.nan), errors="coerce"))
-            vy = float(pd.to_numeric(ball.get("vel_y", np.nan), errors="coerce"))
-            vz = float(pd.to_numeric(ball.get("vel_z", np.nan), errors="coerce"))
-            if not np.isnan(vx):
-                ball_speed = float(np.linalg.norm([vx, vy, vz]))
-
-        starts_new = current is None or current["team"] != team
-        if starts_new:
-            chain_id += 1
-            current = {
-                "chain_id": f"chain-{chain_id}",
-                "team": team,
-                "start_frame": frame,
-                "end_frame": frame,
-                "touches_in_chain": 0,
-                "ball_speed_sum": 0.0,
-                "ball_speed_n": 0,
-                "final_third_entries": 0,
-                "was_in_final_third": False,
-                "turnovers_forced": 0.0,
-            }
-
-        in_final = False
-        if team == "Blue" and not np.isnan(ball_y):
-            in_final = ball_y >= 1700
-        elif team == "Orange" and not np.isnan(ball_y):
-            in_final = ball_y <= -1700
-        if in_final and not current["was_in_final_third"]:
-            current["final_third_entries"] += 1
-        current["was_in_final_third"] = in_final
-
-        current["touches_in_chain"] += 1
-        current["end_frame"] = frame
-        if not np.isnan(ball_speed):
-            current["ball_speed_sum"] += ball_speed
-            current["ball_speed_n"] += 1
-        chain_summaries[current["chain_id"]] = current.copy()
-        chain_by_hit_idx[idx] = current["chain_id"]
-
-        if list_pos + 1 < len(valid_hits):
-            next_team = pid_team.get(str(valid_hits[list_pos + 1][1].player_id.id), "Unknown")
-            if next_team != team:
-                current["turnovers_forced"] = 1.0
-                chain_summaries[current["chain_id"]] = current.copy()
-
-    for cid, summary in list(chain_summaries.items()):
-        duration = max(0.0, (summary["end_frame"] - summary["start_frame"]) / float(REPLAY_FPS))
-        avg_speed = summary["ball_speed_sum"] / summary["ball_speed_n"] if summary["ball_speed_n"] else 0.0
-        chain_summaries[cid] = {
-            "chain_id": summary["chain_id"],
-            "touches_in_chain": float(summary["touches_in_chain"]),
-            "chain_duration": float(duration),
-            "avg_ball_speed": float(avg_speed),
-            "final_third_entries": float(summary["final_third_entries"]),
-            "turnovers_forced": float(summary["turnovers_forced"]),
-        }
-
     def _player_xy(name, frame):
         if name in game_df and frame in game_df.index:
             row = game_df[name].loc[frame]
@@ -881,7 +809,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
     goal_hit_frames = set()
     for goal_frame in goal_scorer_frames:
         best_hit = None
-        for hit_idx, hit in enumerate(hits):
+        for hit in hits:
             if hit.player_id and goal_frame - 10 <= hit.frame_number <= goal_frame:
                 best_hit = hit.frame_number
         if best_hit is not None:
@@ -895,7 +823,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                 goal_hit_frames.add(best_hit)
  
 
-    for hit_idx, hit in enumerate(hits):
+    for hit in hits:
         frame = hit.frame_number
         if not hit.player_id: continue
         # Trust carball's shot/goal detection as primary signal
@@ -963,7 +891,6 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                         keeper_distance = float(np.hypot(ball_pos[0] - kx, ball_pos[1] - ky))
                         keeper_line_offset = float(abs(target_y - ky))
 
-                chain_context = chain_summaries.get(chain_by_hit_idx.get(hit_idx, ""), {})
                 pre_features = build_pre_shot_features(
                     shot_x=ball_pos[0], shot_y=ball_pos[1], shot_z=ball_pos[2],
                     shooter_speed=shooter_speed if not np.isnan(shooter_speed) else 0.0,
@@ -971,11 +898,6 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                     shooter_boost=shooter_boost if not np.isnan(shooter_boost) else 0.0,
                     buildup_seconds=buildup_seconds,
                     team=shooter_team,
-                    touches_in_chain=float(chain_context.get("touches_in_chain", 0.0)),
-                    chain_duration=float(chain_context.get("chain_duration", 0.0)),
-                    chain_avg_ball_speed=float(chain_context.get("avg_ball_speed", 0.0)),
-                    chain_final_third_entries=float(chain_context.get("final_third_entries", 0.0)),
-                    chain_turnovers_forced=float(chain_context.get("turnovers_forced", 0.0)),
                 )
                 post_features = build_post_shot_features(
                     shot_x=ball_pos[0], shot_y=ball_pos[1], shot_z=ball_pos[2],
@@ -997,12 +919,6 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                     "PressureContext": pressure_context,
                     "NearestDefenderDistance": defender_dist,
                     "ShooterBoost": shooter_boost,
-                    "ChainID": chain_context.get("chain_id"),
-                    "TouchesInChain": float(chain_context.get("touches_in_chain", 0.0)),
-                    "ChainDuration": float(chain_context.get("chain_duration", 0.0)),
-                    "AvgBallSpeed": float(chain_context.get("avg_ball_speed", 0.0)),
-                    "FinalThirdEntries": float(chain_context.get("final_third_entries", 0.0)),
-                    "TurnoversForced": float(chain_context.get("turnovers_forced", 0.0)),
                 })
 
     if shot_list:
@@ -1036,7 +952,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
  
         return final_df
-    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "xG_pre", "xG_post", "xGModelVersion", "xGCalibrationVersion", "Result", "BigChance", "X", "Y", "Speed", "PressureContext", "NearestDefenderDistance", "ShooterBoost", "ChainID", "TouchesInChain", "ChainDuration", "AvgBallSpeed", "FinalThirdEntries", "TurnoversForced"])
+    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "xG_pre", "xG_post", "xGModelVersion", "xGCalibrationVersion", "Result", "BigChance", "X", "Y", "Speed", "PressureContext", "NearestDefenderDistance", "ShooterBoost"])
 
 def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, event_df=None, max_time_diff=2.0):
     """Build pass table from canonical pass events with shot-linked key pass attribution."""

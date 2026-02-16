@@ -78,11 +78,6 @@ def _bootstrap_training_data(n: int = 1600) -> pd.DataFrame:
         "nearest_defender_distance": rng.uniform(120, 2600, n),
         "shooter_boost": rng.uniform(0, 100, n),
         "buildup_seconds": rng.uniform(0, 8, n),
-        "touches_in_chain": rng.integers(1, 8, n),
-        "chain_duration": rng.uniform(0.1, 12, n),
-        "chain_avg_ball_speed": rng.uniform(300, 3000, n),
-        "chain_final_third_entries": rng.integers(0, 4, n),
-        "chain_turnovers_forced": rng.integers(0, 2, n),
     })
     post = pd.DataFrame({
         "shot_speed": rng.uniform(200, 3500, n),
