@@ -112,12 +112,26 @@ def save_data(new_stats, new_kickoffs):
     if not new_stats.empty:
         if os.path.exists(DB_FILE):
             existing = pd.read_csv(DB_FILE)
-            existing['MatchID'] = existing['MatchID'].astype(str)
-            new_stats['MatchID'] = new_stats['MatchID'].astype(str)
-            
-            existing_ids = set(existing['MatchID'].unique())
-            new_stats = new_stats[~new_stats['MatchID'].isin(existing_ids)]
-            combined = pd.concat([existing, new_stats], ignore_index=True)
+
+            # Defensive check: only convert MatchID if column exists
+            if "MatchID" in existing.columns:
+                existing['MatchID'] = existing['MatchID'].astype(str)
+            if "MatchID" in new_stats.columns:
+                new_stats['MatchID'] = new_stats['MatchID'].astype(str)
+
+            # Deduplication: only if both DataFrames have MatchID
+            if "MatchID" in existing.columns and "MatchID" in new_stats.columns:
+                existing_ids = set(existing['MatchID'].unique())
+                new_stats = new_stats[~new_stats['MatchID'].isin(existing_ids)]
+                combined = pd.concat([existing, new_stats], ignore_index=True)
+            elif "MatchID" in existing.columns:
+                # New data missing MatchID - keep existing only
+                logger.warning("New stats missing MatchID column; keeping existing data only")
+                combined = existing
+            else:
+                # Existing missing MatchID - overwrite with new
+                logger.warning("Existing %s missing MatchID column; overwriting with new data", DB_FILE)
+                combined = new_stats
         else:
             combined = new_stats
         combined.to_csv(DB_FILE, index=False)
@@ -126,12 +140,26 @@ def save_data(new_stats, new_kickoffs):
     if not new_kickoffs.empty:
         if os.path.exists(KICKOFF_DB_FILE):
             existing_k = pd.read_csv(KICKOFF_DB_FILE)
-            existing_k['MatchID'] = existing_k['MatchID'].astype(str)
-            new_kickoffs['MatchID'] = new_kickoffs['MatchID'].astype(str)
-            
-            existing_ids = set(existing_k['MatchID'].unique())
-            new_kickoffs = new_kickoffs[~new_kickoffs['MatchID'].isin(existing_ids)]
-            combined_k = pd.concat([existing_k, new_kickoffs], ignore_index=True)
+
+            # Defensive check: only convert MatchID if column exists
+            if "MatchID" in existing_k.columns:
+                existing_k['MatchID'] = existing_k['MatchID'].astype(str)
+            if "MatchID" in new_kickoffs.columns:
+                new_kickoffs['MatchID'] = new_kickoffs['MatchID'].astype(str)
+
+            # Deduplication: only if both DataFrames have MatchID
+            if "MatchID" in existing_k.columns and "MatchID" in new_kickoffs.columns:
+                existing_ids = set(existing_k['MatchID'].unique())
+                new_kickoffs = new_kickoffs[~new_kickoffs['MatchID'].isin(existing_ids)]
+                combined_k = pd.concat([existing_k, new_kickoffs], ignore_index=True)
+            elif "MatchID" in existing_k.columns:
+                # New data missing MatchID - keep existing only
+                logger.warning("New kickoffs missing MatchID column; keeping existing data only")
+                combined_k = existing_k
+            else:
+                # Existing missing MatchID - overwrite with new
+                logger.warning("Existing %s missing MatchID column; overwriting with new data", KICKOFF_DB_FILE)
+                combined_k = new_kickoffs
         else:
             combined_k = new_kickoffs
         combined_k.to_csv(KICKOFF_DB_FILE, index=False)
