@@ -24,6 +24,7 @@ from utils import (
 )
 
 from charts.theme import apply_chart_theme
+from charts.factory import player_rank_lollipop
 
 logger = logging.getLogger(__name__)
 
@@ -2507,9 +2508,8 @@ if app_mode == "🔍 Single Match Analysis":
             if not aerial_df.empty:
                 ac1, ac2 = st.columns(2)
                 with ac1:
-                    fig_aer = themed_px(px.bar, aerial_df, x='Name', y='Aerial Hits', color='Team',
-                        title="Aerial Hits", color_discrete_map=TEAM_COLOR_MAP)
-                    fig_aer.update_layout()
+                    fig_aer = player_rank_lollipop(aerial_df, 'Aerial Hits')
+                    fig_aer.update_layout(title="Aerial Hits")
                     st.plotly_chart(fig_aer, use_container_width=True)
                 with ac2:
                     fig_air = themed_figure()
@@ -2529,16 +2529,12 @@ if app_mode == "🔍 Single Match Analysis":
             if not recovery_df.empty:
                 rc1, rc2 = st.columns(2)
                 with rc1:
-                    fig_rec = themed_px(px.bar, recovery_df, x='Name', y='Avg Recovery (s)', color='Team',
-                        title="Avg Time to Supersonic After Hit",
-                        color_discrete_map=TEAM_COLOR_MAP)
-                    fig_rec.update_layout()
+                    fig_rec = player_rank_lollipop(recovery_df, 'Avg Recovery (s)')
+                    fig_rec.update_layout(title="Avg Time to Supersonic After Hit")
                     st.plotly_chart(fig_rec, use_container_width=True)
                 with rc2:
-                    fig_fast = themed_px(px.bar, recovery_df, x='Name', y='Recovery < 1s %', color='Team',
-                        title="Fast Recovery Rate (< 1s)",
-                        color_discrete_map=TEAM_COLOR_MAP)
-                    fig_fast.update_layout()
+                    fig_fast = player_rank_lollipop(recovery_df, 'Recovery < 1s %')
+                    fig_fast.update_layout(title="Fast Recovery Rate (< 1s)")
                     st.plotly_chart(fig_fast, use_container_width=True)
                 rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
                 st.dataframe(recovery_df[rec_cols].sort_values('Avg Recovery (s)'), use_container_width=True, hide_index=True)
@@ -2594,16 +2590,12 @@ if app_mode == "🔍 Single Match Analysis":
             if not defense_df.empty:
                 dc1, dc2 = st.columns(2)
                 with dc1:
-                    fig_shadow = themed_px(px.bar, defense_df, x='Name', y='Shadow %', color='Team',
-                        title="Shadow Defense Time %",
-                        color_discrete_map=TEAM_COLOR_MAP)
-                    fig_shadow.update_layout()
+                    fig_shadow = player_rank_lollipop(defense_df, 'Shadow %')
+                    fig_shadow.update_layout(title="Shadow Defense Time %")
                     st.plotly_chart(fig_shadow, use_container_width=True)
                 with dc2:
-                    fig_pres = themed_px(px.bar, defense_df, x='Name', y='Pressure Time (s)', color='Team',
-                        title="Total Pressure Time (s)",
-                        color_discrete_map=TEAM_COLOR_MAP)
-                    fig_pres.update_layout()
+                    fig_pres = player_rank_lollipop(defense_df, 'Pressure Time (s)')
+                    fig_pres.update_layout(title="Total Pressure Time (s)")
                     st.plotly_chart(fig_pres, use_container_width=True)
                 st.dataframe(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']].sort_values('Shadow %', ascending=False),
                     use_container_width=True, hide_index=True)
@@ -2672,18 +2664,18 @@ if app_mode == "🔍 Single Match Analysis":
             if not xs_summary.empty and xs_summary['Saves_Nearby'].sum() > 0:
                 xs1, xs2 = st.columns(2)
                 with xs1:
-                    fig_xs_bar = themed_px(px.bar, xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Total_xS', ascending=False),
-                        x='Name', y='Total_xS', color='Team',
-                        title="Total xS (Save Difficulty)",
-                        color_discrete_map=TEAM_COLOR_MAP)
-                    fig_xs_bar.update_layout()
+                    fig_xs_bar = player_rank_lollipop(
+                        xs_summary[xs_summary['Saves_Nearby'] > 0],
+                        'Total_xS',
+                    )
+                    fig_xs_bar.update_layout(title="Total xS (Save Difficulty)")
                     st.plotly_chart(fig_xs_bar, use_container_width=True)
                 with xs2:
-                    fig_xs_avg = themed_px(px.bar, xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Avg_xS', ascending=False),
-                        x='Name', y='Avg_xS', color='Team',
-                        title="Avg xS per Save",
-                        color_discrete_map=TEAM_COLOR_MAP)
-                    fig_xs_avg.update_layout()
+                    fig_xs_avg = player_rank_lollipop(
+                        xs_summary[xs_summary['Saves_Nearby'] > 0],
+                        'Avg_xS',
+                    )
+                    fig_xs_avg.update_layout(title="Avg xS per Save")
                     st.plotly_chart(fig_xs_avg, use_container_width=True)
                 xs_show_cols = ['Name', 'Team', 'Saves_Nearby', 'Total_xS', 'Avg_xS', 'Hard_Saves']
                 st.dataframe(xs_summary[xs_show_cols].sort_values('Total_xS', ascending=False),
