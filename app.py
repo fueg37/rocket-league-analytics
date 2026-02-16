@@ -3727,7 +3727,8 @@ elif app_mode == "📈 Season Batch Processor":
             if 'Comeback_Win' in hero_df.columns and 'Blown_Lead' in hero_df.columns:
                 _cb_wins = int(hero_df['Comeback_Win'].sum())
                 _blown = int(hero_df['Blown_Lead'].sum())
-                _saves_lm = int(hero_df['Saves_Last_Min'].sum()) if 'Saves_Last_Min' in hero_df.columns else 0
+                _total_saves = int(hero_df['Saves'].sum()) if 'Saves' in hero_df.columns else 0
+                _saves_lm = min(int(hero_df['Saves_Last_Min'].sum()), _total_saves) if 'Saves_Last_Min' in hero_df.columns else 0
                 total_g = len(hero_df)
 
                 c1, c2, c3, c4 = st.columns(4)
@@ -3792,7 +3793,7 @@ elif app_mode == "📈 Season Batch Processor":
             st.markdown("#### Defensive Timing")
             if 'Saves_Last_Min' in hero_df.columns and 'Saves' in hero_df.columns:
                 total_saves = int(hero_df['Saves'].sum())
-                late_saves = int(hero_df['Saves_Last_Min'].sum())
+                late_saves = min(int(hero_df['Saves_Last_Min'].sum()), total_saves)
                 early_saves = total_saves - late_saves
 
                 if total_saves > 0:
