@@ -893,7 +893,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
  
         return final_df
-    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y"])
+    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y", "Speed"])
 
 def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, max_time_diff=2.0):
     hits = proto.game_stats.hits
@@ -1524,17 +1524,23 @@ def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
         defending_team = "Orange" if shot_team == "Blue" else "Blue"
         target_y = 5120.0 if shot_team == "Blue" else -5120.0
 
-        # Shot properties — shot_df stores Speed (scalar), X, Y only
-        shot_speed = shot['Speed']
+        # Shot properties — shot_df may not always include speed after schema conversion.
+        # Rehydrate from ball velocity when absent so xS remains stable across data sources.
+        shot_speed = pd.to_numeric(shot.get('Speed', np.nan), errors='coerce')
         dist_to_goal = np.sqrt(shot['X']**2 + (target_y - shot['Y'])**2)
         angle_off_center = np.arctan2(abs(shot['X']), abs(target_y - shot['Y']))
-        # Get ball Z from game_df since shot_df only stores X, Y
+        # Get ball Z and optional speed fallback from game_df
         shot_z = 0
         if 'ball' in game_df and frame in game_df.index:
             try:
-                shot_z = max(game_df['ball'].loc[frame]['pos_z'], 0)
+                ball_state = game_df['ball'].loc[frame]
+                shot_z = max(ball_state['pos_z'], 0)
+                if pd.isna(shot_speed):
+                    shot_speed = np.sqrt(ball_state['vel_x']**2 + ball_state['vel_y']**2 + ball_state['vel_z']**2)
             except (KeyError, IndexError):
                 pass
+        if pd.isna(shot_speed):
+            shot_speed = 0.0
 
         # Find nearest defending player at this frame
         nearest_defender = None
