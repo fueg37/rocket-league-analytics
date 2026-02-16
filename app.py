@@ -24,7 +24,7 @@ from utils import (
 )
 
 from charts.theme import apply_chart_theme
-from charts.factory import comparison_dumbbell, player_rank_lollipop
+from charts.factory import comparison_dumbbell, goal_mouth_scatter, player_rank_lollipop
 from analytics.shot_quality import (
     COL_ON_TARGET,
     COL_TARGET_X,
@@ -1902,8 +1902,11 @@ def render_panel_to_image(fig, width, height, scale=2):
     img_bytes = fig.to_image(format="png", width=width, height=height, scale=scale)
     return PILImage.open(io.BytesIO(img_bytes))
 
-def build_export_shot_map(shot_df, proto):
-    """Shot map on pitch background for export."""
+def build_export_shot_map(shot_df, proto, include_goal_mouth=False):
+    """Shot map on pitch background for export.
+
+    Optionally appends a compact goal-mouth panel to the right.
+    """
     fig = themed_figure()
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
@@ -1927,6 +1930,30 @@ def build_export_shot_map(shot_df, proto):
             fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers',
                 marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
                 showlegend=False))
+    if include_goal_mouth:
+        gm = goal_mouth_scatter(shot_df, include_xgot=True, on_target_only=True)
+        gm.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0), showlegend=False)
+        for trace in gm.data:
+            fig.add_trace(trace)
+        for shape in gm.layout.shapes or []:
+            shape_json = shape.to_plotly_json() if hasattr(shape, "to_plotly_json") else dict(shape)
+            shape_json["xref"] = "x2"
+            shape_json["yref"] = "y2"
+            fig.add_shape(shape_json)
+        fig.update_layout(
+            xaxis2=dict(domain=[0.74, 1.0], range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], visible=False),
+            yaxis2=dict(domain=[0.12, 0.88], range=[-20, GOAL_HEIGHT * 1.05], visible=False, scaleanchor="x2", scaleratio=1),
+            annotations=[
+                dict(
+                    x=0.86, y=0.96, xref="paper", yref="paper", text="Goal Mouth",
+                    showarrow=False, font=dict(size=11, color="white"),
+                )
+            ],
+        )
+        # Remap appended traces to secondary axes.
+        gm_trace_count = len(gm.data)
+        for idx in range(len(fig.data) - gm_trace_count, len(fig.data)):
+            fig.data[idx].update(xaxis="x2", yaxis="y2", showlegend=False)
     return fig
 
 def build_export_heatmap(game_df, player_name):
@@ -2549,30 +2576,75 @@ if app_mode == "🔍 Single Match Analysis":
                 if not shot_schema_ok:
                     st.warning(f"Shot metrics unavailable for shot map: missing columns {', '.join(shot_schema_missing)}")
                 else:
-                    fig = themed_figure()
-                    fig.update_layout(get_field_layout("Shot Map"))
+                    filt1, filt2, filt3 = st.columns([1, 1, 1])
+                    with filt1:
+                        map_team = st.selectbox("Team Filter", ["All", "Blue", "Orange"], key="shot_map_team")
+                    with filt2:
+                        player_opts = ["All"] + sorted(shot_df[SHOT_COL_PLAYER].dropna().unique().tolist())
+                        map_player = st.selectbox("Player Filter", player_opts, key="shot_map_player")
+                    with filt3:
+                        map_on_target = st.toggle("On-target only", value=True, key="shot_map_on_target")
 
-                    # Team-colored shots and goals
-                    for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                        t_shots = shot_df[(shot_df[SHOT_COL_TEAM] == team) & (shot_df[SHOT_COL_RESULT] == 'Shot')]
-                        t_goals = shot_df[(shot_df[SHOT_COL_TEAM] == team) & (shot_df[SHOT_COL_RESULT] == 'Goal')]
-                        if not t_shots.empty:
-                            fig.add_trace(go.Scatter(x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
-                                marker=dict(size=10, color=color, opacity=0.5),
-                                name=f'{team} Shot', text=t_shots[SHOT_COL_PLAYER],
-                                customdata=t_shots[COL_XG], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
-                        if not t_goals.empty:
-                            fig.add_trace(go.Scatter(x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
-                                marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
-                                name=f'{team} Goal', text=t_goals[SHOT_COL_PLAYER],
-                                customdata=t_goals[COL_XG], hovertemplate="%{text}<br>xG: %{customdata:.2f}<extra></extra>"))
-                    big_chances = shot_df[shot_df['BigChance'] == True]
-                    if not big_chances.empty:
-                        fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers',
-                            marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
-                            name='Big Chance', hoverinfo='skip'))
+                    filtered_shots = shot_df.copy()
+                    if map_team != "All":
+                        filtered_shots = filtered_shots[filtered_shots[SHOT_COL_TEAM] == map_team]
+                    if map_player != "All":
+                        filtered_shots = filtered_shots[filtered_shots[SHOT_COL_PLAYER] == map_player]
 
-                    st.plotly_chart(fig, use_container_width=True)
+                    c_pitch, c_goal = st.columns([2, 1])
+
+                    with c_pitch:
+                        fig = themed_figure()
+                        fig.update_layout(get_field_layout("Shot Map"))
+
+                        # Team-colored shots and goals
+                        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
+                            t_shots = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Shot')]
+                            t_goals = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Goal')]
+                            if not t_shots.empty:
+                                fig.add_trace(go.Scatter(
+                                    x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
+                                    marker=dict(size=10, color=color, opacity=0.5),
+                                    name=f'{team} Shot',
+                                    customdata=np.stack([
+                                        t_shots[SHOT_COL_PLAYER],
+                                        pd.to_numeric(t_shots[SHOT_COL_FRAME], errors='coerce').fillna(0)/float(REPLAY_FPS),
+                                        t_shots[SHOT_COL_RESULT],
+                                        pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0),
+                                        pd.to_numeric(t_shots.get(COL_XGOT, 0), errors='coerce').fillna(0),
+                                        pd.to_numeric(t_shots.get('Speed', 0), errors='coerce').fillna(0),
+                                    ], axis=-1),
+                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[5]:.0f} uu/s<extra></extra>",
+                                ))
+                            if not t_goals.empty:
+                                fig.add_trace(go.Scatter(
+                                    x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
+                                    marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
+                                    name=f'{team} Goal',
+                                    customdata=np.stack([
+                                        t_goals[SHOT_COL_PLAYER],
+                                        pd.to_numeric(t_goals[SHOT_COL_FRAME], errors='coerce').fillna(0)/float(REPLAY_FPS),
+                                        t_goals[SHOT_COL_RESULT],
+                                        pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0),
+                                        pd.to_numeric(t_goals.get(COL_XGOT, 0), errors='coerce').fillna(0),
+                                        pd.to_numeric(t_goals.get('Speed', 0), errors='coerce').fillna(0),
+                                    ], axis=-1),
+                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[5]:.0f} uu/s<extra></extra>",
+                                ))
+                        big_chances = filtered_shots[filtered_shots['BigChance'] == True]
+                        if not big_chances.empty:
+                            fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers',
+                                marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
+                                name='Big Chance', hoverinfo='skip'))
+                        st.plotly_chart(fig, use_container_width=True)
+
+                    with c_goal:
+                        fig_goal_mouth = goal_mouth_scatter(
+                            filtered_shots,
+                            include_xgot=True,
+                            on_target_only=map_on_target,
+                        )
+                        st.plotly_chart(fig_goal_mouth, use_container_width=True)
 
         with t3b:
             st.subheader("Frozen Frame Shot Viewer")
@@ -2609,8 +2681,20 @@ if app_mode == "🔍 Single Match Analysis":
                 mc1, mc2, mc3, mc4 = st.columns(4)
                 mc1.metric("Shooter", shot_row[SHOT_COL_PLAYER])
                 mc2.metric("xG", f"{shot_row[COL_XG]:.2f}")
-                mc3.metric("Result", shot_row[SHOT_COL_RESULT])
-                mc4.metric("Speed", f"{shot_row.get('Speed', 'N/A')} uu/s")
+                mc3.metric("xGOT", f"{pd.to_numeric(shot_row.get(COL_XGOT, 0), errors='coerce'):.2f}")
+                mc4.metric("Result", shot_row[SHOT_COL_RESULT])
+                mc5, _mc_spacer = st.columns([1, 3])
+                mc5.metric("Speed", f"{shot_row.get('Speed', 'N/A')} uu/s")
+
+                mini = goal_mouth_scatter(
+                    pd.DataFrame([shot_row]),
+                    team=shot_row.get(SHOT_COL_TEAM),
+                    player=shot_row.get(SHOT_COL_PLAYER),
+                    include_xgot=True,
+                    on_target_only=False,
+                )
+                mini.update_layout(height=220, title="Selected Shot Target")
+                st.plotly_chart(mini, use_container_width=True)
                 if shot_row.get('BigChance', False):
                     st.warning("Big Chance!")
                 # Navigation
@@ -3203,6 +3287,7 @@ if app_mode == "🔍 Single Match Analysis":
                 default_hp = focus_players[0] if focus_players else (heatmap_player_opts[0] if heatmap_player_opts else None)
                 hp_idx = heatmap_player_opts.index(default_hp) if default_hp in heatmap_player_opts else 0
                 heatmap_player = st.selectbox("Heatmap Player:", heatmap_player_opts, index=hp_idx, key="export_hp")
+                export_goal_mouth = st.checkbox("Include compact goal-mouth panel in shot map", value=True)
                 if st.button("Generate Dashboard Image"):
                     with st.spinner("Rendering 7 panels... this may take a moment"):
                         try:
@@ -3221,7 +3306,7 @@ if app_mode == "🔍 Single Match Analysis":
                             CANVAS_H = TITLE_H + ROW1_H + ROW2_H + ROW3_H + 3 * PAD
 
                             # --- Build all 7 panels ---
-                            fig_shotmap = build_export_shot_map(shot_df, proto)
+                            fig_shotmap = build_export_shot_map(shot_df, proto, include_goal_mouth=export_goal_mouth)
                             fig_heatmap = build_export_heatmap(game_df, heatmap_player)
                             fig_scoreboard = build_export_scoreboard(df, shot_df, is_overtime)
                             fig_xg = build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime)
