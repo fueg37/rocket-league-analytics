@@ -80,3 +80,116 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
     fig.update_layout(title=metric_col)
 
     return apply_chart_theme(fig, tier="support")
+
+
+def comparison_dumbbell(
+    df,
+    entity_col,
+    left_col,
+    right_col,
+    left_label,
+    right_label,
+):
+    """Render a dumbbell chart for two-value comparisons per entity."""
+    comp_df = df[[entity_col, left_col, right_col]].copy()
+    comp_df[left_col] = pd.to_numeric(comp_df[left_col], errors="coerce").fillna(0)
+    comp_df[right_col] = pd.to_numeric(comp_df[right_col], errors="coerce").fillna(0)
+    comp_df["delta"] = comp_df[right_col] - comp_df[left_col]
+    comp_df = comp_df.sort_values("delta", ascending=True).reset_index(drop=True)
+
+    left_color = "#8C9AAD"   # muted slate
+    right_color = "#00CC96"  # positive endpoint accent
+    connector_color = "rgba(165, 171, 184, 0.45)"
+
+    fig = go.Figure()
+
+    for i, row in comp_df.iterrows():
+        left_val = float(row[left_col])
+        right_val = float(row[right_col])
+        delta = right_val - left_val
+        delta_sign = "+" if delta > 0 else ""
+
+        fig.add_shape(
+            type="line",
+            x0=left_val,
+            x1=right_val,
+            y0=i,
+            y1=i,
+            line=dict(color=connector_color, width=2.5),
+            layer="below",
+        )
+
+        fig.add_trace(
+            go.Scatter(
+                x=[left_val],
+                y=[i],
+                mode="markers+text",
+                marker=dict(size=11, color="white", line=dict(color=left_color, width=2.5)),
+                text=[_format_values(pd.Series([left_val]))[0]],
+                textposition="middle left",
+                textfont=dict(size=10, color=left_color),
+                hovertemplate=f"<b>{row[entity_col]}</b><br>{left_label}: %{{x}}<extra></extra>",
+                showlegend=False,
+            )
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=[right_val],
+                y=[i],
+                mode="markers+text",
+                marker=dict(size=11, color="white", line=dict(color=right_color, width=2.5)),
+                text=[_format_values(pd.Series([right_val]))[0]],
+                textposition="middle right",
+                textfont=dict(size=10, color=right_color),
+                hovertemplate=f"<b>{row[entity_col]}</b><br>{right_label}: %{{x}}<extra></extra>",
+                showlegend=False,
+            )
+        )
+
+        mid_x = (left_val + right_val) / 2
+        fig.add_annotation(
+            x=mid_x,
+            y=i,
+            text=f"{delta_sign}{delta:.2f}",
+            showarrow=False,
+            font=dict(size=10, color="#D7DEE9"),
+            yshift=-16,
+            align="center",
+        )
+
+    fig.update_yaxes(
+        tickmode="array",
+        tickvals=list(range(len(comp_df))),
+        ticktext=comp_df[entity_col].tolist(),
+        autorange="reversed",
+        title=None,
+    )
+    fig.update_xaxes(title=f"{left_label} vs {right_label}", zeroline=False)
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=45, b=10),
+        title=f"{left_label} vs {right_label}",
+    )
+
+    # Legend-style endpoint labels in-chart for quick semantic mapping.
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0.0,
+        y=1.08,
+        text=f"<span style='color:{left_color}'>●</span> {left_label}",
+        showarrow=False,
+        xanchor="left",
+        font=dict(size=11),
+    )
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0.18,
+        y=1.08,
+        text=f"<span style='color:{right_color}'>●</span> {right_label}",
+        showarrow=False,
+        xanchor="left",
+        font=dict(size=11),
+    )
+
+    return apply_chart_theme(fig, tier="support")

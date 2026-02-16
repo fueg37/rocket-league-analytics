@@ -24,7 +24,7 @@ from utils import (
 )
 
 from charts.theme import apply_chart_theme
-from charts.factory import player_rank_lollipop
+from charts.factory import comparison_dumbbell, player_rank_lollipop
 
 logger = logging.getLogger(__name__)
 
@@ -1919,26 +1919,60 @@ def build_export_win_prob(proto, game_df, pid_team, is_overtime):
     return fig
 
 def build_export_zones(df, focus_players):
-    """Positional zone bar chart for export."""
-    fig = themed_figure()
+    """Positional zone comparison for export (dumbbell when exactly two players)."""
     players_to_show = focus_players if focus_players else df['Name'].tolist()[:2]
+    zones = [
+        ('Def', 'Pos_Def'),
+        ('Mid', 'Pos_Mid'),
+        ('Off', 'Pos_Off'),
+        ('Wall', 'Wall_Time'),
+        ('Corner', 'Corner_Time'),
+        ('On Wall', 'On_Wall_Time'),
+        ('Carry', 'Carry_Time'),
+    ]
+
+    if len(players_to_show) >= 2:
+        left_name, right_name = players_to_show[:2]
+        left_row = df[df['Name'] == left_name]
+        right_row = df[df['Name'] == right_name]
+        if not left_row.empty and not right_row.empty:
+            left = left_row.iloc[0]
+            right = right_row.iloc[0]
+            comp_df = pd.DataFrame({
+                'Zone': [z[0] for z in zones],
+                left_name: [left.get(z[1], 0) for z in zones],
+                right_name: [right.get(z[1], 0) for z in zones],
+            })
+            fig = comparison_dumbbell(
+                comp_df,
+                entity_col='Zone',
+                left_col=left_name,
+                right_col=right_name,
+                left_label=left_name,
+                right_label=right_name,
+            )
+            fig.update_layout(
+                title=dict(text="Positional Zones (%)", font=dict(size=14, color='white')),
+                xaxis=dict(showgrid=False, color='#888', tickfont=dict(size=9), title='%'),
+                yaxis=dict(color='#888', tickfont=dict(size=9)),
+                margin=dict(l=35, r=10, t=45, b=30),
+            )
+            return fig
+
+    fig = themed_figure()
     colors = [TEAM_COLORS["Blue"]["primary"], TEAM_COLORS["Orange"]["primary"], '#00cc96', '#AB63FA']
     for i, pname in enumerate(players_to_show[:3]):
         p_row = df[df['Name'] == pname]
         if p_row.empty:
             continue
         p = p_row.iloc[0]
-        zones = ['Def', 'Mid', 'Off', 'Wall', 'Corner', 'On Wall', 'Carry']
-        vals = [p.get('Pos_Def', 0), p.get('Pos_Mid', 0), p.get('Pos_Off', 0),
-                p.get('Wall_Time', 0), p.get('Corner_Time', 0), p.get('On_Wall_Time', 0), p.get('Carry_Time', 0)]
-        fig.add_trace(go.Bar(x=zones, y=vals, name=pname, marker_color=colors[i % len(colors)],
-                            opacity=0.85))
+        vals = [p.get(col, 0) for _, col in zones]
+        fig.add_trace(go.Bar(x=[z[0] for z in zones], y=vals, name=pname, marker_color=colors[i % len(colors)], opacity=0.85))
     fig.update_layout(
         title=dict(text="Positional Zones (%)", font=dict(size=14, color='white')),
-        barmode='group',
         xaxis=dict(showgrid=False, color='#888', tickfont=dict(size=9)),
         yaxis=dict(title=dict(text="%", font=dict(size=10)), showgrid=True, gridcolor='rgba(255,255,255,0.08)', color='#888'),
-                margin=dict(l=35, r=10, t=35, b=30),
+        margin=dict(l=35, r=10, t=35, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=9))
     )
     return fig
@@ -3443,9 +3477,18 @@ elif app_mode == "📈 Season Batch Processor":
                             mate_df_ps['Carry_Time'].mean() if 'Carry_Time' in mate_df_ps else 0
                         ]
                     })
-                    fig_comp = themed_px(px.bar, comp_zones, x='Zone', y='Time %', color='Player', barmode='group', color_discrete_map={hero: '#007bff', teammate: '#ff9900'})
-                    fig_comp.update_layout()
-                    st.plotly_chart(fig_comp, use_container_width=True)
+                    comp_dumbbell = comp_zones.pivot(index='Zone', columns='Player', values='Time %').reset_index()
+                    if hero in comp_dumbbell.columns and teammate in comp_dumbbell.columns:
+                        fig_comp = comparison_dumbbell(
+                            comp_dumbbell,
+                            entity_col='Zone',
+                            left_col=hero,
+                            right_col=teammate,
+                            left_label=hero,
+                            right_label=teammate,
+                        )
+                        fig_comp.update_layout(title=f"{hero} vs {teammate} Zone Tendencies", xaxis_title='Time %')
+                        st.plotly_chart(fig_comp, use_container_width=True)
         with t4:
             st.subheader("Player Comparison Radar")
             categories = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', 'Avg Speed', 'Aerial %', 'Total_VAEP']
