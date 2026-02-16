@@ -25,8 +25,6 @@ from utils import (
 
 from charts.theme import apply_chart_theme
 from charts.factory import comparison_dumbbell, player_rank_lollipop, time_series_chart
-from charts.formatters import format_metric_value, hover_template
-from charts.rules import sort_rank_desc, sort_time_asc
 
 logger = logging.getLogger(__name__)
 
@@ -2707,32 +2705,30 @@ if app_mode == "🔍 Single Match Analysis":
             # --- SECTION 5: Shot Quality Conceded (xG-Against) ---
             st.markdown("#### Shot Quality Conceded (xG-Against)")
             if not xga_df.empty:
-                xga_ranked = sort_rank_desc(xga_df, 'xGA')
                 xc1, xc2 = st.columns(2)
                 with xc1:
-                    fig_xga = themed_px(px.bar, xga_ranked, x='Name', y='xGA', color='Team',
+                    fig_xga = themed_px(px.bar, xga_df, x='Name', y='xGA', color='Team',
                         title="Expected Goals Against (as nearest defender)",
                         color_discrete_map=TEAM_COLOR_MAP)
                     fig_xga.update_layout()
                     st.plotly_chart(fig_xga, use_container_width=True)
                 with xc2:
-                    fig_dist = themed_px(px.bar, xga_ranked, x='Name', y='Avg Dist to Shot', color='Team',
+                    fig_dist = themed_px(px.bar, xga_df, x='Name', y='Avg Dist to Shot', color='Team',
                         title="Avg Distance to Shot When Nearest Defender",
                         color_discrete_map=TEAM_COLOR_MAP)
                     fig_dist.update_layout()
                     st.plotly_chart(fig_dist, use_container_width=True)
                 xga_cols = ['Name', 'Team', 'Shots Faced', 'xGA', 'Goals Conceded (nearest)', 'Avg Dist to Shot', 'High xG Faced']
-                st.dataframe(xga_ranked[xga_cols], use_container_width=True, hide_index=True)
+                st.dataframe(xga_df[xga_cols].sort_values('xGA', ascending=False), use_container_width=True, hide_index=True)
                 st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
             st.divider()
 
             # --- SECTION 6: Action Value (VAEP) ---
             st.markdown("#### Action Value (VAEP)")
             if not vaep_summary.empty:
-                vaep_ranked = sort_rank_desc(vaep_summary, 'Total_VAEP')
                 vc1, vc2 = st.columns(2)
                 with vc1:
-                    fig_vaep_bar = themed_px(px.bar, vaep_ranked,
+                    fig_vaep_bar = themed_px(px.bar, vaep_summary.sort_values('Total_VAEP', ascending=False),
                         x='Name', y='Total_VAEP', color='Team',
                         title="Total VAEP per Player",
                         color_discrete_map=TEAM_COLOR_MAP)
@@ -2740,35 +2736,23 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(fig_vaep_bar, use_container_width=True)
                 with vc2:
                     if not vaep_df.empty:
-                        vaep_timeline = sort_time_asc(vaep_df, 'Time', player_col='Player', team_col='Team')
                         fig_vaep_scatter = themed_figure()
                         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                            t_data = vaep_timeline[vaep_timeline['Team'] == team].copy()
+                            t_data = vaep_df[vaep_df['Team'] == team]
                             if not t_data.empty:
                                 colors_arr = ['#00cc96' if v > 0 else '#EF553B' for v in t_data['VAEP']]
-                                t_data['formatted_vaep'] = t_data['VAEP'].map(lambda v: format_metric_value(v, metric_name='VAEP'))
-                                t_data['formatted_time'] = t_data['Time'].map(lambda v: format_metric_value(v, metric_name='Time'))
-                                t_data['context'] = t_data['Player'].map(lambda p: f"Player: {p}")
-                                t_data['hover'] = t_data['context']
                                 fig_vaep_scatter.add_trace(go.Scatter(
                                     x=t_data['Time'], y=t_data['VAEP'], mode='markers',
                                     marker=dict(size=5, color=colors_arr, opacity=0.6),
                                     name=team, text=t_data['Player'],
-                                    customdata=t_data[['formatted_vaep', 'formatted_time', 'context']].values,
-                                    hovertemplate=hover_template(
-                                        entity="%{text}",
-                                        primary_label="VAEP: %{customdata[0]}",
-                                        context_label="Time: %{customdata[1]} | %{customdata[2]}",
-                                        units='xMetric',
-                                        source_note='Touch-level action value model',
-                                    )))
+                                    hovertemplate="<b>%{text}</b><br>Time: %{x}s<br>VAEP: %{y:.3f}<extra></extra>"))
                         fig_vaep_scatter.add_hline(y=0, line_dash="dot", line_color="gray")
                         fig_vaep_scatter.update_layout(title="Touch VAEP Timeline (green=positive, red=negative)",
                             xaxis_title="Time (s)", yaxis_title="VAEP",
                             height=350)
                         st.plotly_chart(fig_vaep_scatter, use_container_width=True)
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
-                st.dataframe(vaep_ranked[vaep_show_cols],
+                st.dataframe(vaep_summary[vaep_show_cols].sort_values('Total_VAEP', ascending=False),
                     use_container_width=True, hide_index=True)
                 st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
             else:
@@ -2778,29 +2762,28 @@ if app_mode == "🔍 Single Match Analysis":
             # --- SECTION 7: Expected Saves (xS) ---
             st.markdown("#### Expected Saves (xS)")
             if not xs_summary.empty and xs_summary['Saves_Nearby'].sum() > 0:
-                xs_ranked = sort_rank_desc(xs_summary[xs_summary['Saves_Nearby'] > 0], 'Total_xS')
                 xs1, xs2 = st.columns(2)
                 with xs1:
                     fig_xs_bar = player_rank_lollipop(
-                        xs_ranked,
+                        xs_summary[xs_summary['Saves_Nearby'] > 0],
                         'Total_xS',
                     )
                     fig_xs_bar.update_layout(title="Total xS (Save Difficulty)")
                     st.plotly_chart(fig_xs_bar, use_container_width=True)
                 with xs2:
                     fig_xs_avg = player_rank_lollipop(
-                        xs_ranked,
+                        xs_summary[xs_summary['Saves_Nearby'] > 0],
                         'Avg_xS',
                     )
                     fig_xs_avg.update_layout(title="Avg xS per Save")
                     st.plotly_chart(fig_xs_avg, use_container_width=True)
                 xs_show_cols = ['Name', 'Team', 'Saves_Nearby', 'Total_xS', 'Avg_xS', 'Hard_Saves']
-                st.dataframe(xs_ranked[xs_show_cols],
+                st.dataframe(xs_summary[xs_show_cols].sort_values('Total_xS', ascending=False),
                     use_container_width=True, hide_index=True)
                 # Individual save events
                 if not xs_events_df.empty:
                     with st.expander("Individual Save Events"):
-                        st.dataframe(sort_rank_desc(xs_events_df[['Saver', 'Shooter', 'Time', 'xS', 'ShotSpeed', 'ShotHeight', 'SaverDist']], 'xS', player_col='Saver', team_col='Shooter'),
+                        st.dataframe(xs_events_df[['Saver', 'Shooter', 'Time', 'xS', 'ShotSpeed', 'ShotHeight', 'SaverDist']].sort_values('xS', ascending=False),
                             use_container_width=True, hide_index=True)
                 st.caption("xS: save difficulty based on shot speed, distance, angle, height, and saver positioning. Higher = more impressive save.")
             else:
