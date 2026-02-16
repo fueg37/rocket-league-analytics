@@ -22,6 +22,9 @@ from utils import (
     get_team_players, build_player_positions,
     frame_to_seconds, seconds_to_frame, fmt_time,
 )
+from analytics.schema import SCHEMA_VERSION
+from analytics.extraction import build_schema_tables, event_table_to_shot_df, event_table_to_kickoff_df
+from analytics.migrations import migrate_dataframe
 
 from charts.theme import apply_chart_theme
 from charts.factory import comparison_dumbbell, player_rank_lollipop, time_series_chart
@@ -105,15 +108,26 @@ def load_data():
     if os.path.exists(KICKOFF_DB_FILE):
         try: kickoff_df = pd.read_csv(KICKOFF_DB_FILE)
         except Exception as e: logger.warning("Failed to load %s: %s", KICKOFF_DB_FILE, e)
-        
-    return stats_df, kickoff_df
+
+    migrated_stats = migrate_dataframe(stats_df, "stats")
+    migrated_kickoff = migrate_dataframe(kickoff_df, "kickoff")
+    if not migrated_stats.equals(stats_df):
+        migrated_stats.to_csv(DB_FILE, index=False)
+    if not migrated_kickoff.equals(kickoff_df):
+        migrated_kickoff.to_csv(KICKOFF_DB_FILE, index=False)
+
+    return migrated_stats, migrated_kickoff
 
 def save_data(new_stats, new_kickoffs):
     """Appends new data to CSVs, handling duplicates by MatchID."""
+    if not new_stats.empty and 'schema_version' not in new_stats.columns:
+        new_stats['schema_version'] = SCHEMA_VERSION
+    if not new_kickoffs.empty and 'schema_version' not in new_kickoffs.columns:
+        new_kickoffs['schema_version'] = SCHEMA_VERSION
     # 1. Main Stats
     if not new_stats.empty:
         if os.path.exists(DB_FILE):
-            existing = pd.read_csv(DB_FILE)
+            existing = migrate_dataframe(pd.read_csv(DB_FILE), "stats")
             existing['MatchID'] = existing['MatchID'].astype(str)
             new_stats['MatchID'] = new_stats['MatchID'].astype(str)
             
@@ -127,7 +141,7 @@ def save_data(new_stats, new_kickoffs):
     # 2. Kickoff Stats
     if not new_kickoffs.empty:
         if os.path.exists(KICKOFF_DB_FILE):
-            existing_k = pd.read_csv(KICKOFF_DB_FILE)
+            existing_k = migrate_dataframe(pd.read_csv(KICKOFF_DB_FILE), "kickoff")
             existing_k['MatchID'] = existing_k['MatchID'].astype(str)
             new_kickoffs['MatchID'] = new_kickoffs['MatchID'].astype(str)
             
@@ -879,7 +893,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
  
         return final_df
-    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y"])
+    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y", "Speed"])
 
 def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, max_time_diff=2.0):
     hits = proto.game_stats.hits
@@ -1706,10 +1720,12 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     pid_team = build_pid_team_map(proto)
     player_team = build_player_team_map(proto)
     player_pos = build_player_positions(proto, game_df)
-    shot_df = calculate_shot_data(proto, game_df, pid_team, temp_map)
+    shot_df_raw = calculate_shot_data(proto, game_df, pid_team, temp_map)
+    schema_tables = build_schema_tables(manager, game_df, proto, match_id="single_match", file_name="session_upload", shot_df=shot_df_raw)
+    shot_df = event_table_to_shot_df(schema_tables.event)
+    kickoff_df = event_table_to_kickoff_df(schema_tables.event, match_id="single_match")
     momentum_series = calculate_contextual_momentum(game_df, proto)
     pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, pass_threshold)
-    kickoff_df = calculate_kickoff_stats(game, proto, game_df, temp_map)
     aerial_df = calculate_aerial_stats(proto, game_df, pid_team, temp_map)
     recovery_df = calculate_recovery_time(proto, game_df, pid_team, temp_map)
     defense_df = calculate_defensive_pressure(game_df, proto)
@@ -1736,6 +1752,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
             df.loc[df['Team'] == team, 'Luck'] = luck_val
     return {
         "manager": manager, "game": game, "game_df": game_df, "proto": proto,
+        "schema_tables": schema_tables,
         "df_unfiltered": df, "shot_df": shot_df, "pass_df": pass_df,
         "kickoff_df": kickoff_df, "momentum_series": momentum_series,
         "aerial_df": aerial_df, "recovery_df": recovery_df,
@@ -2193,9 +2210,10 @@ if app_mode == "🔍 Single Match Analysis":
         df = _m["df_unfiltered"].copy()
         if filter_ghosts and not df.empty and 'IsBot' in df.columns:
             df = df[~df['IsBot']]
-        shot_df = _m["shot_df"]
+        schema_tables = _m["schema_tables"]
+        shot_df = event_table_to_shot_df(schema_tables.event)
         pass_df = _m["pass_df"]
-        kickoff_df = _m["kickoff_df"]
+        kickoff_df = event_table_to_kickoff_df(schema_tables.event, match_id=st.session_state.active_match)
         momentum_series = _m["momentum_series"]
         aerial_df = _m["aerial_df"]
         recovery_df = _m["recovery_df"]
@@ -3254,7 +3272,9 @@ elif app_mode == "📈 Season Batch Processor":
                     pid_team = build_pid_team_map(proto)
                     player_team = build_player_team_map(proto)
                     player_pos = build_player_positions(proto, game_df)
-                    shot_df = calculate_shot_data(proto, game_df, pid_team, temp_map)
+                    shot_df_raw = calculate_shot_data(proto, game_df, pid_team, temp_map)
+                    schema_tables = build_schema_tables(manager, game_df, proto, match_id=str(game_id), file_name=f.name, shot_df=shot_df_raw)
+                    shot_df = event_table_to_shot_df(schema_tables.event)
                     pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, pass_threshold)
                     aerial_df_b = calculate_aerial_stats(proto, game_df, pid_team, temp_map)
                     recovery_df_b = calculate_recovery_time(proto, game_df, pid_team, temp_map)
@@ -3269,10 +3289,11 @@ elif app_mode == "📈 Season Batch Processor":
                     wp_train = extract_win_prob_training_data(game_df, proto, pid_team)
                     if not wp_train.empty:
                         wp_training_list.append(wp_train)
-                    kickoff_df = calculate_kickoff_stats(game, proto, game_df, temp_map, game_id)
+                    kickoff_df = event_table_to_kickoff_df(schema_tables.event, match_id=game_id)
                     if not stats.empty and 'IsBot' in stats.columns and filter_ghosts: stats = stats[~stats['IsBot']]
                     if not stats.empty:
                         stats['MatchID'] = str(game_id)
+                        stats['schema_version'] = SCHEMA_VERSION
                         blue_g = stats[stats['Team']=='Blue']['Goals'].sum()
                         orange_g = stats[stats['Team']=='Orange']['Goals'].sum()
 
@@ -3299,6 +3320,7 @@ elif app_mode == "📈 Season Batch Processor":
                         new_stats_list.append(stats)
                     if not kickoff_df.empty:
                         kickoff_df['MatchID'] = str(game_id)
+                        kickoff_df['schema_version'] = SCHEMA_VERSION
                         new_kickoffs_list.append(kickoff_df)
                 except Exception as e:
                     logger.warning("Failed to process replay %s: %s", f.name, e)
@@ -3324,7 +3346,7 @@ elif app_mode == "📈 Season Batch Processor":
         season = existing_stats
         season_kickoffs = existing_kickoffs
         # Ensure backward compatibility for new columns
-        for col, default in [('Overtime', False), ('Luck', 0.0), ('Timestamp', ''), ('Wall_Time', 0.0), ('Corner_Time', 0.0), ('On_Wall_Time', 0.0), ('Carry_Time', 0.0),
+        for col, default in [('schema_version', SCHEMA_VERSION), ('Overtime', False), ('Luck', 0.0), ('Timestamp', ''), ('Wall_Time', 0.0), ('Corner_Time', 0.0), ('On_Wall_Time', 0.0), ('Carry_Time', 0.0),
                               ('Aerial Hits', 0), ('Aerial %', 0.0), ('Avg Aerial Height', 0), ('Time Airborne (s)', 0.0),
                               ('Avg Recovery (s)', 0.0), ('Fast Recoveries', 0), ('Recovery < 1s %', 0.0),
                               ('Shadow %', 0.0), ('Pressure Time (s)', 0.0),
