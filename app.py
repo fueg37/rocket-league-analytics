@@ -24,7 +24,7 @@ from utils import (
 )
 
 from charts.theme import apply_chart_theme
-from charts.factory import comparison_dumbbell, player_rank_lollipop, time_series_chart
+from charts.factory import comparison_dumbbell, player_rank_lollipop
 
 logger = logging.getLogger(__name__)
 
@@ -1868,43 +1868,31 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
                 gteam = pid_team.get(scorer_pid, "Blue")
                 meta_goals[gteam].append(gf / float(REPLAY_FPS))
         match_end = game_df.index.max() / float(REPLAY_FPS)
-        timeline_df = pd.DataFrame({'Time': [0.0, match_end]})
         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
             team_shots = sorted_shots[sorted_shots['Team'] == team]
-            series_col = f"{team}_xG"
             if not team_shots.empty:
-                times = [0.0] + team_shots['Time'].tolist() + [match_end]
-                cum_xg = [0.0] + team_shots['xG'].cumsum().tolist()
+                times = [0] + team_shots['Time'].tolist() + [match_end]
+                cum_xg = [0] + team_shots['xG'].cumsum().tolist()
                 cum_xg.append(cum_xg[-1])
-                timeline_df = timeline_df.merge(pd.DataFrame({'Time': times, series_col: cum_xg}), on='Time', how='outer')
-            else:
-                timeline_df[series_col] = 0.0
-        timeline_df = timeline_df.sort_values('Time').ffill().fillna(0)
-        fig = time_series_chart(
-            timeline_df,
-            x_col='Time',
-            y_cols=['Blue_xG', 'Orange_xG'],
-            labels={'Blue_xG': 'Blue xG', 'Orange_xG': 'Orange xG'},
-            title="Cumulative xG",
-            x_title="Time (M:SS)",
-            y_title="xG",
-            tier="detail",
-            series_styles={
-                'Blue_xG': {'color': TEAM_COLORS['Blue']['primary'], 'shape': 'hv', 'mode': 'lines'},
-                'Orange_xG': {'color': TEAM_COLORS['Orange']['primary'], 'shape': 'hv', 'mode': 'lines'},
-            },
-            hover_precision=2,
-            endpoint_labels=True,
-        )
-
-        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-            team_shots = sorted_shots[sorted_shots['Team'] == team]
-            goal_times = sorted(meta_goals[team])
-            if goal_times:
-                goal_cum = [(team_shots[team_shots['Time'] <= gt]['xG'].sum() if not team_shots.empty else 0) for gt in goal_times]
-                fig.add_trace(go.Scatter(x=goal_times, y=goal_cum, mode='markers', name=f"{team} ⚽", marker=dict(size=12, color=color, symbol='star', line=dict(width=2, color='white')), showlegend=False, hovertemplate="Time: %{x:.0f}s<br>Goal event<extra></extra>"))
+                fig.add_trace(go.Scatter(x=times, y=cum_xg, mode='lines', name=f"{team} xG",
+                    line=dict(color=color, width=3, shape='hv'), showlegend=True))
+            if meta_goals[team]:
+                goal_times = sorted(meta_goals[team])
+                goal_cum = []
+                for gt in goal_times:
+                    prior = team_shots[team_shots['Time'] <= gt]['xG'].sum() if not team_shots.empty else 0
+                    goal_cum.append(prior)
+                fig.add_trace(go.Scatter(x=goal_times, y=goal_cum, mode='markers', name=f"{team} ⚽",
+                    marker=dict(size=12, color=color, symbol='star', line=dict(width=2, color='white')), showlegend=False))
     if is_overtime:
         fig.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.5)")
+    fig.update_layout(
+        title=dict(text="Cumulative xG", font=dict(size=14, color='white')),
+        xaxis=dict(title=dict(text="Time (s)", font=dict(size=10)), showgrid=False, color='#888'),
+        yaxis=dict(title=dict(text="xG", font=dict(size=10)), showgrid=True, gridcolor='rgba(255,255,255,0.08)', color='#888'),
+                margin=dict(l=40, r=10, t=35, b=30),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=9))
+    )
     return fig
 
 def build_export_win_prob(proto, game_df, pid_team, is_overtime):
@@ -1912,28 +1900,22 @@ def build_export_win_prob(proto, game_df, pid_team, is_overtime):
     win_prob_df = calculate_win_probability(proto, game_df, pid_team)
     fig = themed_figure()
     if not win_prob_df.empty:
-        win_df = win_prob_df[['Time', 'WinProb']].copy()
-        win_df['OrangeProb'] = 100 - win_df['WinProb']
-        fig = time_series_chart(
-            win_df,
-            x_col='Time',
-            y_cols=['WinProb', 'OrangeProb'],
-            labels={'WinProb': 'Blue Win %', 'OrangeProb': 'Orange Win %'},
-            baseline=50,
-            title="Win Probability",
-            x_title="Time (M:SS)",
-            y_title="Win Probability (%)",
-            tier="detail",
-            y_range=(0, 100),
-            series_styles={
-                'WinProb': {'color': TEAM_COLORS['Blue']['primary'], 'fill': 'tozeroy', 'fillcolor': 'rgba(0, 123, 255, 0.25)', 'mode': 'lines'},
-                'OrangeProb': {'color': TEAM_COLORS['Orange']['primary'], 'fill': 'tozeroy', 'fillcolor': 'rgba(255, 153, 0, 0.20)', 'mode': 'lines', 'dash': 'dot'},
-            },
-            hover_precision=1,
-            endpoint_labels=True,
-        )
+        fig.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy',
+            mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.25)', showlegend=False))
+        fig.add_trace(go.Scatter(x=win_prob_df['Time'], y=[100]*len(win_prob_df), fill='tonexty',
+            mode='none', fillcolor='rgba(255, 153, 0, 0.25)', showlegend=False))
+        fig.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], mode='lines',
+            line=dict(color='white', width=2), name='Win Prob', showlegend=False))
+        fig.add_shape(type="line", x0=win_prob_df['Time'].min(), y0=50, x1=win_prob_df['Time'].max(), y1=50,
+            line=dict(color="gray", width=1, dash="dot"))
     if is_overtime:
         fig.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.5)")
+    fig.update_layout(
+        title=dict(text="Win Probability", font=dict(size=14, color='white')),
+        yaxis=dict(title=dict(text="Blue Win %", font=dict(size=10)), range=[0, 100], showgrid=False, color='#888'),
+        xaxis=dict(title=dict(text="Time (s)", font=dict(size=10)), showgrid=False, color='#888'),
+                margin=dict(l=40, r=10, t=35, b=30)
+    )
     return fig
 
 def build_export_zones(df, focus_players):
@@ -1999,25 +1981,12 @@ def build_export_pressure(momentum_series, proto, pid_team):
     """Pressure index strip for export."""
     fig = themed_figure()
     if not momentum_series.empty:
-        pressure_df = pd.DataFrame({'Time': momentum_series.index, 'BluePressure': momentum_series.clip(lower=0), 'OrangePressure': momentum_series.clip(upper=0)})
-        fig = time_series_chart(
-            pressure_df,
-            x_col='Time',
-            y_cols=['BluePressure', 'OrangePressure'],
-            labels={'BluePressure': 'Blue Pressure', 'OrangePressure': 'Orange Pressure'},
-            title="Pressure Index",
-            x_title="Time (M:SS)",
-            y_title="Pressure",
-            tier="detail",
-            y_range=(-105, 105),
-            series_styles={
-                'BluePressure': {'color': TEAM_COLORS['Blue']['primary'], 'fill': 'tozeroy', 'fillcolor': TEAM_COLORS['Blue']['light'], 'mode': 'lines'},
-                'OrangePressure': {'color': TEAM_COLORS['Orange']['primary'], 'fill': 'tozeroy', 'fillcolor': TEAM_COLORS['Orange']['light'], 'mode': 'lines'},
-            },
-            hover_precision=1,
-            endpoint_labels=False,
-            legend=False,
-        )
+        x_time = momentum_series.index
+        y_values = momentum_series.values
+        fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none',
+            fillcolor=TEAM_COLORS["Blue"]["light"], showlegend=False))
+        fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none',
+            fillcolor=TEAM_COLORS["Orange"]["light"], showlegend=False))
         # Goal markers from proto
         if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
             for g in proto.game_metadata.goals:
@@ -2030,7 +1999,13 @@ def build_export_pressure(momentum_series, proto, pid_team):
                     marker=dict(symbol='circle', size=8, color='white', line=dict(width=1, color='black')),
                     text="⚽", textposition="top center" if tm > 0 else "bottom center",
                     showlegend=False))
-    fig.update_yaxes(showticklabels=False)
+    fig.update_layout(
+        title=dict(text="Pressure Index", font=dict(size=14, color='white')),
+        yaxis=dict(range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.15)',
+                   showticklabels=False),
+        xaxis=dict(title=dict(text="Match Time (s)", font=dict(size=10)), showgrid=False, color='#888'),
+                margin=dict(l=10, r=10, t=30, b=25)
+    )
     return fig
 
 # --- 11. UI COMPONENTS ---
@@ -2341,28 +2316,14 @@ if app_mode == "🔍 Single Match Analysis":
             # --- A. WIN PROBABILITY CHART ---
             try:
                 if not win_prob_df.empty:
-                    prob_df = win_prob_df[['Time', 'WinProb']].copy()
-                    prob_df['OrangeProb'] = 100 - prob_df['WinProb']
-                    fig_prob = time_series_chart(
-                        prob_df,
-                        x_col='Time',
-                        y_cols=['WinProb', 'OrangeProb'],
-                        labels={'WinProb': 'Blue Win %', 'OrangeProb': 'Orange Win %'},
-                        baseline=50,
-                        endpoint_labels=True,
-                        title="🏆 Win Probability" + (" (Overtime)" if is_overtime else ""),
-                        x_title="Time (M:SS)",
-                        y_title="Win Probability (%)",
-                        y_range=(0, 100),
-                        tier="detail",
-                        series_styles={
-                            'WinProb': {'color': TEAM_COLORS['Blue']['primary'], 'fill': 'tozeroy', 'fillcolor': 'rgba(0, 123, 255, 0.2)', 'mode': 'lines'},
-                            'OrangeProb': {'color': TEAM_COLORS['Orange']['primary'], 'fill': 'tozeroy', 'fillcolor': 'rgba(255, 153, 0, 0.2)', 'mode': 'lines', 'dash': 'dot'},
-                        },
-                        hover_precision=1,
-                    )
+                    fig_prob = themed_figure(tier="detail")
+                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy', mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.2)', name='Blue Win %', showlegend=False))
+                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=[100]*len(win_prob_df), fill='tonexty', mode='none', fillcolor='rgba(255, 153, 0, 0.2)', name='Orange Win %', showlegend=False))
+                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], mode='lines', line=dict(color='white', width=2), name='Win Probability'))
+                    fig_prob.add_shape(type="line", x0=win_prob_df['Time'].min(), y0=50, x1=win_prob_df['Time'].max(), y1=50, line=dict(color="gray", width=1, dash="dot"))
                     if is_overtime:
                         fig_prob.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT Start")
+                    fig_prob.update_layout(title="🏆 Win Probability" + (" (Overtime)" if is_overtime else ""), yaxis=dict(title="Blue Win %", range=[0, 100], showgrid=False), xaxis=dict(title="Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=40, b=20))
                     st.plotly_chart(fig_prob, use_container_width=True)
                     st.caption("Model: " + ("Trained (logistic regression on career data)" if wp_model_used else "Hand-tuned heuristic") + ". Process 15+ replays in Season mode to train a data-driven model.")
             except Exception as e: st.error(f"Could not calculate Win Probability: {e}")
@@ -2382,68 +2343,41 @@ if app_mode == "🔍 Single Match Analysis":
                         scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
                         gteam = pid_team.get(scorer_pid, "Blue")
                         meta_goals[gteam].append(gf / float(REPLAY_FPS))
-                match_end = game_df.index.max() / float(REPLAY_FPS)
-                timeline_df = pd.DataFrame({'Time': [0.0, match_end]})
                 for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                     team_shots = sorted_shots[sorted_shots['Team'] == team]
-                    series_col = f"{team}_xG"
                     if not team_shots.empty:
-                        times = [0.0] + team_shots['Time'].tolist() + [match_end]
-                        cum_xg = [0.0] + team_shots['xG'].cumsum().tolist()
+                        times = [0] + team_shots['Time'].tolist()
+                        cum_xg = [0] + team_shots['xG'].cumsum().tolist()
+                        # Extend to end of match
+                        match_end = game_df.index.max() / float(REPLAY_FPS)
+                        times.append(match_end)
                         cum_xg.append(cum_xg[-1])
-                        timeline_df = timeline_df.merge(pd.DataFrame({'Time': times, series_col: cum_xg}), on='Time', how='outer')
-                    else:
-                        timeline_df[series_col] = 0.0
-                timeline_df = timeline_df.sort_values('Time').ffill().fillna(0)
-                fig_xg = time_series_chart(
-                    timeline_df,
-                    x_col='Time',
-                    y_cols=['Blue_xG', 'Orange_xG'],
-                    labels={'Blue_xG': 'Blue xG', 'Orange_xG': 'Orange xG'},
-                    endpoint_labels=True,
-                    title="Cumulative xG Over Time",
-                    x_title="Time (M:SS)",
-                    y_title="Cumulative xG",
-                    tier="detail",
-                    series_styles={
-                        'Blue_xG': {'color': TEAM_COLORS['Blue']['primary'], 'shape': 'hv', 'mode': 'lines'},
-                        'Orange_xG': {'color': TEAM_COLORS['Orange']['primary'], 'shape': 'hv', 'mode': 'lines'},
-                    },
-                    hover_precision=2,
-                )
-                for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                    team_shots = sorted_shots[sorted_shots['Team'] == team]
-                    goal_times = sorted(meta_goals[team])
-                    if goal_times:
-                        goal_cum = [(team_shots[team_shots['Time'] <= gt]['xG'].sum() if not team_shots.empty else 0) for gt in goal_times]
-                        fig_xg.add_trace(go.Scatter(x=goal_times, y=goal_cum, mode='markers', name=f"{team} Goal", marker=dict(size=14, color=color, symbol='star', line=dict(width=2, color='white')), hovertemplate="Time: %{x:.0f}s<br>Goal event<extra></extra>"))
+                        fig_xg.add_trace(go.Scatter(x=times, y=cum_xg, mode='lines', name=f"{team} xG", line=dict(color=color, width=3, shape='hv')))
+                    # Overlay ALL actual goals from proto metadata
+                    if meta_goals[team]:
+                        goal_times = sorted(meta_goals[team])
+                        goal_cum = []
+                        for gt in goal_times:
+                            if not team_shots.empty:
+                                prior = team_shots[team_shots['Time'] <= gt]['xG'].sum()
+                            else:
+                                prior = 0
+                            goal_cum.append(prior)
+                        fig_xg.add_trace(go.Scatter(x=goal_times, y=goal_cum, mode='markers', name=f"{team} Goal", marker=dict(size=14, color=color, symbol='star', line=dict(width=2, color='white'))))
                 if is_overtime:
                     fig_xg.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT")
+                fig_xg.update_layout(title="Cumulative xG Over Time", xaxis=dict(title="Time (s)", showgrid=False), yaxis=dict(title="Cumulative xG", showgrid=True, gridcolor='rgba(255,255,255,0.1)'), height=280, margin=dict(l=20, r=20, t=40, b=20))
                 st.plotly_chart(fig_xg, use_container_width=True)
             st.divider()
 
             # --- B. MOMENTUM CHART ---
             st.markdown("#### 🌊 Pressure Index")
             if not momentum_series.empty:
-                pressure_df = pd.DataFrame({'Time': momentum_series.index, 'BluePressure': momentum_series.clip(lower=0), 'OrangePressure': momentum_series.clip(upper=0)})
-                fig = time_series_chart(
-                    pressure_df,
-                    x_col='Time',
-                    y_cols=['BluePressure', 'OrangePressure'],
-                    labels={'BluePressure': 'Blue Pressure', 'OrangePressure': 'Orange Pressure'},
-                    endpoint_labels=False,
-                    title="Pressure Index",
-                    x_title="Time (M:SS)",
-                    y_title="Pressure",
-                    tier="detail",
-                    y_range=(-105, 105),
-                    series_styles={
-                        'BluePressure': {'color': TEAM_COLORS['Blue']['primary'], 'fill': 'tozeroy', 'fillcolor': TEAM_COLORS['Blue']['light'], 'mode': 'lines'},
-                        'OrangePressure': {'color': TEAM_COLORS['Orange']['primary'], 'fill': 'tozeroy', 'fillcolor': TEAM_COLORS['Orange']['light'], 'mode': 'lines'},
-                    },
-                    hover_precision=1,
-                    legend=False,
-                )
+                fig = themed_figure(tier="detail")
+                x_time = momentum_series.index
+                y_values = momentum_series.values
+                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor=TEAM_COLORS["Blue"]["light"]))
+                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor=TEAM_COLORS["Orange"]["light"]))
 
                 # Use proto metadata for authoritative goal list
                 if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -2456,7 +2390,7 @@ if app_mode == "🔍 Single Match Analysis":
                         tm_multiplier = 1 if gteam == 'Blue' else -1
                         fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=scorer_name, hoverinfo="text+name", showlegend=False))
 
-                fig.update_yaxes(zeroline=True, zerolinecolor='rgba(255,255,255,0.2)')
+                fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
         with t3:
@@ -3431,61 +3365,15 @@ elif app_mode == "📈 Season Batch Processor":
                 rolling_window = st.slider("Rolling Average Window", 3, 20, 10, 1, key="roll_window")
             with t_opt2:
                 show_wl_markers = st.checkbox("Color by Win/Loss", value=True, key="wl_markers")
-            trend_df = pd.DataFrame({
-                'GameNum': hero_df['GameNum'],
-                'HeroMetric': pd.to_numeric(hero_df[metric], errors='coerce'),
-            })
-            y_cols = ['HeroMetric']
-            labels = {'HeroMetric': hero}
-            series_styles = {
-                'HeroMetric': {
-                    'color': TEAM_COLORS['Blue']['primary'],
-                    'mode': 'lines',
-                    'dash': 'dot' if show_wl_markers else 'solid',
-                    'opacity': 0.4 if show_wl_markers else 1.0,
-                }
-            }
-
+            fig = themed_figure()
+            fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero,
+                line=dict(color='#007bff', width=2, dash='dot' if show_wl_markers else 'solid'),
+                opacity=0.4 if show_wl_markers else 1.0))
+            # Rolling average
             if len(hero_df) >= rolling_window:
-                trend_df['HeroRolling'] = trend_df['HeroMetric'].rolling(window=rolling_window, min_periods=1).mean()
-                y_cols.append('HeroRolling')
-                labels['HeroRolling'] = f'{hero} ({rolling_window}g avg)'
-                series_styles['HeroRolling'] = {'color': TEAM_COLORS['Blue']['primary'], 'width': 3.0, 'mode': 'lines'}
-
-            if teammate != "None":
-                mate_df = season[season['Name'] == teammate].reset_index(drop=True)
-                mate_df['GameNum'] = mate_df.index + 1
-                if metric in mate_df.columns:
-                    mate_metric = pd.DataFrame({
-                        'GameNum': mate_df['GameNum'],
-                        'MateMetric': pd.to_numeric(mate_df[metric], errors='coerce'),
-                    })
-                    trend_df = trend_df.merge(mate_metric, on='GameNum', how='outer')
-                    y_cols.append('MateMetric')
-                    labels['MateMetric'] = teammate
-                    series_styles['MateMetric'] = {'color': TEAM_COLORS['Orange']['primary'], 'mode': 'lines', 'dash': 'dot'}
-                    if len(mate_df) >= rolling_window:
-                        trend_df['MateRolling'] = trend_df['MateMetric'].rolling(window=rolling_window, min_periods=1).mean()
-                        y_cols.append('MateRolling')
-                        labels['MateRolling'] = f'{teammate} ({rolling_window}g avg)'
-                        series_styles['MateRolling'] = {'color': TEAM_COLORS['Orange']['primary'], 'width': 3.0, 'mode': 'lines'}
-
-            trend_df = trend_df.sort_values('GameNum')
-            fig = time_series_chart(
-                trend_df,
-                x_col='GameNum',
-                y_cols=y_cols,
-                labels=labels,
-                endpoint_labels=False,
-                title=f"{metric} over Time",
-                x_title="Game #",
-                y_title=metric,
-                tier='support',
-                series_styles=series_styles,
-                hover_precision=2,
-                grid_step=5,
-                time_axis=False,
-            )
+                rolling = hero_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+                fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=rolling, name=f'{hero} ({rolling_window}g avg)',
+                    line=dict(color='#007bff', width=3)))
             # Win/Loss colored markers
             if show_wl_markers and 'Won' in hero_df.columns:
                 wins = hero_df[hero_df['Won'] == True]
@@ -3496,11 +3384,21 @@ elif app_mode == "📈 Season Batch Processor":
                 if not losses.empty:
                     fig.add_trace(go.Scatter(x=losses['GameNum'], y=losses[metric], mode='markers',
                         marker=dict(size=8, color='#EF553B', symbol='x'), name='Loss'))
+            if teammate != "None":
+                mate_df = season[season['Name'] == teammate].reset_index(drop=True)
+                mate_df['GameNum'] = mate_df.index + 1
+                if metric in mate_df.columns:
+                    fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_df[metric], name=teammate, line=dict(color='#ff9900', width=2, dash='dot')))
+                    if len(mate_df) >= rolling_window:
+                        mate_rolling = mate_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+                        fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_rolling, name=f'{teammate} ({rolling_window}g avg)',
+                            line=dict(color='#ff9900', width=3)))
             # Mark OT games
             if 'Overtime' in hero_df.columns:
                 ot_games = hero_df[hero_df['Overtime'] == True]
                 if not ot_games.empty:
                     fig.add_trace(go.Scatter(x=ot_games['GameNum'], y=ot_games[metric], mode='markers', marker=dict(size=12, color='#ffcc00', symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
+            fig.update_layout(title=f"{metric} over Time", )
             st.plotly_chart(fig, use_container_width=True)
         with t2:
             st.subheader("Season Kickoff Meta")
