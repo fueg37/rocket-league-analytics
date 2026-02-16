@@ -89,13 +89,26 @@ def comparison_dumbbell(
     right_col,
     left_label,
     right_label,
+    sort_by=None,
 ):
-    """Render a dumbbell chart for two-value comparisons per entity."""
+    """Render a dumbbell chart for two-value comparisons per entity.
+
+    Args:
+        sort_by: Optional ordering mode. Use "delta" or "abs_delta" to sort by
+            directional / absolute difference. Defaults to None, preserving input order.
+    """
     comp_df = df[[entity_col, left_col, right_col]].copy()
     comp_df[left_col] = pd.to_numeric(comp_df[left_col], errors="coerce").fillna(0)
     comp_df[right_col] = pd.to_numeric(comp_df[right_col], errors="coerce").fillna(0)
     comp_df["delta"] = comp_df[right_col] - comp_df[left_col]
-    comp_df = comp_df.sort_values("delta", ascending=True).reset_index(drop=True)
+    comp_df["abs_delta"] = comp_df["delta"].abs()
+
+    if sort_by == "delta":
+        comp_df = comp_df.sort_values("delta", ascending=True).reset_index(drop=True)
+    elif sort_by == "abs_delta":
+        comp_df = comp_df.sort_values("abs_delta", ascending=False).reset_index(drop=True)
+    else:
+        comp_df = comp_df.reset_index(drop=True)
 
     left_color = "#8C9AAD"   # muted slate
     right_color = "#00CC96"  # positive endpoint accent
@@ -107,7 +120,12 @@ def comparison_dumbbell(
         left_val = float(row[left_col])
         right_val = float(row[right_col])
         delta = right_val - left_val
-        delta_sign = "+" if delta > 0 else ""
+        if delta > 0:
+            delta_text = f"+{abs(delta):.2f}"
+        elif delta < 0:
+            delta_text = f"-{abs(delta):.2f}"
+        else:
+            delta_text = "±0.00"
 
         fig.add_shape(
             type="line",
@@ -150,7 +168,7 @@ def comparison_dumbbell(
         fig.add_annotation(
             x=mid_x,
             y=i,
-            text=f"{delta_sign}{delta:.2f}",
+            text=delta_text,
             showarrow=False,
             font=dict(size=10, color="#D7DEE9"),
             yshift=-16,
@@ -167,7 +185,7 @@ def comparison_dumbbell(
     fig.update_xaxes(title=f"{left_label} vs {right_label}", zeroline=False)
     fig.update_layout(
         margin=dict(l=10, r=10, t=45, b=10),
-        title=f"{left_label} vs {right_label}",
+        title=f"{left_label} vs {right_label} (Δ = {right_label} − {left_label})",
     )
 
     # Legend-style endpoint labels in-chart for quick semantic mapping.
