@@ -308,6 +308,37 @@ def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType,
     }
 
 
+def _build_linked_outcome_event(
+    *,
+    match_id: str,
+    outcome_prefix: str,
+    shot_index: int,
+    resolved_frame: int,
+    event_type: EventType,
+    player_id: str | None,
+    player_name: str | None,
+    team: str | None,
+    shot_event_id: str,
+    x: float,
+    y: float,
+    z: float,
+    outcome_type: str,
+    is_on_target: bool,
+) -> Dict:
+    """Build a defensive shot outcome event linked to its originating shot."""
+    event_id = f"{outcome_prefix}-{shot_index}-{resolved_frame}"
+    event_row = _event_base(match_id, event_id, resolved_frame, event_type, player_id, player_name, team)
+    event_row.update({
+        "x": x,
+        "y": y,
+        "z": z,
+        "outcome_type": outcome_type,
+        "is_on_target": is_on_target,
+        "source_shot_event_id": shot_event_id,
+    })
+    return event_row
+
+
 def _build_possession_segments(frame_state_df: pd.DataFrame, match_id: str) -> pd.DataFrame:
     poss = frame_state_df[["frame", "time_seconds", "possessing_player", "possessing_team"]].dropna(subset=["possessing_player"])
     segments: List[Dict] = []
@@ -665,18 +696,22 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                 )
                 if save_defender is not None:
                     resolved_frame, save_pid, save_name, save_team = save_defender
-                    save_event_id = f"save-{idx}-{resolved_frame}"
-                    save_row = _event_base(match_id, save_event_id, resolved_frame, EventType.SAVE, save_pid, save_name, save_team)
-                    save_row.update({
-                        "x": x,
-                        "y": y,
-                        "z": z,
-                        "event_id": save_event_id,
-                        "event_type": EventType.SAVE.value,
-                        "is_on_target": True,
-                        "outcome_type": result.lower(),
-                        "source_shot_event_id": shot_event_id,
-                    })
+                    save_row = _build_linked_outcome_event(
+                        match_id=match_id,
+                        outcome_prefix="save",
+                        shot_index=idx,
+                        resolved_frame=resolved_frame,
+                        event_type=EventType.SAVE,
+                        player_id=save_pid,
+                        player_name=save_name,
+                        team=save_team,
+                        shot_event_id=shot_event_id,
+                        x=x,
+                        y=y,
+                        z=z,
+                        outcome_type=result.lower(),
+                        is_on_target=True,
+                    )
                     event_rows.append(save_row)
                 if pressure_context == "high":
                     block_defender = _resolve_block_defender(
@@ -690,18 +725,22 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                     )
                     if block_defender is not None:
                         resolved_frame, block_pid, block_name, block_team = block_defender
-                        block_event_id = f"block-{idx}-{resolved_frame}"
-                        block_row = _event_base(match_id, block_event_id, resolved_frame, EventType.BLOCK, block_pid, block_name, block_team)
-                        block_row.update({
-                            "x": x,
-                            "y": y,
-                            "z": z,
-                            "event_id": block_event_id,
-                            "event_type": EventType.BLOCK.value,
-                            "outcome_type": result.lower(),
-                            "is_on_target": False,
-                            "source_shot_event_id": shot_event_id,
-                        })
+                        block_row = _build_linked_outcome_event(
+                            match_id=match_id,
+                            outcome_prefix="block",
+                            shot_index=idx,
+                            resolved_frame=resolved_frame,
+                            event_type=EventType.BLOCK,
+                            player_id=block_pid,
+                            player_name=block_name,
+                            team=block_team,
+                            shot_event_id=shot_event_id,
+                            x=x,
+                            y=y,
+                            z=z,
+                            outcome_type=result.lower(),
+                            is_on_target=False,
+                        )
                         event_rows.append(block_row)
 
     for p in proto.players:
