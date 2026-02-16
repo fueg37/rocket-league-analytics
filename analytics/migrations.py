@@ -20,6 +20,14 @@ EVENT_V3_DEFAULTS = {
 }
 
 
+
+EVENT_V4_DEFAULTS = {
+    "xg_pre": 0.0,
+    "xg_post": 0.0,
+    "xg_model_version": "legacy",
+    "xg_calibration_version": "legacy",
+}
+
 def _apply_schema_version(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "schema_version" not in out.columns:
@@ -61,6 +69,21 @@ def _migrate_event_v2_to_v3(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _migrate_event_v3_to_v4(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col, default in EVENT_V4_DEFAULTS.items():
+        if col not in out.columns:
+            out[col] = default
+        else:
+            out[col] = out[col].fillna(default)
+    if "xg" in out.columns:
+        xg = pd.to_numeric(out["xg"], errors="coerce").fillna(0.0)
+        out["xg_pre"] = pd.to_numeric(out["xg_pre"], errors="coerce").fillna(xg)
+        out["xg_post"] = pd.to_numeric(out["xg_post"], errors="coerce").fillna(xg)
+    out["schema_version"] = SCHEMA_VERSION
+    return out
+
+
 def migrate_dataframe(df: pd.DataFrame, table_kind: str) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame() if df is None else _apply_schema_version(df)
@@ -73,8 +96,11 @@ def migrate_dataframe(df: pd.DataFrame, table_kind: str) -> pd.DataFrame:
         elif table_kind == "kickoff":
             out = _migrate_kickoff_v1_to_v2(out)
 
-    if table_kind == "event" and int(out["schema_version"].min()) < 3:
-        out = _migrate_event_v2_to_v3(out)
+    if table_kind == "event":
+        if int(out["schema_version"].min()) < 3:
+            out = _migrate_event_v2_to_v3(out)
+        if int(out["schema_version"].min()) < 4:
+            out = _migrate_event_v3_to_v4(out)
 
     if "schema_version" in out.columns:
         out["schema_version"] = SCHEMA_VERSION
