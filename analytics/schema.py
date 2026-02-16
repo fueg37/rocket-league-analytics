@@ -1,11 +1,40 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Iterable, Mapping
 
 import pandas as pd
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+class EventType(str, Enum):
+    SHOT_TAKEN = "shot_taken"
+    SHOT_ON_TARGET = "shot_on_target"
+    GOAL = "goal"
+    SAVE = "save"
+    BLOCK = "block"
+    CLEAR = "clear"
+    CHALLENGE_WIN = "challenge_win"
+    CHALLENGE_LOSS = "challenge_loss"
+    PASS_COMPLETED = "pass_completed"
+    TOUCH = "touch"
+    BOOST_PICKUP = "boost_pickup"
+    KICKOFF = "kickoff"
+
+
+SHOT_LIFECYCLE_EVENT_TYPES = frozenset({
+    EventType.SHOT_TAKEN,
+    EventType.SHOT_ON_TARGET,
+    EventType.GOAL,
+    EventType.SAVE,
+    EventType.BLOCK,
+    EventType.CLEAR,
+    EventType.CHALLENGE_WIN,
+    EventType.CHALLENGE_LOSS,
+    EventType.PASS_COMPLETED,
+})
 
 
 @dataclass(frozen=True)
@@ -68,6 +97,17 @@ EVENT_CONTRACT = TableContract(
         "z": "float64",
         "metric_value": "float64",
         "is_key_play": "bool",
+        "outcome_type": "string",
+        "is_on_target": "bool",
+        "is_big_chance": "bool",
+        "speed": "float64",
+        "pressure_context": "string",
+        "nearest_defender_distance": "float64",
+        "shot_angle": "float64",
+        "shooter_boost": "float64",
+        "distance_to_goal": "float64",
+        "xg": "float64",
+        "xa": "float64",
     },
 )
 
