@@ -1419,22 +1419,21 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
     blue_won = blue_score > orange_score
     orange_won = orange_score > blue_score
 
-    # Count last-minute saves using shot_df: a saved shot = Result 'Shot' (not 'Goal')
+    # Estimate last-minute saves per player using late-shot ratio
+    # For each team: fraction of saved shots in last minute → scale each player's saves
     saves_last_min = {p.name: 0 for p in proto.players}
     if shot_df is not None and not shot_df.empty:
-        late_saves = shot_df[(shot_df['Frame'] >= last_min_frame) & (shot_df['Result'] == 'Shot')]
-        for _, s in late_saves.iterrows():
-            defending_team = "Orange" if s['Team'] == "Blue" else "Blue"
-            # Attribute save to defending team players proportional to their total saves
-            defenders = [p for p in proto.players if player_team[p.name] == defending_team]
-            total_def_saves = sum(p.saves for p in defenders)
-            for d in defenders:
-                if total_def_saves > 0:
-                    saves_last_min[d.name] += d.saves / total_def_saves
-                elif len(defenders) > 0:
-                    saves_last_min[d.name] += 1.0 / len(defenders)
-    # Round to integers
-    saves_last_min = {k: int(round(v)) for k, v in saves_last_min.items()}
+        saved = shot_df[shot_df['Result'] == 'Shot']
+        for team in ("Blue", "Orange"):
+            opp = "Orange" if team == "Blue" else "Blue"
+            team_saved = saved[saved['Team'] == opp]  # shots BY opponent that were saved
+            total_team_saved = len(team_saved)
+            late_team_saved = len(team_saved[team_saved['Frame'] >= last_min_frame])
+            if total_team_saved > 0:
+                late_ratio = late_team_saved / total_team_saved
+                for p in proto.players:
+                    if player_team[p.name] == team:
+                        saves_last_min[p.name] = min(int(round(p.saves * late_ratio)), p.saves)
 
     results = []
     for p in proto.players:
