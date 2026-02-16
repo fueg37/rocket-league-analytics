@@ -588,28 +588,35 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
     touch_events = events[events["event_type"] == EventType.TOUCH.value].copy()
     goal_events = events[events["event_type"] == EventType.GOAL.value].copy()
 
-    touches = []
+    kickoff_frames: List[int] = []
+    for frame in pd.to_numeric(kickoff.get("frame", pd.Series(dtype="float64")), errors="coerce").dropna().tolist():
+        kickoff_frames.append(int(frame))
+    kickoff_frames = sorted(set(kickoff_frames))
+    if not kickoff_frames:
+        return pd.DataFrame(columns=cols)
+
+    touches: List[tuple[int, str, str, float, float]] = []
     if not touch_events.empty:
-        touch_events = touch_events.sort_values("frame")
-        for row in touch_events[["frame", "player_name", "team", "x", "y"]].itertuples(index=False):
+        for row in touch_events.sort_values("frame")[["frame", "player_name", "team", "x", "y"]].itertuples(index=False):
             frame = pd.to_numeric(row.frame, errors="coerce")
             if pd.isna(frame):
                 continue
             touches.append((int(frame), row.player_name, row.team, row.x, row.y))
 
-    goals = []
+    goals: List[tuple[int, str]] = []
     if not goal_events.empty:
-        goal_events = goal_events.sort_values("frame")
-        for row in goal_events[["frame", "team"]].itertuples(index=False):
+        for row in goal_events.sort_values("frame")[["frame", "team"]].itertuples(index=False):
             frame = pd.to_numeric(row.frame, errors="coerce")
             if pd.isna(frame):
                 continue
             goals.append((int(frame), row.team))
 
     rows = []
-    window_frames = int(5 * REPLAY_FPS)
-    for row in kickoff.sort_values("frame").itertuples(index=False):
-        frame = int(pd.to_numeric(getattr(row, "frame", 0), errors="coerce") or 0)
+    goal_window_frames = int(5 * REPLAY_FPS)
+    for idx, frame in enumerate(kickoff_frames):
+        next_kickoff = kickoff_frames[idx + 1] if idx + 1 < len(kickoff_frames) else None
+        segment_end = (next_kickoff - 1) if next_kickoff is not None else frame + int(12 * REPLAY_FPS)
+
         player = "Unknown"
         team = "Unknown"
         spawn = "Unknown"
@@ -618,7 +625,7 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
         end_x = 0.0
         end_y = 0.0
 
-        first_touch = next((t for t in touches if frame <= t[0] <= frame + window_frames), None)
+        first_touch = next((t for t in touches if frame < t[0] <= segment_end), None)
         if first_touch is not None:
             touch_frame, touch_player, touch_team, tx, ty = first_touch
             time_to_hit = round((touch_frame - frame) / float(REPLAY_FPS), 2)
@@ -626,18 +633,23 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
                 player = str(touch_player)
             if pd.notna(touch_team) and str(touch_team).strip():
                 team = str(touch_team)
-            end_x = float(pd.to_numeric(tx, errors="coerce") or 0.0)
-            end_y = float(pd.to_numeric(ty, errors="coerce") or 0.0)
-            if abs(end_x) < 400:
+
+            tx_num = pd.to_numeric(tx, errors="coerce")
+            ty_num = pd.to_numeric(ty, errors="coerce")
+            end_x = float(tx_num) if pd.notna(tx_num) else 0.0
+            end_y = float(ty_num) if pd.notna(ty_num) else 0.0
+
+            abs_x = abs(end_x)
+            if abs_x < 400:
                 spawn = "Center"
-            elif abs(end_x) > 1500:
+            elif abs_x > 1500:
                 spawn = "Diagonal"
             else:
                 spawn = "Off-Center"
 
         kickoff_goal = False
         result = "Neutral"
-        scoring_goal = next((g for g in goals if frame <= g[0] <= frame + window_frames), None)
+        scoring_goal = next((g for g in goals if frame <= g[0] <= frame + goal_window_frames), None)
         if scoring_goal is not None:
             kickoff_goal = True
             scoring_team = str(scoring_goal[1]) if pd.notna(scoring_goal[1]) else "Unknown"
