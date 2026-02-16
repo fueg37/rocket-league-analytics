@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from analytics.schema import SCHEMA_VERSION
+from analytics.schema import SCHEMA_VERSION, normalize_event_type_series, validate_event_types
 
 
 EVENT_V3_DEFAULTS = {
@@ -54,6 +54,15 @@ def _migrate_kickoff_v1_to_v2(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+
+
+def _normalize_event_types(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    if "event_type" not in out.columns:
+        return out
+    out["event_type"] = normalize_event_type_series(out["event_type"])
+    return out
+
 def _migrate_event_v2_to_v3(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     for col, default in EVENT_V3_DEFAULTS.items():
@@ -97,6 +106,8 @@ def migrate_dataframe(df: pd.DataFrame, table_kind: str) -> pd.DataFrame:
             out = _migrate_kickoff_v1_to_v2(out)
 
     if table_kind == "event":
+        out = _normalize_event_types(out)
+        validate_event_types(out)
         if int(out["schema_version"].min()) < 3:
             out = _migrate_event_v2_to_v3(out)
         if int(out["schema_version"].min()) < 4:
