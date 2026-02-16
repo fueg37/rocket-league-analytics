@@ -1384,7 +1384,16 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df, even
     """Calculate VAEP from canonical touch/challenge/pass/shot events."""
     if event_df is None or event_df.empty:
         return pd.DataFrame(), pd.DataFrame()
-    action_events = _events_of_type(event_df, EventType.TOUCH, EventType.PASS_COMPLETED, EventType.SHOT_TAKEN, EventType.CHALLENGE_WIN, EventType.CHALLENGE_LOSS, EventType.CLEAR)
+    action_events = _events_of_type(
+        event_df,
+        EventType.TOUCH,
+        EventType.PASS_COMPLETED,
+        EventType.SHOT_TAKEN,
+        EventType.CHALLENGE_WIN,
+        EventType.CHALLENGE_LOSS,
+        EventType.CLEAR,
+        EventType.BLOCK,
+    )
     if action_events.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -1402,6 +1411,8 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df, even
             base = -0.03
         elif event_type == EventType.CLEAR.value:
             base = 0.02
+        elif event_type == EventType.BLOCK.value:
+            base = 0.04
         elif event_type == EventType.TOUCH.value:
             base = 0.01
 
