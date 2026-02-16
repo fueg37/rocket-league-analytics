@@ -16,6 +16,10 @@ COL_XGOT = "xGOT"
 COL_ON_TARGET = "OnTarget"
 COL_TARGET_X = "TargetX"
 COL_TARGET_Z = "TargetZ"
+COL_SHOT_Z = "ShotZ"
+COL_GOALKEEPER_DIST = "GoalkeeperDist"
+COL_SHOT_ANGLE = "ShotAngle"
+COL_DIST_TO_GOAL = "DistToGoal"
 
 # Shared shot-event schema columns
 SHOT_COL_PLAYER = "Player"
@@ -36,6 +40,10 @@ SHOT_EVENT_COLUMNS = (
     COL_ON_TARGET,
     COL_TARGET_X,
     COL_TARGET_Z,
+    COL_SHOT_Z,
+    COL_GOALKEEPER_DIST,
+    COL_SHOT_ANGLE,
+    COL_DIST_TO_GOAL,
     SHOT_COL_RESULT,
     SHOT_COL_BIG_CHANCE,
     SHOT_COL_X,
@@ -96,11 +104,14 @@ def compute_shot_features(
         angle = math.acos(max(-1.0, min(1.0, dot)))
 
     speed = math.sqrt(vel_x * vel_x + vel_y * vel_y + vel_z * vel_z)
-    target_x, target_z = project_to_goal_plane(
-        shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y
-    )
+    target_x, target_z = project_to_goal_plane(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y)
+    crosses_goal_plane = False
+    if abs(vel_y) >= 1e-6:
+        t_goal = (target_y - shot_y) / vel_y
+        crosses_goal_plane = t_goal >= 0
     on_target = bool(
-        target_x is not None
+        crosses_goal_plane
+        and target_x is not None
         and target_z is not None
         and abs(target_x) <= goal_half_w
         and 0 <= target_z <= goal_height
