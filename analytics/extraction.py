@@ -234,7 +234,7 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
 
 
 def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y", "Speed"]
+    cols = ["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y"]
     if event_df.empty:
         return pd.DataFrame(columns=cols)
     subset = event_df[event_df["event_type"].isin(["shot", "save"])].copy()
@@ -244,7 +244,6 @@ def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
     subset["xG"] = pd.to_numeric(subset["metric_value"], errors="coerce").fillna(0.0)
     subset["BigChance"] = subset["is_key_play"].fillna(False)
     subset = subset.rename(columns={"player_name": "Player", "team": "Team", "frame": "Frame", "x": "X", "y": "Y"})
-    subset["Speed"] = pd.NA
     return subset[cols].sort_values("Frame")
 
 
