@@ -9,6 +9,7 @@ import base64
 import tempfile
 import logging
 import numpy as np
+import json
 from datetime import datetime, timedelta
 
 from constants import (
@@ -28,6 +29,14 @@ from charts.factory import comparison_dumbbell, player_rank_lollipop
 
 logger = logging.getLogger(__name__)
 
+TIMELINE_COLUMNS = [
+    "time_s", "frame", "blue_score", "orange_score", "win_prob_blue",
+    "xg_blue_cum", "xg_orange_cum", "pressure_signed", "phase",
+    "event_type", "event_payload",
+]
+
+EVENT_PRIORITY = {"kickoff": 0, "shot": 1, "goal": 2, "state": 9}
+
 
 def themed_figure(*args, tier="support", intent=None, **kwargs):
     fig = go.Figure(*args, **kwargs)
@@ -37,6 +46,173 @@ def themed_figure(*args, tier="support", intent=None, **kwargs):
 def themed_px(factory, *args, tier="support", intent=None, **kwargs):
     fig = factory(*args, **kwargs)
     return apply_chart_theme(fig, tier=tier, intent=intent)
+
+
+def align_event_anchor(frame=None, time_s=None, fps=REPLAY_FPS):
+    """Deterministically align frame/time into a single canonical anchor."""
+    if frame is None and time_s is None:
+        return None
+    if frame is None:
+        frame = int(round(float(time_s) * fps))
+    frame = int(frame)
+    time_s = round(frame / float(fps), 3)
+    return {"frame": frame, "time_s": time_s}
+
+
+def _normalize_timeline_key_types(df, frame_col="frame", time_col="time_s"):
+    """Normalize timeline join keys to deterministic dtypes across OS/NumPy builds."""
+    out = df.copy()
+    if frame_col in out.columns:
+        out[frame_col] = pd.to_numeric(out[frame_col], errors='coerce')
+        out = out[out[frame_col].notna()].copy()
+        out[frame_col] = out[frame_col].astype('int64')
+    if time_col in out.columns:
+        out[time_col] = pd.to_numeric(out[time_col], errors='coerce').astype('float64').round(3)
+    return out
+
+
+
+
+def _coalesce_timeline_rows(df, key_cols):
+    """Deterministically coalesce duplicate timeline key rows.
+    Keeps the first row by stable input order to preserve canonical event ordering.
+    """
+    if df.empty:
+        return df
+    return df.drop_duplicates(subset=key_cols, keep='first').reset_index(drop=True)
+
+
+def _build_match_timeline(game_df, proto, pid_team, pid_name, shot_df, kickoff_df, momentum_series, win_prob_df):
+    """Build canonical match timeline used by all time-based match views."""
+    if game_df.empty:
+        return pd.DataFrame(columns=TIMELINE_COLUMNS)
+
+    max_frame = int(game_df.index.max())
+    base_frames = np.arange(0, max_frame + REPLAY_FPS, REPLAY_FPS, dtype=int)
+    rows = [{
+        "time_s": round(f / float(REPLAY_FPS), 3),
+        "frame": int(f),
+        "blue_score": 0,
+        "orange_score": 0,
+        "win_prob_blue": np.nan,
+        "xg_blue_cum": 0.0,
+        "xg_orange_cum": 0.0,
+        "pressure_signed": 0.0,
+        "phase": "regulation",
+        "event_type": "state",
+        "event_payload": "",
+    } for f in base_frames]
+
+    goals = []
+    if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
+        for g in proto.game_metadata.goals:
+            raw_frame = getattr(g, 'frame_number', getattr(g, 'frame', None))
+            anchor = align_event_anchor(frame=raw_frame) if raw_frame is not None else None
+            if not anchor:
+                continue
+            pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
+            team = pid_team.get(pid, "Blue")
+            scorer = pid_name.get(pid, "Unknown")
+            goals.append((anchor, team, scorer))
+
+    blue_gf = sorted(a["frame"] for a, t, _ in goals if t == "Blue")
+    orange_gf = sorted(a["frame"] for a, t, _ in goals if t == "Orange")
+
+    if not shot_df.empty:
+        shots = shot_df.sort_values('Frame').copy()
+        shots['frame'] = shots['Frame']
+        shots['blue_xg'] = np.where(shots['Team'] == 'Blue', shots['xG'].astype(float), 0.0)
+        shots['orange_xg'] = np.where(shots['Team'] == 'Orange', shots['xG'].astype(float), 0.0)
+        shots['xg_blue_cum'] = shots['blue_xg'].cumsum()
+        shots['xg_orange_cum'] = shots['orange_xg'].cumsum()
+    else:
+        shots = pd.DataFrame(columns=['frame', 'xg_blue_cum', 'xg_orange_cum'])
+
+    shots = _normalize_timeline_key_types(shots, frame_col='frame', time_col=None)
+
+    wp = win_prob_df[['Time', 'WinProb']].copy() if not win_prob_df.empty else pd.DataFrame(columns=['Time', 'WinProb'])
+    if not wp.empty:
+        wp['time_s'] = wp['Time']
+        wp = _normalize_timeline_key_types(wp, frame_col=None, time_col='time_s')
+
+    pressure = momentum_series.reset_index(name='pressure_signed') if not momentum_series.empty else pd.DataFrame(columns=['index', 'pressure_signed'])
+    if not pressure.empty:
+        pressure['time_s'] = pressure['index']
+        pressure = _normalize_timeline_key_types(pressure, frame_col=None, time_col='time_s')
+
+    event_rows = []
+    for anchor, team, scorer in goals:
+        payload = json.dumps({"team": team, "player": scorer})
+        event_rows.append({**anchor, "event_type": "goal", "event_payload": payload})
+    if not shot_df.empty:
+        for _, shot in shot_df.iterrows():
+            anchor = align_event_anchor(frame=shot.get('Frame'))
+            if not anchor:
+                continue
+            payload = json.dumps({"team": shot.get('Team', ''), "player": shot.get('Player', ''), "xg": round(float(shot.get('xG', 0.0)), 3)})
+            event_rows.append({**anchor, "event_type": "shot", "event_payload": payload})
+    if kickoff_df is not None and not kickoff_df.empty:
+        for _, ko in kickoff_df.iterrows():
+            anchor = align_event_anchor(time_s=ko.get('Time', 0.0))
+            if not anchor:
+                continue
+            payload = json.dumps({"team": ko.get('Team', ''), "player": ko.get('Player', ''), "result": ko.get('Result', '')})
+            event_rows.append({**anchor, "event_type": "kickoff", "event_payload": payload})
+
+    timeline = _normalize_timeline_key_types(pd.DataFrame(rows))
+    timeline['blue_score'] = timeline['frame'].apply(lambda f: sum(gf <= f for gf in blue_gf))
+    timeline['orange_score'] = timeline['frame'].apply(lambda f: sum(gf <= f for gf in orange_gf))
+
+    if not shots.empty:
+        timeline = pd.merge_asof(
+            timeline.sort_values('frame'),
+            shots[['frame', 'xg_blue_cum', 'xg_orange_cum']].sort_values('frame'),
+            on='frame', direction='backward', suffixes=('', '_shot')
+        )
+        timeline['xg_blue_cum'] = timeline['xg_blue_cum_shot'].fillna(timeline['xg_blue_cum'])
+        timeline['xg_orange_cum'] = timeline['xg_orange_cum_shot'].fillna(timeline['xg_orange_cum'])
+        timeline = timeline.drop(columns=['xg_blue_cum_shot', 'xg_orange_cum_shot'])
+
+    if not wp.empty:
+        timeline = timeline.merge(wp[['time_s', 'WinProb']], on='time_s', how='left')
+        timeline['win_prob_blue'] = timeline['WinProb'].ffill().fillna(50.0)
+        timeline = timeline.drop(columns=['WinProb'])
+
+    if not pressure.empty:
+        timeline = timeline.merge(pressure[['time_s', 'pressure_signed']], on='time_s', how='left', suffixes=('', '_m'))
+        timeline['pressure_signed'] = timeline['pressure_signed_m'].ffill().fillna(0.0)
+        timeline = timeline.drop(columns=['pressure_signed_m'])
+
+    timeline['phase'] = np.where(timeline['time_s'] >= 300.0, 'overtime', np.where(timeline['time_s'] < 30.0, 'opening', np.where(timeline['time_s'] >= 240.0, 'late_regulation', 'regulation')))
+
+    events_df = _normalize_timeline_key_types(pd.DataFrame(event_rows))
+    if not events_df.empty:
+        event_key_cols = ['time_s', 'frame', 'event_type', 'event_payload']
+        events_df = _coalesce_timeline_rows(events_df, key_cols=event_key_cols)
+        events_df['blue_score'] = np.nan
+        events_df['orange_score'] = np.nan
+        events_df['win_prob_blue'] = np.nan
+        events_df['xg_blue_cum'] = np.nan
+        events_df['xg_orange_cum'] = np.nan
+        events_df['pressure_signed'] = np.nan
+        events_df['phase'] = ''
+        timeline = pd.concat([timeline, events_df[TIMELINE_COLUMNS]], ignore_index=True)
+
+    timeline['event_priority'] = timeline['event_type'].map(EVENT_PRIORITY).fillna(99).astype(int)
+    timeline = timeline.sort_values(['time_s', 'event_priority', 'frame'], kind='mergesort').reset_index(drop=True)
+
+    fill_cols = ['blue_score', 'orange_score', 'win_prob_blue', 'xg_blue_cum', 'xg_orange_cum', 'pressure_signed', 'phase']
+    timeline[fill_cols] = timeline[fill_cols].ffill().bfill()
+
+    dedupe_cols = ['time_s', 'frame', 'event_type', 'event_payload']
+    timeline = _coalesce_timeline_rows(timeline, key_cols=dedupe_cols)
+
+    if not timeline['time_s'].is_monotonic_increasing:
+        raise ValueError("Timeline integrity check failed: non-monotonic time_s")
+    if timeline.duplicated(subset=dedupe_cols).any():
+        raise ValueError("Timeline integrity check failed: duplicate timeline key rows")
+
+    return timeline[TIMELINE_COLUMNS].copy()
 
 # --- 1. SETUP & IMPORTS ---
 try:
@@ -69,8 +245,6 @@ try:
     SKLEARN_AVAILABLE = True
 except ImportError:
     pass
-
-import json
 
 # Load pitch background image as base64 for Plotly
 PITCH_IMAGE_B64 = None
@@ -1402,7 +1576,7 @@ def calculate_rotation_analysis(game_df, proto, player_pos, sample_step=5):
     return rotation_timeline, rotation_summary, double_commits_df
 
 # --- 9h. MATH: SITUATIONAL STATS ---
-def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team, shot_df=None):
+def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team, shot_df=None, timeline_df=None):
     """Calculate game-state-dependent stats: goals by period, game state, clutch moments."""
     max_frame = game_df.index.max()
     match_duration = max_frame / float(REPLAY_FPS)
@@ -1413,10 +1587,13 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
+            anchor = align_event_anchor(frame=frame)
+            if not anchor:
+                continue
             pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
             team = pid_team.get(pid, "Blue")
             scorer = pid_name.get(pid, "")
-            goals.append((frame, team, scorer))
+            goals.append((anchor['frame'], team, scorer))
     goals.sort()
 
     per_player = {p.name: {'Goals_First_Half': 0, 'Goals_Second_Half': 0, 'Goals_Last_Min': 0,
@@ -1459,6 +1636,11 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
 
     blue_won = blue_score > orange_score
     orange_won = orange_score > blue_score
+
+    if timeline_df is not None and not timeline_df.empty:
+        max_t = float(timeline_df['time_s'].max())
+        half_frame = align_event_anchor(time_s=min(150.0, max_t / 2.0))['frame']
+        last_min_frame = align_event_anchor(time_s=max(0.0, min(max_t, 300.0) - 60.0))['frame']
 
     # Estimate last-minute saves per player using late-shot ratio
     # For each team: fraction of saved shots in last minute → scale each player's saves
@@ -1743,13 +1925,14 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df)
     rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(game_df, proto, player_pos)
     xs_events_df, xs_summary = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df)
-    situational_df = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df)
     wp_model, wp_scaler = load_win_prob_model()
     wp_result = calculate_win_probability_trained(proto, game_df, pid_team, wp_model, wp_scaler)
     if isinstance(wp_result, tuple):
         win_prob_df, wp_model_used = wp_result
     else:
         win_prob_df, wp_model_used = wp_result, False
+    timeline_df = _build_match_timeline(game_df, proto, pid_team, temp_map, shot_df, kickoff_df, momentum_series, win_prob_df)
+    situational_df = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df, timeline_df=timeline_df)
     df = calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df, recovery_df,
                                defense_df, xga_df, vaep_summary, rotation_summary,
                                xs_summary, situational_df)
@@ -1772,6 +1955,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "xs_events_df": xs_events_df, "xs_summary": xs_summary,
         "situational_df": situational_df,
         "win_prob_df": win_prob_df, "wp_model_used": wp_model_used,
+        "timeline_df": timeline_df,
         "is_overtime": is_overtime, "temp_map": temp_map,
         "pid_team": pid_team, "player_team": player_team,
         "player_pos": player_pos,
@@ -2212,6 +2396,7 @@ if app_mode == "🔍 Single Match Analysis":
         situational_df = _m["situational_df"]
         win_prob_df = _m["win_prob_df"]
         wp_model_used = _m["wp_model_used"]
+        timeline_df = _m["timeline_df"]
         is_overtime = _m["is_overtime"]
         temp_map = _m["temp_map"]
         pid_team = _m["pid_team"]
@@ -2341,85 +2526,61 @@ if app_mode == "🔍 Single Match Analysis":
                 st.plotly_chart(fig_overview, use_container_width=True)
             st.divider()
 
-            # --- A. WIN PROBABILITY CHART ---
+            # --- A/B. Timeline-Backed Narrative Charts ---
             try:
-                if not win_prob_df.empty:
+                timeline_state = timeline_df[timeline_df['event_type'] == 'state'].copy() if not timeline_df.empty else pd.DataFrame()
+                timeline_events = timeline_df[timeline_df['event_type'] != 'state'].copy() if not timeline_df.empty else pd.DataFrame()
+
+                if not timeline_state.empty:
                     fig_prob = themed_figure(tier="detail")
-                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy', mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.2)', name='Blue Win %', showlegend=False))
-                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=[100]*len(win_prob_df), fill='tonexty', mode='none', fillcolor='rgba(255, 153, 0, 0.2)', name='Orange Win %', showlegend=False))
-                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], mode='lines', line=dict(color='white', width=2), name='Win Probability'))
-                    fig_prob.add_shape(type="line", x0=win_prob_df['Time'].min(), y0=50, x1=win_prob_df['Time'].max(), y1=50, line=dict(color="gray", width=1, dash="dot"))
+                    fig_prob.add_trace(go.Scatter(x=timeline_state['time_s'], y=timeline_state['win_prob_blue'], fill='tozeroy', mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.2)', name='Blue Win %', showlegend=False))
+                    fig_prob.add_trace(go.Scatter(x=timeline_state['time_s'], y=[100]*len(timeline_state), fill='tonexty', mode='none', fillcolor='rgba(255, 153, 0, 0.2)', name='Orange Win %', showlegend=False))
+                    fig_prob.add_trace(go.Scatter(x=timeline_state['time_s'], y=timeline_state['win_prob_blue'], mode='lines', line=dict(color='white', width=2), name='Win Probability'))
+                    fig_prob.add_shape(type="line", x0=timeline_state['time_s'].min(), y0=50, x1=timeline_state['time_s'].max(), y1=50, line=dict(color="gray", width=1, dash="dot"))
                     if is_overtime:
                         fig_prob.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT Start")
                     fig_prob.update_layout(title="🏆 Win Probability" + (" (Overtime)" if is_overtime else ""), yaxis=dict(title="Blue Win %", range=[0, 100], showgrid=False), xaxis=dict(title="Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=40, b=20))
                     st.plotly_chart(fig_prob, use_container_width=True)
                     st.caption("Model: " + ("Trained (logistic regression on career data)" if wp_model_used else "Hand-tuned heuristic") + ". Process 15+ replays in Season mode to train a data-driven model.")
-            except Exception as e: st.error(f"Could not calculate Win Probability: {e}")
-            st.divider()
 
-            # --- A2. CUMULATIVE xG TIMELINE ---
-            st.markdown("#### 📈 Cumulative xG Timeline")
-            if not shot_df.empty:
-                sorted_shots = shot_df.sort_values('Frame').copy()
-                sorted_shots['Time'] = sorted_shots['Frame'] / float(REPLAY_FPS)
-                fig_xg = themed_figure(tier="detail")
-                # Build goal list from proto metadata (authoritative source for all goals)
-                meta_goals = {"Blue": [], "Orange": []}
-                if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
-                    for g in proto.game_metadata.goals:
-                        gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
-                        scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-                        gteam = pid_team.get(scorer_pid, "Blue")
-                        meta_goals[gteam].append(gf / float(REPLAY_FPS))
-                for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                    team_shots = sorted_shots[sorted_shots['Team'] == team]
-                    if not team_shots.empty:
-                        times = [0] + team_shots['Time'].tolist()
-                        cum_xg = [0] + team_shots['xG'].cumsum().tolist()
-                        # Extend to end of match
-                        match_end = game_df.index.max() / float(REPLAY_FPS)
-                        times.append(match_end)
-                        cum_xg.append(cum_xg[-1])
-                        fig_xg.add_trace(go.Scatter(x=times, y=cum_xg, mode='lines', name=f"{team} xG", line=dict(color=color, width=3, shape='hv')))
-                    # Overlay ALL actual goals from proto metadata
-                    if meta_goals[team]:
-                        goal_times = sorted(meta_goals[team])
-                        goal_cum = []
-                        for gt in goal_times:
-                            if not team_shots.empty:
-                                prior = team_shots[team_shots['Time'] <= gt]['xG'].sum()
-                            else:
-                                prior = 0
-                            goal_cum.append(prior)
-                        fig_xg.add_trace(go.Scatter(x=goal_times, y=goal_cum, mode='markers', name=f"{team} Goal", marker=dict(size=14, color=color, symbol='star', line=dict(width=2, color='white'))))
-                if is_overtime:
-                    fig_xg.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT")
-                fig_xg.update_layout(title="Cumulative xG Over Time", xaxis=dict(title="Time (s)", showgrid=False), yaxis=dict(title="Cumulative xG", showgrid=True, gridcolor='rgba(255,255,255,0.1)'), height=280, margin=dict(l=20, r=20, t=40, b=20))
-                st.plotly_chart(fig_xg, use_container_width=True)
-            st.divider()
+                st.divider()
+                st.markdown("#### 📈 Cumulative xG Timeline")
+                if not timeline_state.empty:
+                    fig_xg = themed_figure(tier="detail")
+                    fig_xg.add_trace(go.Scatter(x=timeline_state['time_s'], y=timeline_state['xg_blue_cum'], mode='lines', name="Blue xG", line=dict(color=TEAM_COLORS['Blue']['primary'], width=3, shape='hv')))
+                    fig_xg.add_trace(go.Scatter(x=timeline_state['time_s'], y=timeline_state['xg_orange_cum'], mode='lines', name="Orange xG", line=dict(color=TEAM_COLORS['Orange']['primary'], width=3, shape='hv')))
+                    goals = timeline_events[timeline_events['event_type'] == 'goal'] if not timeline_events.empty else pd.DataFrame()
+                    if not goals.empty:
+                        for team, color in [("Blue", TEAM_COLORS['Blue']['primary']), ("Orange", TEAM_COLORS['Orange']['primary'])]:
+                            team_goals = goals[goals['event_payload'].str.contains(f'"team": "{team}"', na=False)]
+                            if not team_goals.empty:
+                                yvals = []
+                                for _, g in team_goals.iterrows():
+                                    prev = timeline_state[timeline_state['time_s'] <= g['time_s']]
+                                    yvals.append(float(prev['xg_blue_cum'].iloc[-1] if team == 'Blue' else prev['xg_orange_cum'].iloc[-1]) if not prev.empty else 0.0)
+                                fig_xg.add_trace(go.Scatter(x=team_goals['time_s'], y=yvals, mode='markers', name=f"{team} Goal", marker=dict(size=14, color=color, symbol='star', line=dict(width=2, color='white'))))
+                    if is_overtime:
+                        fig_xg.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT")
+                    fig_xg.update_layout(title="Cumulative xG Over Time", xaxis=dict(title="Time (s)", showgrid=False), yaxis=dict(title="Cumulative xG", showgrid=True, gridcolor='rgba(255,255,255,0.1)'), height=280, margin=dict(l=20, r=20, t=40, b=20))
+                    st.plotly_chart(fig_xg, use_container_width=True)
 
-            # --- B. MOMENTUM CHART ---
-            st.markdown("#### 🌊 Pressure Index")
-            if not momentum_series.empty:
-                fig = themed_figure(tier="detail")
-                x_time = momentum_series.index
-                y_values = momentum_series.values
-                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor=TEAM_COLORS["Blue"]["light"]))
-                fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor=TEAM_COLORS["Orange"]["light"]))
-
-                # Use proto metadata for authoritative goal list
-                if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
-                    for g in proto.game_metadata.goals:
-                        gf = getattr(g, 'frame_number', getattr(g, 'frame', 0))
-                        scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-                        gteam = pid_team.get(scorer_pid, "Blue")
-                        scorer_name = temp_map.get(scorer_pid, "Unknown")
-                        time_sec = gf / float(REPLAY_FPS)
-                        tm_multiplier = 1 if gteam == 'Blue' else -1
-                        fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=scorer_name, hoverinfo="text+name", showlegend=False))
-
-                fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
+                st.divider()
+                st.markdown("#### 🌊 Pressure Index")
+                if not timeline_state.empty:
+                    fig = themed_figure(tier="detail")
+                    y_values = timeline_state['pressure_signed']
+                    x_time = timeline_state['time_s']
+                    fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(lower=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor=TEAM_COLORS["Blue"]["light"]))
+                    fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(upper=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor=TEAM_COLORS["Orange"]["light"]))
+                    goals = timeline_events[timeline_events['event_type'] == 'goal'] if not timeline_events.empty else pd.DataFrame()
+                    if not goals.empty:
+                        for _, g in goals.iterrows():
+                            payload = json.loads(g['event_payload']) if g['event_payload'] else {}
+                            tm_multiplier = 1 if payload.get('team') == 'Blue' else -1
+                            fig.add_trace(go.Scatter(x=[g['time_s']], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=payload.get('player', 'Goal'), hoverinfo="text+name", showlegend=False))
+                    fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+            except Exception as e: st.error(f"Could not render timeline narrative: {e}")
 
         with t3:
             if not shot_df.empty:
@@ -2865,13 +3026,10 @@ if app_mode == "🔍 Single Match Analysis":
                 n_players = len(tac_players)
 
                 # ── Time range selector ──
-                # Build goal event markers for quick-jump
+                # Build goal event markers for quick-jump from canonical timeline
                 goal_times = []
-                if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
-                    for g in proto.game_metadata.goals:
-                        gt = g.frame_number / REPLAY_FPS if hasattr(g, 'frame_number') else None
-                        if gt is not None:
-                            goal_times.append(gt)
+                if timeline_df is not None and not timeline_df.empty:
+                    goal_times = sorted(timeline_df[timeline_df['event_type'] == 'goal']['time_s'].unique().tolist())
 
                 st.markdown("**Time Window** — select a segment to animate (goals marked below)")
                 range_col1, range_col2 = st.columns([5, 1])
@@ -2894,8 +3052,8 @@ if app_mode == "🔍 Single Match Analysis":
                             time_range = (new_start, new_end)
 
                 t_start, t_end = time_range
-                frame_start = int(t_start * REPLAY_FPS)
-                frame_end = int(t_end * REPLAY_FPS)
+                frame_start = align_event_anchor(time_s=t_start)['frame']
+                frame_end = align_event_anchor(time_s=t_end)['frame']
                 window_frames = frame_end - frame_start
 
                 # ── Controls row ──
