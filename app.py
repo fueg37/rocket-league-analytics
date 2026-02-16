@@ -23,7 +23,19 @@ from utils import (
     frame_to_seconds, seconds_to_frame, fmt_time,
 )
 
+from charts.theme import apply_chart_theme
+
 logger = logging.getLogger(__name__)
+
+
+def themed_figure(*args, tier="support", intent=None, **kwargs):
+    fig = go.Figure(*args, **kwargs)
+    return apply_chart_theme(fig, tier=tier, intent=intent)
+
+
+def themed_px(factory, *args, tier="support", intent=None, **kwargs):
+    fig = factory(*args, **kwargs)
+    return apply_chart_theme(fig, tier=tier, intent=intent)
 
 # --- 1. SETUP & IMPORTS ---
 try:
@@ -1755,7 +1767,7 @@ def render_panel_to_image(fig, width, height, scale=2):
 
 def build_export_shot_map(shot_df, proto):
     """Shot map on pitch background for export."""
-    fig = go.Figure()
+    fig = themed_figure()
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if not shot_df.empty:
@@ -1779,7 +1791,7 @@ def build_export_shot_map(shot_df, proto):
 
 def build_export_heatmap(game_df, player_name):
     """Player heatmap on pitch background for export."""
-    fig = go.Figure()
+    fig = themed_figure()
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if player_name in game_df:
@@ -1823,7 +1835,7 @@ def build_export_scoreboard(df, shot_df, is_overtime):
     n_orange = len(orange_rows)
     name_colors = ['#4da6ff'] * n_blue + ['#888'] + ['#ffb347'] * n_orange
     cell_colors = ['#4da6ff'] * n_blue + ['#888'] + ['#ffb347'] * n_orange
-    fig = go.Figure(data=[go.Table(
+    fig = themed_figure(data=[go.Table(
         header=dict(values=header_vals, fill_color='#2a2a2a', font=dict(color='white', size=13),
                     align='center', line_color='#444'),
         cells=dict(values=list(cols), fill_color='#1e1e1e',
@@ -1838,15 +1850,12 @@ def build_export_scoreboard(df, shot_df, is_overtime):
     luck_text = f"<span style='color:#4da6ff'>Luck: {blue_luck}%</span>    <span style='color:#ffb347'>Luck: {orange_luck}%</span>"
     fig.add_annotation(x=0.5, y=1.03, xref='paper', yref='paper', text=luck_text,
                       font=dict(size=13, color='white'), showarrow=False)
-    fig.update_layout(
-        paper_bgcolor='#1e1e1e', plot_bgcolor='#1e1e1e',
-        margin=dict(l=10, r=10, t=80, b=10), font=dict(color='white')
-    )
+    fig.update_layout(margin=dict(l=10, r=10, t=80, b=10))
     return fig
 
 def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
     """Cumulative xG timeline for export."""
-    fig = go.Figure()
+    fig = themed_figure()
     if not shot_df.empty:
         sorted_shots = shot_df.sort_values('Frame').copy()
         sorted_shots['Time'] = sorted_shots['Frame'] / float(REPLAY_FPS)
@@ -1880,8 +1889,7 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
         title=dict(text="Cumulative xG", font=dict(size=14, color='white')),
         xaxis=dict(title=dict(text="Time (s)", font=dict(size=10)), showgrid=False, color='#888'),
         yaxis=dict(title=dict(text="xG", font=dict(size=10)), showgrid=True, gridcolor='rgba(255,255,255,0.08)', color='#888'),
-        plot_bgcolor='#1e1e1e', paper_bgcolor='#1e1e1e', font=dict(color='white', size=10),
-        margin=dict(l=40, r=10, t=35, b=30),
+                margin=dict(l=40, r=10, t=35, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=9))
     )
     return fig
@@ -1889,7 +1897,7 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
 def build_export_win_prob(proto, game_df, pid_team, is_overtime):
     """Win probability chart for export."""
     win_prob_df = calculate_win_probability(proto, game_df, pid_team)
-    fig = go.Figure()
+    fig = themed_figure()
     if not win_prob_df.empty:
         fig.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy',
             mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.25)', showlegend=False))
@@ -1905,14 +1913,13 @@ def build_export_win_prob(proto, game_df, pid_team, is_overtime):
         title=dict(text="Win Probability", font=dict(size=14, color='white')),
         yaxis=dict(title=dict(text="Blue Win %", font=dict(size=10)), range=[0, 100], showgrid=False, color='#888'),
         xaxis=dict(title=dict(text="Time (s)", font=dict(size=10)), showgrid=False, color='#888'),
-        plot_bgcolor='#1e1e1e', paper_bgcolor='#1e1e1e', font=dict(color='white', size=10),
-        margin=dict(l=40, r=10, t=35, b=30)
+                margin=dict(l=40, r=10, t=35, b=30)
     )
     return fig
 
 def build_export_zones(df, focus_players):
     """Positional zone bar chart for export."""
-    fig = go.Figure()
+    fig = themed_figure()
     players_to_show = focus_players if focus_players else df['Name'].tolist()[:2]
     colors = [TEAM_COLORS["Blue"]["primary"], TEAM_COLORS["Orange"]["primary"], '#00cc96', '#AB63FA']
     for i, pname in enumerate(players_to_show[:3]):
@@ -1930,15 +1937,14 @@ def build_export_zones(df, focus_players):
         barmode='group',
         xaxis=dict(showgrid=False, color='#888', tickfont=dict(size=9)),
         yaxis=dict(title=dict(text="%", font=dict(size=10)), showgrid=True, gridcolor='rgba(255,255,255,0.08)', color='#888'),
-        plot_bgcolor='#1e1e1e', paper_bgcolor='#1e1e1e', font=dict(color='white', size=10),
-        margin=dict(l=35, r=10, t=35, b=30),
+                margin=dict(l=35, r=10, t=35, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(size=9))
     )
     return fig
 
 def build_export_pressure(momentum_series, proto, pid_team):
     """Pressure index strip for export."""
-    fig = go.Figure()
+    fig = themed_figure()
     if not momentum_series.empty:
         x_time = momentum_series.index
         y_values = momentum_series.values
@@ -1963,8 +1969,7 @@ def build_export_pressure(momentum_series, proto, pid_team):
         yaxis=dict(range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.15)',
                    showticklabels=False),
         xaxis=dict(title=dict(text="Match Time (s)", font=dict(size=10)), showgrid=False, color='#888'),
-        plot_bgcolor='#1e1e1e', paper_bgcolor='#1e1e1e', font=dict(color='white', size=10),
-        margin=dict(l=10, r=10, t=30, b=25)
+                margin=dict(l=10, r=10, t=30, b=25)
     )
     return fig
 
@@ -2168,7 +2173,7 @@ if app_mode == "🔍 Single Match Analysis":
                         wins = len(disp_kickoff[disp_kickoff['Result'] == 'Win'])
                         total = len(disp_kickoff)
                         win_rate = int((wins/total)*100) if total > 0 else 0
-                        fig = go.Figure(go.Indicator(
+                        fig = themed_figure(go.Indicator(
                             mode = "gauge+number", value = win_rate,
                             title = {'text': "Kickoff Win Rate (Selected)"},
                             gauge = {'axis': {'range': [None, 100]}, 'bar': {'color': "#00cc96"}}
@@ -2178,7 +2183,7 @@ if app_mode == "🔍 Single Match Analysis":
                     with col_k2:
 
                         color_map = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#AB63FA"}
-                        fig = go.Figure()
+                        fig = themed_figure()
                         for outcome, color in color_map.items():
                             subset = disp_kickoff[disp_kickoff['Result'] == outcome]
                             if not subset.empty:
@@ -2241,7 +2246,7 @@ if app_mode == "🔍 Single Match Analysis":
                         blue_fracs.append(-0.5)
                         orange_fracs.append(0.5)
 
-                fig_overview = go.Figure()
+                fig_overview = themed_figure(tier="hero")
                 fig_overview.add_trace(go.Bar(
                     y=ov_labels, x=blue_fracs, orientation='h',
                     marker_color=TEAM_COLORS["Blue"]["primary"], showlegend=False,
@@ -2266,9 +2271,7 @@ if app_mode == "🔍 Single Match Analysis":
                     barmode='relative',
                     xaxis=dict(visible=False, range=[-1.15, 1.15]),
                     yaxis=dict(visible=False),
-                    plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
-                    font=dict(color='white'),
-                    height=max(380, len(overview_stats) * 36),
+                                        height=max(380, len(overview_stats) * 36),
                     margin=dict(l=10, r=10, t=10, b=10),
                     bargap=0.25,
                 )
@@ -2278,14 +2281,14 @@ if app_mode == "🔍 Single Match Analysis":
             # --- A. WIN PROBABILITY CHART ---
             try:
                 if not win_prob_df.empty:
-                    fig_prob = go.Figure()
+                    fig_prob = themed_figure(tier="detail")
                     fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy', mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.2)', name='Blue Win %', showlegend=False))
                     fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=[100]*len(win_prob_df), fill='tonexty', mode='none', fillcolor='rgba(255, 153, 0, 0.2)', name='Orange Win %', showlegend=False))
                     fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], mode='lines', line=dict(color='white', width=2), name='Win Probability'))
                     fig_prob.add_shape(type="line", x0=win_prob_df['Time'].min(), y0=50, x1=win_prob_df['Time'].max(), y1=50, line=dict(color="gray", width=1, dash="dot"))
                     if is_overtime:
                         fig_prob.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT Start")
-                    fig_prob.update_layout(title="🏆 Win Probability" + (" (Overtime)" if is_overtime else ""), yaxis=dict(title="Blue Win %", range=[0, 100], showgrid=False), xaxis=dict(title="Time (Seconds)", showgrid=False), plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=250, margin=dict(l=20, r=20, t=40, b=20))
+                    fig_prob.update_layout(title="🏆 Win Probability" + (" (Overtime)" if is_overtime else ""), yaxis=dict(title="Blue Win %", range=[0, 100], showgrid=False), xaxis=dict(title="Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=40, b=20))
                     st.plotly_chart(fig_prob, use_container_width=True)
                     st.caption("Model: " + ("Trained (logistic regression on career data)" if wp_model_used else "Hand-tuned heuristic") + ". Process 15+ replays in Season mode to train a data-driven model.")
             except Exception as e: st.error(f"Could not calculate Win Probability: {e}")
@@ -2296,7 +2299,7 @@ if app_mode == "🔍 Single Match Analysis":
             if not shot_df.empty:
                 sorted_shots = shot_df.sort_values('Frame').copy()
                 sorted_shots['Time'] = sorted_shots['Frame'] / float(REPLAY_FPS)
-                fig_xg = go.Figure()
+                fig_xg = themed_figure(tier="detail")
                 # Build goal list from proto metadata (authoritative source for all goals)
                 meta_goals = {"Blue": [], "Orange": []}
                 if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -2328,14 +2331,14 @@ if app_mode == "🔍 Single Match Analysis":
                         fig_xg.add_trace(go.Scatter(x=goal_times, y=goal_cum, mode='markers', name=f"{team} Goal", marker=dict(size=14, color=color, symbol='star', line=dict(width=2, color='white'))))
                 if is_overtime:
                     fig_xg.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT")
-                fig_xg.update_layout(title="Cumulative xG Over Time", xaxis=dict(title="Time (s)", showgrid=False), yaxis=dict(title="Cumulative xG", showgrid=True, gridcolor='rgba(255,255,255,0.1)'), plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=280, margin=dict(l=20, r=20, t=40, b=20))
+                fig_xg.update_layout(title="Cumulative xG Over Time", xaxis=dict(title="Time (s)", showgrid=False), yaxis=dict(title="Cumulative xG", showgrid=True, gridcolor='rgba(255,255,255,0.1)'), height=280, margin=dict(l=20, r=20, t=40, b=20))
                 st.plotly_chart(fig_xg, use_container_width=True)
             st.divider()
 
             # --- B. MOMENTUM CHART ---
             st.markdown("#### 🌊 Pressure Index")
             if not momentum_series.empty:
-                fig = go.Figure()
+                fig = themed_figure(tier="detail")
                 x_time = momentum_series.index
                 y_values = momentum_series.values
                 fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor=TEAM_COLORS["Blue"]["light"]))
@@ -2352,12 +2355,12 @@ if app_mode == "🔍 Single Match Analysis":
                         tm_multiplier = 1 if gteam == 'Blue' else -1
                         fig.add_trace(go.Scatter(x=[time_sec], y=[85 * tm_multiplier], mode='markers+text', marker=dict(symbol='circle', size=10, color='white', line=dict(width=1, color='black')), text="⚽", textposition="top center" if tm_multiplier > 0 else "bottom center", name=scorer_name, hoverinfo="text+name", showlegend=False))
 
-                fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
+                fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
 
         with t3:
             if not shot_df.empty:
-                fig = go.Figure()
+                fig = themed_figure()
                 fig.update_layout(get_field_layout("Shot Map"))
 
                 # Team-colored shots and goals
@@ -2391,7 +2394,7 @@ if app_mode == "🔍 Single Match Analysis":
                 shot_row = sorted_shots_ff.iloc[selected_shot_idx]
                 frame = int(shot_row['Frame'])
                 # Build field with all player positions at this frame
-                fig_ff = go.Figure()
+                fig_ff = themed_figure()
                 fig_ff.update_layout(get_field_layout(f"Frame {frame} | {shot_row['Player']} ({shot_row['Result']})"))
                 # Ball position
                 if 'ball' in game_df and frame in game_df.index:
@@ -2439,7 +2442,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.write("#### Playmaker Leaderboard")
                     st.dataframe(pass_df.groupby('Sender')['xA'].sum().sort_values(ascending=False), use_container_width=True)
                 with col_b:
-                    fig = go.Figure()
+                    fig = themed_figure()
                     fig.update_layout(get_field_layout("Pass Map"))
                     pass_colors = {"Blue": "rgba(50,150,255,0.4)", "Orange": "rgba(255,160,50,0.4)"}
                     reg = pass_df[pass_df['KeyPass']==False]
@@ -2484,7 +2487,7 @@ if app_mode == "🔍 Single Match Analysis":
                         [0.9, 'rgba(255,240,50,0.85)'],
                         [1.0, 'rgba(255,255,120,0.95)'],
                     ]
-                    fig = go.Figure()
+                    fig = themed_figure()
                     fig.add_trace(go.Histogram2dContour(
                         x=sampled['pos_x'], y=sampled['pos_y'],
                         colorscale=sofascore_scale,
@@ -2504,18 +2507,18 @@ if app_mode == "🔍 Single Match Analysis":
             if not aerial_df.empty:
                 ac1, ac2 = st.columns(2)
                 with ac1:
-                    fig_aer = px.bar(aerial_df, x='Name', y='Aerial Hits', color='Team',
+                    fig_aer = themed_px(px.bar, aerial_df, x='Name', y='Aerial Hits', color='Team',
                         title="Aerial Hits", color_discrete_map=TEAM_COLOR_MAP)
-                    fig_aer.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_aer.update_layout()
                     st.plotly_chart(fig_aer, use_container_width=True)
                 with ac2:
-                    fig_air = go.Figure()
+                    fig_air = themed_figure()
                     for _, row in aerial_df.iterrows():
                         color = TEAM_COLORS["Blue"]["primary"] if row['Team'] == 'Blue' else TEAM_COLORS["Orange"]["primary"]
                         fig_air.add_trace(go.Bar(x=[row['Name']], y=[row['Time Airborne (s)']],
                             name=row['Name'], marker_color=color, showlegend=False))
                     fig_air.update_layout(title="Time Airborne (s)",
-                        plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                        )
                     st.plotly_chart(fig_air, use_container_width=True)
                 aer_cols = ['Name', 'Team', 'Aerial Hits', 'Aerial %', 'Avg Aerial Height', 'Max Aerial Height', 'Time Airborne (s)']
                 st.dataframe(aerial_df[aer_cols].sort_values('Aerial Hits', ascending=False), use_container_width=True, hide_index=True)
@@ -2526,16 +2529,16 @@ if app_mode == "🔍 Single Match Analysis":
             if not recovery_df.empty:
                 rc1, rc2 = st.columns(2)
                 with rc1:
-                    fig_rec = px.bar(recovery_df, x='Name', y='Avg Recovery (s)', color='Team',
+                    fig_rec = themed_px(px.bar, recovery_df, x='Name', y='Avg Recovery (s)', color='Team',
                         title="Avg Time to Supersonic After Hit",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_rec.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_rec.update_layout()
                     st.plotly_chart(fig_rec, use_container_width=True)
                 with rc2:
-                    fig_fast = px.bar(recovery_df, x='Name', y='Recovery < 1s %', color='Team',
+                    fig_fast = themed_px(px.bar, recovery_df, x='Name', y='Recovery < 1s %', color='Team',
                         title="Fast Recovery Rate (< 1s)",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_fast.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_fast.update_layout()
                     st.plotly_chart(fig_fast, use_container_width=True)
                 rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
                 st.dataframe(recovery_df[rec_cols].sort_values('Avg Recovery (s)'), use_container_width=True, hide_index=True)
@@ -2565,7 +2568,7 @@ if app_mode == "🔍 Single Match Analysis":
                             link_colors.append(TEAM_COLORS["Blue"]["trail"])
                         else:
                             link_colors.append(TEAM_COLORS["Orange"]["trail"])
-                    fig_sankey = go.Figure(go.Sankey(
+                    fig_sankey = themed_figure(go.Sankey(
                         node=dict(pad=15, thickness=20, line=dict(color='white', width=0.5),
                                   label=all_names, color=node_colors),
                         link=dict(
@@ -2578,8 +2581,7 @@ if app_mode == "🔍 Single Match Analysis":
                         )
                     ))
                     fig_sankey.update_layout(title="Pass Flow Network",
-                        plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
-                        font=dict(color='white', size=12), height=400)
+                        height=400)
                     st.plotly_chart(fig_sankey, use_container_width=True)
                 else:
                     st.info("Not enough passing connections to build Sankey diagram.")
@@ -2592,16 +2594,16 @@ if app_mode == "🔍 Single Match Analysis":
             if not defense_df.empty:
                 dc1, dc2 = st.columns(2)
                 with dc1:
-                    fig_shadow = px.bar(defense_df, x='Name', y='Shadow %', color='Team',
+                    fig_shadow = themed_px(px.bar, defense_df, x='Name', y='Shadow %', color='Team',
                         title="Shadow Defense Time %",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_shadow.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_shadow.update_layout()
                     st.plotly_chart(fig_shadow, use_container_width=True)
                 with dc2:
-                    fig_pres = px.bar(defense_df, x='Name', y='Pressure Time (s)', color='Team',
+                    fig_pres = themed_px(px.bar, defense_df, x='Name', y='Pressure Time (s)', color='Team',
                         title="Total Pressure Time (s)",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_pres.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_pres.update_layout()
                     st.plotly_chart(fig_pres, use_container_width=True)
                 st.dataframe(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']].sort_values('Shadow %', ascending=False),
                     use_container_width=True, hide_index=True)
@@ -2613,16 +2615,16 @@ if app_mode == "🔍 Single Match Analysis":
             if not xga_df.empty:
                 xc1, xc2 = st.columns(2)
                 with xc1:
-                    fig_xga = px.bar(xga_df, x='Name', y='xGA', color='Team',
+                    fig_xga = themed_px(px.bar, xga_df, x='Name', y='xGA', color='Team',
                         title="Expected Goals Against (as nearest defender)",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_xga.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_xga.update_layout()
                     st.plotly_chart(fig_xga, use_container_width=True)
                 with xc2:
-                    fig_dist = px.bar(xga_df, x='Name', y='Avg Dist to Shot', color='Team',
+                    fig_dist = themed_px(px.bar, xga_df, x='Name', y='Avg Dist to Shot', color='Team',
                         title="Avg Distance to Shot When Nearest Defender",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_dist.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_dist.update_layout()
                     st.plotly_chart(fig_dist, use_container_width=True)
                 xga_cols = ['Name', 'Team', 'Shots Faced', 'xGA', 'Goals Conceded (nearest)', 'Avg Dist to Shot', 'High xG Faced']
                 st.dataframe(xga_df[xga_cols].sort_values('xGA', ascending=False), use_container_width=True, hide_index=True)
@@ -2634,15 +2636,15 @@ if app_mode == "🔍 Single Match Analysis":
             if not vaep_summary.empty:
                 vc1, vc2 = st.columns(2)
                 with vc1:
-                    fig_vaep_bar = px.bar(vaep_summary.sort_values('Total_VAEP', ascending=False),
+                    fig_vaep_bar = themed_px(px.bar, vaep_summary.sort_values('Total_VAEP', ascending=False),
                         x='Name', y='Total_VAEP', color='Team',
                         title="Total VAEP per Player",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_vaep_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_vaep_bar.update_layout()
                     st.plotly_chart(fig_vaep_bar, use_container_width=True)
                 with vc2:
                     if not vaep_df.empty:
-                        fig_vaep_scatter = go.Figure()
+                        fig_vaep_scatter = themed_figure()
                         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                             t_data = vaep_df[vaep_df['Team'] == team]
                             if not t_data.empty:
@@ -2655,7 +2657,7 @@ if app_mode == "🔍 Single Match Analysis":
                         fig_vaep_scatter.add_hline(y=0, line_dash="dot", line_color="gray")
                         fig_vaep_scatter.update_layout(title="Touch VAEP Timeline (green=positive, red=negative)",
                             xaxis_title="Time (s)", yaxis_title="VAEP",
-                            plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=350)
+                            height=350)
                         st.plotly_chart(fig_vaep_scatter, use_container_width=True)
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
                 st.dataframe(vaep_summary[vaep_show_cols].sort_values('Total_VAEP', ascending=False),
@@ -2670,18 +2672,18 @@ if app_mode == "🔍 Single Match Analysis":
             if not xs_summary.empty and xs_summary['Saves_Nearby'].sum() > 0:
                 xs1, xs2 = st.columns(2)
                 with xs1:
-                    fig_xs_bar = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Total_xS', ascending=False),
+                    fig_xs_bar = themed_px(px.bar, xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Total_xS', ascending=False),
                         x='Name', y='Total_xS', color='Team',
                         title="Total xS (Save Difficulty)",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_xs_bar.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_xs_bar.update_layout()
                     st.plotly_chart(fig_xs_bar, use_container_width=True)
                 with xs2:
-                    fig_xs_avg = px.bar(xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Avg_xS', ascending=False),
+                    fig_xs_avg = themed_px(px.bar, xs_summary[xs_summary['Saves_Nearby'] > 0].sort_values('Avg_xS', ascending=False),
                         x='Name', y='Avg_xS', color='Team',
                         title="Avg xS per Save",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_xs_avg.update_layout(plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+                    fig_xs_avg.update_layout()
                     st.plotly_chart(fig_xs_avg, use_container_width=True)
                 xs_show_cols = ['Name', 'Team', 'Saves_Nearby', 'Total_xS', 'Avg_xS', 'Hard_Saves']
                 st.dataframe(xs_summary[xs_show_cols].sort_values('Total_xS', ascending=False),
@@ -2702,15 +2704,18 @@ if app_mode == "🔍 Single Match Analysis":
                 st.markdown("#### Role Distribution")
                 rc1, rc2 = st.columns(2)
                 with rc1:
-                    fig_roles = go.Figure()
+                    fig_roles = themed_figure()
                     for role, color in [('1st', '#EF553B'), ('2nd', '#FFA15A')]:
                         col_name = f'Time_{role}%'
                         fig_roles.add_trace(go.Bar(
                             x=rotation_summary['Name'], y=rotation_summary[col_name],
                             name=f'{role} Man', marker_color=color))
-                    fig_roles.update_layout(barmode='stack', title="Time Spent as 1st/2nd Man",
-                        yaxis_title="% of Match", plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
-                        font=dict(color='white'), legend=dict(orientation='h', y=1.12))
+                    fig_roles.update_layout(
+                        barmode='stack',
+                        title="Time Spent as 1st/2nd Man",
+                        yaxis_title="% of Match",
+                        legend=dict(orientation='h', y=1.12),
+                    )
                     st.plotly_chart(fig_roles, use_container_width=True)
                 with rc2:
                     # Team comparison
@@ -2736,7 +2741,7 @@ if app_mode == "🔍 Single Match Analysis":
                         players = sorted(team_tl['Player'].unique())
                         # Sample to avoid too many points
                         sampled = team_tl.iloc[::3] if len(team_tl) > 5000 else team_tl
-                        fig_tl = go.Figure()
+                        fig_tl = themed_figure()
                         fig_tl.add_trace(go.Heatmap(
                             x=sampled['Time'], y=sampled['Player'], z=sampled['RoleNum'],
                             colorscale=[[0, '#EF553B'], [1.0, '#FFA15A']],
@@ -2744,8 +2749,7 @@ if app_mode == "🔍 Single Match Analysis":
                             colorbar=dict(title="Role", tickvals=[1, 2], ticktext=['1st', '2nd'])))
                         fig_tl.update_layout(title=f"{team} Rotation Timeline",
                             xaxis_title="Time (s)", yaxis_title="Player",
-                            plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
-                            font=dict(color='white'), height=250)
+                            height=250)
                         st.plotly_chart(fig_tl, use_container_width=True)
 
                 st.divider()
@@ -2753,7 +2757,7 @@ if app_mode == "🔍 Single Match Analysis":
                 # Double commit map
                 if not double_commits_df.empty:
                     st.markdown(f"#### Double Commits ({len(double_commits_df)} detected)")
-                    fig_dc = go.Figure()
+                    fig_dc = themed_figure()
                     fig_dc.update_layout(get_field_layout("Double Commit Locations"))
                     for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                         t_dc = double_commits_df[double_commits_df['Team'] == team] if 'Team' in double_commits_df.columns else pd.DataFrame()
@@ -2862,7 +2866,7 @@ if app_mode == "🔍 Single Match Analysis":
                 # ── Build figure ──
                 field_traces = get_3d_field_traces()
                 n_field = len(field_traces)
-                fig_tac = go.Figure(data=field_traces)
+                fig_tac = themed_figure(data=field_traces)
 
                 # Fixed trace topology per frame:
                 # [ball_marker, ball_trail, player_0_marker, player_0_trail, ..., player_N_marker, player_N_trail]
@@ -3335,7 +3339,7 @@ elif app_mode == "📈 Season Batch Processor":
                 rolling_window = st.slider("Rolling Average Window", 3, 20, 10, 1, key="roll_window")
             with t_opt2:
                 show_wl_markers = st.checkbox("Color by Win/Loss", value=True, key="wl_markers")
-            fig = go.Figure()
+            fig = themed_figure()
             fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero,
                 line=dict(color='#007bff', width=2, dash='dot' if show_wl_markers else 'solid'),
                 opacity=0.4 if show_wl_markers else 1.0))
@@ -3368,7 +3372,7 @@ elif app_mode == "📈 Season Batch Processor":
                 ot_games = hero_df[hero_df['Overtime'] == True]
                 if not ot_games.empty:
                     fig.add_trace(go.Scatter(x=ot_games['GameNum'], y=ot_games[metric], mode='markers', marker=dict(size=12, color='#ffcc00', symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
-            fig.update_layout(title=f"{metric} over Time", plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'))
+            fig.update_layout(title=f"{metric} over Time", )
             st.plotly_chart(fig, use_container_width=True)
         with t2:
             st.subheader("Season Kickoff Meta")
@@ -3378,7 +3382,7 @@ elif app_mode == "📈 Season Batch Processor":
                 with c_a:
                     wins = len(hero_k[hero_k['Result'] == 'Win'])
                     win_rate = int((wins/len(hero_k))*100) if len(hero_k) > 0 else 0
-                    fig = go.Figure(go.Indicator(
+                    fig = themed_figure(go.Indicator(
                         mode = "gauge+number", value = win_rate, title = {'text': f"{hero} Win Rate"},
                         gauge = {'axis': {'range': [None, 100]}, 'bar': {'color': "#00cc96"}}
                     ))
@@ -3386,12 +3390,12 @@ elif app_mode == "📈 Season Batch Processor":
                     st.plotly_chart(fig, use_container_width=True)
                 with c_b:
                     spawn_grp = hero_k.groupby('Spawn')['Result'].apply(lambda x: (x=='Win').mean()*100).reset_index(name='WinRate')
-                    fig = px.bar(spawn_grp, x='Spawn', y='WinRate', title="Win Rate by Spawn Location", color_discrete_sequence=['#636efa'])
+                    fig = themed_px(px.bar, spawn_grp, x='Spawn', y='WinRate', title="Win Rate by Spawn Location", color_discrete_sequence=['#636efa'])
                     st.plotly_chart(fig, use_container_width=True)
 
                 st.write("#### Season Kickoff Outcome Map")
                 result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
-                fig = go.Figure()
+                fig = themed_figure()
                 for result, color in result_colors.items():
                     subset = hero_k[hero_k['Result'] == result]
                     if not subset.empty:
@@ -3415,7 +3419,7 @@ elif app_mode == "📈 Season Batch Processor":
                     avg_def = hero_df['Pos_Def'].mean()
                     avg_mid = hero_df['Pos_Mid'].mean()
                     avg_off = hero_df['Pos_Off'].mean()
-                    fig = px.pie(names=['Defense', 'Midfield', 'Offense'], values=[avg_def, avg_mid, avg_off], title=f"{hero} Avg Positioning", color_discrete_sequence=['#EF553B', '#FFA15A', '#00CC96'])
+                    fig = themed_px(px.pie, names=['Defense', 'Midfield', 'Offense'], values=[avg_def, avg_mid, avg_off], title=f"{hero} Avg Positioning", color_discrete_sequence=['#EF553B', '#FFA15A', '#00CC96'])
                     st.plotly_chart(fig, use_container_width=True)
                 with col_bar:
                     # Granular zones bar chart
@@ -3428,8 +3432,8 @@ elif app_mode == "📈 Season Batch Processor":
                             hero_df['Carry_Time'].mean() if 'Carry_Time' in hero_df else 0
                         ]
                     }
-                    fig_zones = px.bar(zone_data, x='Zone', y='Time %', title=f"{hero} Granular Zones (Avg %)", color='Zone', color_discrete_sequence=['#636efa', '#EF553B', '#AB63FA', '#00CC96'])
-                    fig_zones.update_layout(showlegend=False, plot_bgcolor='#1e1e1e')
+                    fig_zones = themed_px(px.bar, zone_data, x='Zone', y='Time %', title=f"{hero} Granular Zones (Avg %)", color='Zone', color_discrete_sequence=['#636efa', '#EF553B', '#AB63FA', '#00CC96'])
+                    fig_zones.update_layout(showlegend=False)
                     st.plotly_chart(fig_zones, use_container_width=True)
                 # Comparison with teammate
                 if teammate != "None":
@@ -3447,8 +3451,8 @@ elif app_mode == "📈 Season Batch Processor":
                             mate_df_ps['Carry_Time'].mean() if 'Carry_Time' in mate_df_ps else 0
                         ]
                     })
-                    fig_comp = px.bar(comp_zones, x='Zone', y='Time %', color='Player', barmode='group', color_discrete_map={hero: '#007bff', teammate: '#ff9900'})
-                    fig_comp.update_layout(plot_bgcolor='#1e1e1e')
+                    fig_comp = themed_px(px.bar, comp_zones, x='Zone', y='Time %', color='Player', barmode='group', color_discrete_map={hero: '#007bff', teammate: '#ff9900'})
+                    fig_comp.update_layout()
                     st.plotly_chart(fig_comp, use_container_width=True)
         with t4:
             st.subheader("Player Comparison Radar")
@@ -3459,7 +3463,7 @@ elif app_mode == "📈 Season Batch Processor":
             cat_max = cat_max.replace(0, 1)  # avoid division by zero
             hero_avg = hero_df[categories].mean()
             hero_norm = (hero_avg / cat_max * 100).fillna(0)
-            fig = go.Figure()
+            fig = themed_figure()
             fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
             if teammate != "None":
                 mate_df = season[season['Name'] == teammate]
@@ -3527,13 +3531,13 @@ elif app_mode == "📈 Season Batch Processor":
                         pass
                 if correlations:
                     corr_df = pd.DataFrame(correlations).sort_values('Correlation', ascending=False)
-                    fig_corr = go.Figure()
+                    fig_corr = themed_figure()
                     colors = ['#00cc96' if v > 0 else '#EF553B' for v in corr_df['Correlation']]
                     fig_corr.add_trace(go.Bar(x=corr_df['Stat'], y=corr_df['Correlation'],
                         marker_color=colors))
                     fig_corr.update_layout(title="Stat Correlation with Winning (higher = more predictive of wins)",
                         yaxis_title="Correlation", xaxis_tickangle=-45,
-                        plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'), height=350)
+                        height=350)
                     st.plotly_chart(fig_corr, use_container_width=True)
                     st.caption("Green = higher stat → more wins. Red = higher stat → more losses. Focus on improving green stats.")
             else:
@@ -3629,7 +3633,7 @@ elif app_mode == "📈 Season Batch Processor":
                 c4.metric("Clutch Goal Rate", f"{round(_glm / max(_total_g, 1) * 100, 1)}%", help="% of goals in last 60s")
 
                 # Period distribution pie chart
-                fig_period = go.Figure(data=[go.Pie(
+                fig_period = themed_figure(data=[go.Pie(
                     labels=['First Half', 'Second Half (excl. last min)', 'Last Minute'],
                     values=[_g1h, max(0, _g2h - _glm), _glm],
                     marker_colors=['#636EFA', '#EF553B', '#FFA15A'],
@@ -3646,7 +3650,7 @@ elif app_mode == "📈 Season Batch Processor":
                     hero_df_sit['_goals_total'] = hero_df_sit['Goals_First_Half'] + hero_df_sit['Goals_Second_Half']
                     hero_df_sit['_clutch_pct'] = hero_df_sit['Goals_Last_Min'] / hero_df_sit['_goals_total'].replace(0, np.nan) * 100
                     hero_df_sit['_late_roll'] = hero_df_sit['Goals_Last_Min'].rolling(10, min_periods=3).mean()
-                    fig_late = go.Figure()
+                    fig_late = themed_figure()
                     fig_late.add_trace(go.Scatter(x=hero_df_sit['GameNum'], y=hero_df_sit['_late_roll'],
                         mode='lines', name='Last Min Goals (10-game avg)', line=dict(color='#FFA15A', width=2)))
                     fig_late.update_layout(title="Late-Game Scoring Trend", xaxis_title="Game #",
@@ -3675,7 +3679,7 @@ elif app_mode == "📈 Season Batch Processor":
                     help=f"{round(_g_tied / max(_g_state_total, 1) * 100, 1)}% of all goals")
 
                 # Game state bar chart
-                fig_gs = go.Figure(data=[go.Bar(
+                fig_gs = themed_figure(data=[go.Bar(
                     x=['Leading', 'Trailing', 'Tied'],
                     y=[_g_lead, _g_trail, _g_tied],
                     marker_color=['#00CC96', '#EF553B', '#636EFA'],
@@ -3751,7 +3755,7 @@ elif app_mode == "📈 Season Batch Processor":
                 if len(hero_df) >= 10:
                     _cb_roll = hero_df['Comeback_Win'].astype(int).rolling(15, min_periods=5).mean() * 100
                     _bl_roll = hero_df['Blown_Lead'].astype(int).rolling(15, min_periods=5).mean() * 100
-                    fig_cb = go.Figure()
+                    fig_cb = themed_figure()
                     fig_cb.add_trace(go.Scatter(x=hero_df['GameNum'], y=_cb_roll,
                         mode='lines', name='Comeback Win %', line=dict(color='#00CC96', width=2)))
                     fig_cb.add_trace(go.Scatter(x=hero_df['GameNum'], y=_bl_roll,
@@ -3802,7 +3806,7 @@ elif app_mode == "📈 Season Batch Processor":
                     c2.metric("Last Minute Saves", late_saves)
                     c3.metric("Clutch Save Rate", f"{round(late_saves / total_saves * 100, 1)}%")
 
-                    fig_sv = go.Figure(data=[go.Pie(
+                    fig_sv = themed_figure(data=[go.Pie(
                         labels=['Regular Saves', 'Last Minute Saves'],
                         values=[early_saves, late_saves],
                         marker_colors=['#636EFA', '#EF553B'],
@@ -3852,7 +3856,7 @@ elif app_mode == "📈 Season Batch Processor":
                 summary_df = pd.DataFrame(session_summary)
                 st.dataframe(summary_df.style.background_gradient(subset=['Win Rate %'], cmap='RdYlGn', vmin=0, vmax=100), use_container_width=True, hide_index=True)
                 # Session performance chart
-                fig_sess = go.Figure()
+                fig_sess = themed_figure(tier="hero")
                 fig_sess.add_trace(go.Bar(x=summary_df['Session'], y=summary_df['Win Rate %'], name='Win Rate %', marker_color='#00cc96'))
                 fig_sess.add_trace(go.Scatter(x=summary_df['Session'], y=summary_df['Avg Rating'], name='Avg Rating', yaxis='y2', line=dict(color='#ff9900', width=3), mode='lines+markers'))
                 fig_sess.update_layout(
@@ -3860,7 +3864,6 @@ elif app_mode == "📈 Season Batch Processor":
                     xaxis=dict(title="Session #", dtick=1),
                     yaxis=dict(title="Win Rate %", range=[0, 100]),
                     yaxis2=dict(title="Avg Rating", overlaying='y', side='right', range=[0, 10]),
-                    plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)', font=dict(color='white'),
                     legend=dict(x=0.01, y=0.99)
                 )
                 st.plotly_chart(fig_sess, use_container_width=True)
@@ -3889,7 +3892,7 @@ elif app_mode == "📈 Season Batch Processor":
                         categories_exp = ['Rating', 'Goals', 'Assists', 'Saves', 'Shots', 'xG']
                         hero_avg_exp = hero_df[categories_exp].mean()
                         comp_fig.add_trace(go.Scatterpolar(r=hero_avg_exp.values.tolist() + [hero_avg_exp.values[0]], theta=categories_exp + [categories_exp[0]], fill='toself', line=dict(color='#007bff'), name=hero, showlegend=False), row=2, col=2)
-                        comp_fig.update_layout(height=800, width=1200, plot_bgcolor='#1e1e1e', paper_bgcolor='#1e1e1e', font=dict(color='white', size=11), title_text=f"{hero} Season Dashboard")
+                        comp_fig.update_layout(height=800, width=1200, title_text=f"{hero} Season Dashboard")
                         img_bytes = comp_fig.to_image(format="png", width=1200, height=800, scale=2)
                         st.image(img_bytes, caption="Season Dashboard", use_container_width=True)
                         st.download_button("Download Season Dashboard PNG", data=img_bytes, file_name="season_dashboard.png", mime="image/png")
