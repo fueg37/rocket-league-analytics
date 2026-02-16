@@ -110,12 +110,12 @@ def _train_model(df: pd.DataFrame, feature_cols: list[str], calibration_method: 
 
 
 def label_unique_count(df: pd.DataFrame | None) -> int:
-    """Return unique count for `is_goal`, or 0 when labels are unavailable."""
+    """Return distinct numeric `is_goal` labels; missing labels return 0."""
     if df is None or df.empty or "is_goal" not in df.columns:
         return 0
 
-    y = pd.to_numeric(df["is_goal"], errors="coerce").fillna(0).astype(int)
-    return int(y.nunique(dropna=True))
+    is_goal = pd.to_numeric(df["is_goal"], errors="coerce")
+    return int(is_goal.nunique(dropna=True))
 
 
 def _bootstrap_training_data(n: int = 1600) -> pd.DataFrame:
