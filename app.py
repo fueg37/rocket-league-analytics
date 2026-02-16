@@ -167,10 +167,8 @@ def save_data(new_stats, new_kickoffs):
     if not new_stats.empty:
         if os.path.exists(DB_FILE):
             existing = migrate_dataframe(pd.read_csv(DB_FILE), "stats")
-            if "MatchID" in existing.columns:
-                existing['MatchID'] = existing['MatchID'].astype(str)
-            if "MatchID" in new_stats.columns:
-                new_stats['MatchID'] = new_stats['MatchID'].astype(str)
+            existing['MatchID'] = existing['MatchID'].astype(str)
+            new_stats['MatchID'] = new_stats['MatchID'].astype(str)
             
             existing_ids = set(existing['MatchID'].unique())
             new_stats = new_stats[~new_stats['MatchID'].isin(existing_ids)]
@@ -183,10 +181,8 @@ def save_data(new_stats, new_kickoffs):
     if not new_kickoffs.empty:
         if os.path.exists(KICKOFF_DB_FILE):
             existing_k = migrate_dataframe(pd.read_csv(KICKOFF_DB_FILE), "kickoff")
-            if "MatchID" in existing_k.columns:
-                existing_k['MatchID'] = existing_k['MatchID'].astype(str)
-            if "MatchID" in new_kickoffs.columns:
-                new_kickoffs['MatchID'] = new_kickoffs['MatchID'].astype(str)
+            existing_k['MatchID'] = existing_k['MatchID'].astype(str)
+            new_kickoffs['MatchID'] = new_kickoffs['MatchID'].astype(str)
             
             existing_ids = set(existing_k['MatchID'].unique())
             new_kickoffs = new_kickoffs[~new_kickoffs['MatchID'].isin(existing_ids)]
@@ -1866,7 +1862,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     shot_df_raw = calculate_shot_data(proto, game_df, pid_team, temp_map)
     schema_tables = build_schema_tables(manager, game_df, proto, match_id="single_match", file_name="session_upload", shot_df=shot_df_raw)
     shot_df = event_table_to_shot_df(schema_tables.event)
-    kickoff_df = calculate_kickoff_stats(game, proto, game_df, temp_map, match_id="single_match")
+    kickoff_df = normalize_kickoff_table(event_table_to_kickoff_df(schema_tables.event, match_id="single_match"))
     momentum_series = calculate_contextual_momentum(game_df, proto)
     pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, schema_tables.event, pass_threshold)
     aerial_df = calculate_aerial_stats(proto, game_df, pid_team, temp_map)
@@ -3433,7 +3429,7 @@ elif app_mode == "📈 Season Batch Processor":
                     wp_train = extract_win_prob_training_data(game_df, proto, pid_team)
                     if not wp_train.empty:
                         wp_training_list.append(wp_train)
-                    kickoff_df = calculate_kickoff_stats(game, proto, game_df, temp_map, match_id=game_id)
+                    kickoff_df = normalize_kickoff_table(event_table_to_kickoff_df(schema_tables.event, match_id=game_id))
                     if not stats.empty and 'IsBot' in stats.columns and filter_ghosts: stats = stats[~stats['IsBot']]
                     if not stats.empty:
                         stats['MatchID'] = str(game_id)
