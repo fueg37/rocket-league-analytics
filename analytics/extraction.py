@@ -5,9 +5,9 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
+from analytics.schema import AnalyticsTables, EventType, SCHEMA_VERSION, normalize_tables
 from constants import REPLAY_FPS
 from utils import build_pid_name_map, build_pid_team_map
-from analytics.schema import AnalyticsTables, SCHEMA_VERSION, normalize_tables
 
 
 def _safe_ball_state(ball_df: pd.DataFrame, frame: int) -> Dict[str, float]:
@@ -61,6 +61,77 @@ def _infer_possessing_player(game_df: pd.DataFrame, proto, frame: int) -> tuple[
     return (best_name, best_team) if best_dist <= 900 else (None, None)
 
 
+def _nearest_defender_distance(game_df: pd.DataFrame, proto, frame: int, shooter_team: str, ball_x: float, ball_y: float) -> float:
+    defenders = [p.name for p in proto.players if ("Orange" if p.is_orange else "Blue") != shooter_team]
+    min_dist = np.nan
+    if frame not in game_df.index:
+        return min_dist
+    for d_name in defenders:
+        if d_name not in game_df:
+            continue
+        d_data = game_df[d_name].loc[frame]
+        dist = float(np.hypot(ball_x - float(d_data.get("pos_x", 0.0)), ball_y - float(d_data.get("pos_y", 0.0))))
+        if np.isnan(min_dist) or dist < min_dist:
+            min_dist = dist
+    return min_dist
+
+
+def _shooter_boost(game_df: pd.DataFrame, player_name: str, frame: int) -> float:
+    if player_name not in game_df or frame not in game_df.index:
+        return np.nan
+    return float(game_df[player_name].loc[frame].get("boost", np.nan))
+
+
+def _shot_angle(ball_x: float, ball_y: float, team: str) -> float:
+    target_y = 5120.0 if team == "Blue" else -5120.0
+    return float(np.arctan2(abs(ball_x), abs(target_y - ball_y)))
+
+
+def _distance_to_goal(ball_x: float, ball_y: float, team: str) -> float:
+    target_y = 5120.0 if team == "Blue" else -5120.0
+    return float(np.hypot(ball_x, target_y - ball_y))
+
+
+def _pressure_context(nearest_defender_distance: float) -> str:
+    if pd.isna(nearest_defender_distance):
+        return "unknown"
+    if nearest_defender_distance <= 500:
+        return "high"
+    if nearest_defender_distance <= 1200:
+        return "medium"
+    return "low"
+
+
+def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType, player_id=None, player_name=None, team=None) -> Dict:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "match_id": str(match_id),
+        "event_id": event_id,
+        "frame": int(frame),
+        "time_seconds": float(frame) / float(REPLAY_FPS),
+        "event_type": str(event_type),
+        "player_id": player_id,
+        "player_name": player_name,
+        "team": team,
+        "x": np.nan,
+        "y": np.nan,
+        "z": np.nan,
+        "metric_value": np.nan,
+        "is_key_play": False,
+        "outcome_type": None,
+        "is_on_target": False,
+        "is_big_chance": False,
+        "speed": np.nan,
+        "pressure_context": "unknown",
+        "nearest_defender_distance": np.nan,
+        "shot_angle": np.nan,
+        "shooter_boost": np.nan,
+        "distance_to_goal": np.nan,
+        "xg": np.nan,
+        "xa": np.nan,
+    }
+
+
 def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, file_name: str, shot_df: pd.DataFrame) -> AnalyticsTables:
     game = manager.game
     ball_df = game_df["ball"] if "ball" in game_df else pd.DataFrame()
@@ -101,48 +172,120 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
     pid_team = build_pid_team_map(proto)
     event_rows: List[Dict] = []
 
-    for idx, hit in enumerate(getattr(proto.game_stats, "hits", [])):
-        if not hit.player_id:
-            continue
+    hits = [hit for hit in getattr(proto.game_stats, "hits", []) if hit.player_id]
+    last_hit_by_team: Dict[str, tuple[str, int, str]] = {}
+    for idx, hit in enumerate(hits):
         frame = int(hit.frame_number)
         state = _safe_ball_state(ball_df, frame)
         pid = str(hit.player_id.id)
-        event_rows.append({
-            "schema_version": SCHEMA_VERSION,
-            "match_id": str(match_id),
-            "event_id": f"touch-{idx}",
-            "frame": frame,
-            "time_seconds": frame / float(REPLAY_FPS),
-            "event_type": "touch",
-            "player_id": pid,
-            "player_name": pid_name.get(pid),
-            "team": pid_team.get(pid),
-            "x": state["ball_x"],
-            "y": state["ball_y"],
-            "z": state["ball_z"],
-            "metric_value": np.nan,
-            "is_key_play": False,
-        })
+        team = pid_team.get(pid)
+        player_name = pid_name.get(pid)
+        speed = float(np.linalg.norm([state["ball_vx"], state["ball_vy"], state["ball_vz"]])) if not np.isnan(state["ball_vx"]) else np.nan
+
+        touch_row = _event_base(match_id, f"touch-{idx}", frame, EventType.TOUCH, pid, player_name, team)
+        touch_row.update({"x": state["ball_x"], "y": state["ball_y"], "z": state["ball_z"], "speed": speed})
+        event_rows.append(touch_row)
+
+        # Pass completion from chained same-team touches.
+        prior = last_hit_by_team.get(team)
+        if prior is not None:
+            prev_pid, prev_frame, prev_name = prior
+            if prev_pid != pid and frame - prev_frame <= int(2.0 * REPLAY_FPS):
+                pass_row = _event_base(match_id, f"pass-{prev_pid}-{pid}-{frame}", frame, EventType.PASS_COMPLETED, pid, player_name, team)
+                pass_row.update({
+                    "x": state["ball_x"],
+                    "y": state["ball_y"],
+                    "z": state["ball_z"],
+                    "xa": np.nan,
+                    "outcome_type": f"{prev_name}->{player_name}",
+                })
+                event_rows.append(pass_row)
+        last_hit_by_team[team] = (pid, frame, player_name)
+
+        # Challenge events from quick opponent exchanges.
+        for opp_team, opp_info in last_hit_by_team.items():
+            if opp_team == team or opp_info is None:
+                continue
+            opp_pid, opp_frame, opp_name = opp_info
+            if frame - opp_frame <= int(1.5 * REPLAY_FPS):
+                win_row = _event_base(match_id, f"challenge-win-{pid}-{frame}", frame, EventType.CHALLENGE_WIN, pid, player_name, team)
+                loss_row = _event_base(match_id, f"challenge-loss-{opp_pid}-{frame}", frame, EventType.CHALLENGE_LOSS, opp_pid, opp_name, opp_team)
+                win_row.update({"x": state["ball_x"], "y": state["ball_y"], "z": state["ball_z"]})
+                loss_row.update({"x": state["ball_x"], "y": state["ball_y"], "z": state["ball_z"]})
+                event_rows.extend([win_row, loss_row])
+                break
+
+        # Clear detection: touch from own defensive third moving out.
+        if team in {"Blue", "Orange"} and not np.isnan(state["ball_y"]):
+            in_def_third = state["ball_y"] < -1700 if team == "Blue" else state["ball_y"] > 1700
+            exiting = state["ball_vy"] > 500 if team == "Blue" else state["ball_vy"] < -500
+            if in_def_third and exiting:
+                clear_row = _event_base(match_id, f"clear-{pid}-{frame}", frame, EventType.CLEAR, pid, player_name, team)
+                clear_row.update({"x": state["ball_x"], "y": state["ball_y"], "z": state["ball_z"], "speed": speed})
+                event_rows.append(clear_row)
 
     if not shot_df.empty:
         for idx, row in shot_df.iterrows():
+            frame = int(row.get("Frame", 0))
+            team = row.get("Team")
+            player = row.get("Player")
+            x = float(row.get("X", np.nan))
+            y = float(row.get("Y", np.nan))
+            z = float(_safe_ball_state(ball_df, frame).get("ball_z", np.nan))
             result = str(row.get("Result", "Shot"))
-            event_rows.append({
-                "schema_version": SCHEMA_VERSION,
-                "match_id": str(match_id),
-                "event_id": f"shot-{idx}",
-                "frame": int(row.get("Frame", 0)),
-                "time_seconds": float(row.get("Frame", 0)) / float(REPLAY_FPS),
-                "event_type": "shot" if result == "Goal" else "save",
-                "player_id": None,
-                "player_name": row.get("Player"),
-                "team": row.get("Team"),
-                "x": float(row.get("X", np.nan)),
-                "y": float(row.get("Y", np.nan)),
-                "z": np.nan,
-                "metric_value": float(row.get("xG", 0.0)),
-                "is_key_play": bool(row.get("BigChance", False)),
+            speed = float(pd.to_numeric(row.get("Speed", np.nan), errors="coerce"))
+            xg = float(pd.to_numeric(row.get("xG", 0.0), errors="coerce"))
+            nearest_defender_distance = _nearest_defender_distance(game_df, proto, frame, team, x, y)
+            shot_angle = _shot_angle(x, y, team) if team in {"Blue", "Orange"} else np.nan
+            shooter_boost = _shooter_boost(game_df, player, frame)
+            distance_to_goal = _distance_to_goal(x, y, team) if team in {"Blue", "Orange"} else np.nan
+            pressure_context = _pressure_context(nearest_defender_distance)
+            is_big_chance = bool(row.get("BigChance", False))
+
+            shot_row = _event_base(match_id, f"shot-taken-{idx}", frame, EventType.SHOT_TAKEN, None, player, team)
+            shot_row.update({
+                "x": x,
+                "y": y,
+                "z": z,
+                "metric_value": xg,
+                "is_key_play": is_big_chance,
+                "outcome_type": result.lower(),
+                "is_on_target": True,
+                "is_big_chance": is_big_chance,
+                "speed": speed,
+                "pressure_context": pressure_context,
+                "nearest_defender_distance": nearest_defender_distance,
+                "shot_angle": shot_angle,
+                "shooter_boost": shooter_boost,
+                "distance_to_goal": distance_to_goal,
+                "xg": xg,
             })
+            event_rows.append(shot_row)
+
+            on_target_row = _event_base(match_id, f"shot-on-target-{idx}", frame, EventType.SHOT_ON_TARGET, None, player, team)
+            on_target_row.update(shot_row)
+            on_target_row["event_id"] = f"shot-on-target-{idx}"
+            on_target_row["event_type"] = str(EventType.SHOT_ON_TARGET)
+            event_rows.append(on_target_row)
+
+            if result == "Goal":
+                goal_row = _event_base(match_id, f"goal-{idx}", frame, EventType.GOAL, None, player, team)
+                goal_row.update(shot_row)
+                goal_row["event_id"] = f"goal-{idx}"
+                goal_row["event_type"] = str(EventType.GOAL)
+                event_rows.append(goal_row)
+            else:
+                save_row = _event_base(match_id, f"save-{idx}", frame, EventType.SAVE, None, player, team)
+                save_row.update(shot_row)
+                save_row["event_id"] = f"save-{idx}"
+                save_row["event_type"] = str(EventType.SAVE)
+                event_rows.append(save_row)
+                if pressure_context == "high":
+                    block_row = _event_base(match_id, f"block-{idx}", frame, EventType.BLOCK, None, player, team)
+                    block_row.update(shot_row)
+                    block_row["event_id"] = f"block-{idx}"
+                    block_row["event_type"] = str(EventType.BLOCK)
+                    event_rows.append(block_row)
 
     for p in proto.players:
         name, pid, team = p.name, str(p.id.id), ("Orange" if p.is_orange else "Blue")
@@ -152,40 +295,18 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
         pickup_frames = boosts.diff().fillna(0)
         for frame in pickup_frames[pickup_frames > 12].index.tolist():
             prow = game_df[name].loc[frame]
-            event_rows.append({
-                "schema_version": SCHEMA_VERSION,
-                "match_id": str(match_id),
-                "event_id": f"boost-{pid}-{int(frame)}",
-                "frame": int(frame),
-                "time_seconds": int(frame) / float(REPLAY_FPS),
-                "event_type": "boost_pickup",
-                "player_id": pid,
-                "player_name": name,
-                "team": team,
+            boost_row = _event_base(match_id, f"boost-{pid}-{int(frame)}", int(frame), EventType.BOOST_PICKUP, pid, name, team)
+            boost_row.update({
                 "x": float(prow.get("pos_x", np.nan)),
                 "y": float(prow.get("pos_y", np.nan)),
                 "z": float(prow.get("pos_z", np.nan)),
-                "metric_value": np.nan,
-                "is_key_play": False,
             })
+            event_rows.append(boost_row)
 
     for idx, frame in enumerate(getattr(game, "kickoff_frames", [])):
-        event_rows.append({
-            "schema_version": SCHEMA_VERSION,
-            "match_id": str(match_id),
-            "event_id": f"kickoff-{idx}",
-            "frame": int(frame),
-            "time_seconds": int(frame) / float(REPLAY_FPS),
-            "event_type": "kickoff",
-            "player_id": None,
-            "player_name": None,
-            "team": None,
-            "x": 0.0,
-            "y": 0.0,
-            "z": 0.0,
-            "metric_value": np.nan,
-            "is_key_play": False,
-        })
+        kickoff_row = _event_base(match_id, f"kickoff-{idx}", int(frame), EventType.KICKOFF)
+        kickoff_row.update({"x": 0.0, "y": 0.0, "z": 0.0})
+        event_rows.append(kickoff_row)
 
     event_df = pd.DataFrame(event_rows)
 
@@ -234,25 +355,51 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
 
 
 def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
-    cols = ["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y", "Speed"]
+    typed_columns = [
+        "Player", "Team", "Frame", "Time", "Result", "OutcomeType", "OnTarget",
+        "xG", "XA", "Speed", "PressureContext", "NearestDefenderDistance", "ShotAngle",
+        "ShooterBoost", "DistanceToGoal", "BigChance", "X", "Y", "Z",
+    ]
     if event_df.empty:
-        return pd.DataFrame(columns=cols)
-    subset = event_df[event_df["event_type"].isin(["shot", "save"])].copy()
+        return pd.DataFrame(columns=typed_columns)
+
+    subset = event_df[event_df["event_type"] == str(EventType.SHOT_TAKEN)].copy()
     if subset.empty:
-        return pd.DataFrame(columns=cols)
-    subset["Result"] = np.where(subset["event_type"] == "shot", "Goal", "Shot")
-    subset["xG"] = pd.to_numeric(subset["metric_value"], errors="coerce").fillna(0.0)
-    subset["BigChance"] = subset["is_key_play"].fillna(False)
-    subset = subset.rename(columns={"player_name": "Player", "team": "Team", "frame": "Frame", "x": "X", "y": "Y"})
-    subset["Speed"] = pd.NA
-    return subset[cols].sort_values("Frame")
+        return pd.DataFrame(columns=typed_columns)
+
+    subset = subset.rename(columns={
+        "player_name": "Player",
+        "team": "Team",
+        "frame": "Frame",
+        "time_seconds": "Time",
+        "outcome_type": "OutcomeType",
+        "is_on_target": "OnTarget",
+        "xg": "xG",
+        "xa": "XA",
+        "speed": "Speed",
+        "pressure_context": "PressureContext",
+        "nearest_defender_distance": "NearestDefenderDistance",
+        "shot_angle": "ShotAngle",
+        "shooter_boost": "ShooterBoost",
+        "distance_to_goal": "DistanceToGoal",
+        "is_big_chance": "BigChance",
+        "x": "X",
+        "y": "Y",
+        "z": "Z",
+    })
+    subset["Result"] = np.where(subset["OutcomeType"].str.lower() == "goal", "Goal", "Shot")
+
+    for col in typed_columns:
+        if col not in subset.columns:
+            subset[col] = pd.NA
+    return subset[typed_columns].sort_values("Frame")
 
 
 def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.DataFrame:
     cols = ["MatchID", "Frame", "Player", "Team", "BoostUsed", "Result", "Goal (5s)", "End_X", "End_Y"]
     if event_df.empty:
         return pd.DataFrame(columns=cols)
-    kickoff = event_df[event_df["event_type"] == "kickoff"].copy()
+    kickoff = event_df[event_df["event_type"] == str(EventType.KICKOFF)].copy()
     if kickoff.empty:
         return pd.DataFrame(columns=cols)
     kickoff = kickoff.rename(columns={"frame": "Frame"})
