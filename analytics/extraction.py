@@ -115,6 +115,8 @@ def _resolve_save_defender(
 
     save_window_end = frame + int(2.0 * REPLAY_FPS)
     flagged_candidates: list[tuple[int, str, str, str]] = []
+    # Invariant: `hits` is pre-sorted by `frame_number` ascending in
+    # `build_schema_tables`, so we can stop scanning once we leave the window.
     for hit in hits:
         if not getattr(hit, "player_id", None):
             continue
@@ -439,7 +441,12 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
     pid_team = build_pid_team_map(proto)
     event_rows: List[Dict] = []
 
-    hits = [hit for hit in getattr(proto.game_stats, "hits", []) if hit.player_id]
+    # Invariant: all downstream hit consumers rely on chronological ordering;
+    # normalize once here to keep time-window scans deterministic and efficient.
+    hits = sorted(
+        [hit for hit in getattr(proto.game_stats, "hits", []) if hit.player_id],
+        key=lambda hit: int(getattr(hit, "frame_number", 0)),
+    )
     last_hit_by_team: Dict[str, tuple[str, int, str]] = {}
     for idx, hit in enumerate(hits):
         frame = int(hit.frame_number)
