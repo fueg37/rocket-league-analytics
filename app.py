@@ -1598,10 +1598,10 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
     if event_df is not None and not event_df.empty:
         save_events = _events_of_type(event_df, EventType.SAVE)
         for team in ('Blue', 'Orange'):
-            team_saves = save_events[save_events['team'] != team]
-            total_team_saved = len(team_saves)
-            late_team_saved = len(team_saves[team_saves['frame'] >= last_min_frame])
-            ratio = (late_team_saved / total_team_saved) if total_team_saved else 0
+            team_saves = save_events[save_events['team'] == team]
+            total_team_saves = len(team_saves)
+            late_team_saves = len(team_saves[team_saves['frame'] >= last_min_frame])
+            ratio = (late_team_saves / total_team_saves) if total_team_saves else 0
             for p in proto.players:
                 if player_team[p.name] == team:
                     saves_last_min[p.name] = min(int(round(p.saves * ratio)), p.saves)

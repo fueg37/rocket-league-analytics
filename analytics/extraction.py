@@ -101,6 +101,84 @@ def _distance_to_goal(ball_x: float, ball_y: float, team: str) -> float:
     return float(np.hypot(ball_x, target_y - ball_y))
 
 
+def _resolve_save_defender(
+    game_df: pd.DataFrame,
+    proto,
+    hits: list,
+    pid_name: dict[str, str],
+    pid_team: dict[str, str],
+    frame: int,
+    attacker_team: str,
+) -> tuple[int, str, str, str] | None:
+    if attacker_team not in {"Blue", "Orange"}:
+        return None
+
+    save_window_end = frame + int(2.0 * REPLAY_FPS)
+    flagged_candidates: list[tuple[int, str, str, str]] = []
+    for hit in hits:
+        if not getattr(hit, "player_id", None):
+            continue
+        hit_frame = int(getattr(hit, "frame_number", 0))
+        if hit_frame < frame:
+            continue
+        if hit_frame > save_window_end:
+            break
+
+        pid = str(hit.player_id.id)
+        team = pid_team.get(pid)
+        if team == attacker_team or team not in {"Blue", "Orange"}:
+            continue
+        if bool(getattr(hit, "is_save", False)):
+            flagged_candidates.append((hit_frame, pid, pid_name.get(pid), team))
+
+    if flagged_candidates:
+        flagged_candidates.sort(key=lambda candidate: candidate[0])
+        earliest_frame = flagged_candidates[0][0]
+        earliest = [candidate for candidate in flagged_candidates if candidate[0] == earliest_frame]
+        if len(earliest) == 1:
+            return earliest[0]
+        return None
+
+    if "ball" not in game_df or frame not in game_df.index:
+        return None
+
+    ball_row = game_df["ball"].loc[frame]
+    ball_x = float(ball_row.get("pos_x", np.nan))
+    ball_y = float(ball_row.get("pos_y", np.nan))
+    if np.isnan(ball_x) or np.isnan(ball_y):
+        return None
+
+    name_pid = {name: pid for pid, name in pid_name.items() if name}
+    defenders: list[tuple[float, str, str, str]] = []
+    for player in proto.players:
+        defender_name = player.name
+        defender_team = "Orange" if player.is_orange else "Blue"
+        if defender_team == attacker_team:
+            continue
+        if defender_name not in game_df or frame not in game_df.index:
+            continue
+
+        player_row = game_df[defender_name].loc[frame]
+        px = float(player_row.get("pos_x", np.nan))
+        py = float(player_row.get("pos_y", np.nan))
+        if np.isnan(px) or np.isnan(py):
+            continue
+
+        dist = float(np.hypot(ball_x - px, ball_y - py))
+        defenders.append((dist, name_pid.get(defender_name), defender_name, defender_team))
+
+    if not defenders:
+        return None
+
+    defenders.sort(key=lambda d: d[0])
+    best_dist, best_pid, best_name, best_team = defenders[0]
+    if np.isnan(best_dist) or best_dist > 1200.0:
+        return None
+    if len(defenders) > 1 and np.isclose(defenders[1][0], best_dist, atol=1e-6):
+        return None
+    return frame, best_pid, best_name, best_team
+
+
 def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType, player_id=None, player_name=None, team=None) -> Dict:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -458,11 +536,28 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                 goal_row["event_type"] = EventType.GOAL.value
                 event_rows.append(goal_row)
             else:
-                save_row = _event_base(match_id, f"save-{idx}", frame, EventType.SAVE, None, player, team)
-                save_row.update(shot_row)
-                save_row["event_id"] = f"save-{idx}"
-                save_row["event_type"] = EventType.SAVE.value
-                event_rows.append(save_row)
+                save_defender = _resolve_save_defender(
+                    game_df=game_df,
+                    proto=proto,
+                    hits=hits,
+                    pid_name=pid_name,
+                    pid_team=pid_team,
+                    frame=frame,
+                    attacker_team=team,
+                )
+                if save_defender is not None:
+                    _, save_pid, save_name, save_team = save_defender
+                    save_row = _event_base(match_id, f"save-{idx}", frame, EventType.SAVE, save_pid, save_name, save_team)
+                    save_row.update({
+                        "x": x,
+                        "y": y,
+                        "z": z,
+                        "event_id": f"save-{idx}",
+                        "event_type": EventType.SAVE.value,
+                        "is_on_target": True,
+                        "outcome_type": result.lower(),
+                    })
+                    event_rows.append(save_row)
                 if pressure_context == "high":
                     block_row = _event_base(match_id, f"block-{idx}", frame, EventType.BLOCK, None, player, team)
                     block_row.update(shot_row)
