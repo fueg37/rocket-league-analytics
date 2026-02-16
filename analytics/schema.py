@@ -1,11 +1,70 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Iterable, Mapping
 
 import pandas as pd
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+
+
+class EventType(str, Enum):
+    SHOT_TAKEN = "shot_taken"
+    SHOT_ON_TARGET = "shot_on_target"
+    GOAL = "goal"
+    SAVE = "save"
+    BLOCK = "block"
+    CLEAR = "clear"
+    CHALLENGE_WIN = "challenge_win"
+    CHALLENGE_LOSS = "challenge_loss"
+    PASS_COMPLETED = "pass_completed"
+    TOUCH = "touch"
+    BOOST_PICKUP = "boost_pickup"
+    KICKOFF = "kickoff"
+
+
+SHOT_LIFECYCLE_EVENT_TYPES = frozenset({
+    EventType.SHOT_TAKEN,
+    EventType.SHOT_ON_TARGET,
+    EventType.GOAL,
+    EventType.SAVE,
+    EventType.BLOCK,
+    EventType.CLEAR,
+    EventType.CHALLENGE_WIN,
+    EventType.CHALLENGE_LOSS,
+    EventType.PASS_COMPLETED,
+})
+
+
+EVENT_TYPE_ALIASES = {
+    "EventType.SHOT_TAKEN": EventType.SHOT_TAKEN.value,
+    "EventType.SHOT_ON_TARGET": EventType.SHOT_ON_TARGET.value,
+    "EventType.GOAL": EventType.GOAL.value,
+    "EventType.SAVE": EventType.SAVE.value,
+    "EventType.BLOCK": EventType.BLOCK.value,
+    "EventType.CLEAR": EventType.CLEAR.value,
+    "EventType.CHALLENGE_WIN": EventType.CHALLENGE_WIN.value,
+    "EventType.CHALLENGE_LOSS": EventType.CHALLENGE_LOSS.value,
+    "EventType.PASS_COMPLETED": EventType.PASS_COMPLETED.value,
+    "EventType.TOUCH": EventType.TOUCH.value,
+    "EventType.BOOST_PICKUP": EventType.BOOST_PICKUP.value,
+    "EventType.KICKOFF": EventType.KICKOFF.value,
+}
+
+
+def canonicalize_event_type(value: object) -> object:
+    if pd.isna(value):
+        return value
+    string_value = str(value)
+    return EVENT_TYPE_ALIASES.get(string_value, string_value)
+
+
+def canonicalize_event_types(df: pd.DataFrame, column: str = "event_type") -> pd.DataFrame:
+    out = df.copy()
+    if column in out.columns:
+        out[column] = out[column].map(canonicalize_event_type)
+    return out
 
 
 @dataclass(frozen=True)
@@ -68,6 +127,17 @@ EVENT_CONTRACT = TableContract(
         "z": "float64",
         "metric_value": "float64",
         "is_key_play": "bool",
+        "outcome_type": "string",
+        "is_on_target": "bool",
+        "is_big_chance": "bool",
+        "speed": "float64",
+        "pressure_context": "string",
+        "nearest_defender_distance": "float64",
+        "shot_angle": "float64",
+        "shooter_boost": "float64",
+        "distance_to_goal": "float64",
+        "xg": "float64",
+        "xa": "float64",
     },
 )
 

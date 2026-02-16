@@ -22,7 +22,7 @@ from utils import (
     get_team_players, build_player_positions,
     frame_to_seconds, seconds_to_frame, fmt_time,
 )
-from analytics.schema import SCHEMA_VERSION
+from analytics.schema import SCHEMA_VERSION, canonicalize_event_types
 from analytics.extraction import build_schema_tables, event_table_to_shot_df, event_table_to_kickoff_df
 from analytics.migrations import migrate_dataframe
 
@@ -895,56 +895,53 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         return final_df
     return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y", "Speed"])
 
-def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, max_time_diff=2.0):
-    hits = proto.game_stats.hits
-    pass_events = []
-    last_hitter_id = None
-    last_hit_time = -999
-    last_hit_frame = 0
+def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, event_df=None, max_time_diff=2.0):
+    """Build pass table from canonical pass events with shot-linked key pass attribution."""
+    if event_df is not None and not event_df.empty:
+        event_df = canonicalize_event_types(event_df)
+    cols = ['Sender', 'Receiver', 'Team', 'xA', 'KeyPass', 'x1', 'y1', 'x2', 'y2']
+    if event_df is None or event_df.empty:
+        return pd.DataFrame(columns=cols)
+
+    pass_events = event_df[event_df['event_type'] == 'pass_completed'].copy()
+    if pass_events.empty:
+        return pd.DataFrame(columns=cols)
+
     shot_frames_by_team = {}
-    if not shot_df.empty:
-        for team_name in shot_df['Team'].unique():
-            shot_frames_by_team[team_name] = set(shot_df[shot_df['Team'] == team_name]['Frame'].tolist())
-    
-    for hit in hits:
-        if not hit.player_id: continue
-        curr_id = str(hit.player_id.id)
-        curr_time = hit.frame_number / float(REPLAY_FPS)
-        curr_frame = hit.frame_number
-        if last_hitter_id is not None and curr_id != last_hitter_id:
-            if pid_team.get(curr_id) == pid_team.get(last_hitter_id):
-                if (curr_time - last_hit_time) < max_time_diff:
-                    sender = player_map.get(last_hitter_id, "Unknown")
-                    receiver = player_map.get(curr_id, "Unknown")
-                    team = pid_team.get(curr_id, "Unknown")
-                    xa_val = 0.0
-                    try:
-                        if curr_frame in game_df.index:
-                            b_data = game_df['ball'].loc[curr_frame]
-                            target_y = 5120 if team == "Blue" else -5120
-                            xa_val = calculate_xg_probability(b_data['pos_x'], b_data['pos_y'], b_data['pos_z'], b_data['vel_x'], b_data['vel_y'], b_data['vel_z'], target_y)
-                    except (KeyError, IndexError):
-                        pass
-                    is_key_pass = False
-                    team_shots = shot_frames_by_team.get(team, set())
-                    for sf in team_shots:
-                        if curr_frame <= sf <= curr_frame + 90:
-                            is_key_pass = True
-                            break
-                    try:
-                        if last_hit_frame in game_df.index and curr_frame in game_df.index:
-                            s_pos = game_df[sender].loc[last_hit_frame]
-                            r_pos = game_df[receiver].loc[curr_frame]
-                            pass_events.append({
-                                'Sender': sender, 'Receiver': receiver, 'Team': team, 'xA': xa_val, 'KeyPass': is_key_pass,
-                                'x1': s_pos['pos_x'], 'y1': s_pos['pos_y'], 'x2': r_pos['pos_x'], 'y2': r_pos['pos_y']
-                            })
-                    except (KeyError, IndexError):
-                        pass
-        last_hitter_id = curr_id
-        last_hit_time = curr_time
-        last_hit_frame = curr_frame
-    return pd.DataFrame(pass_events)
+    if shot_df is not None and not shot_df.empty:
+        for team_name in shot_df['Team'].dropna().unique():
+            shot_frames_by_team[team_name] = set(pd.to_numeric(shot_df[shot_df['Team'] == team_name]['Frame'], errors='coerce').dropna().astype(int).tolist())
+
+    rows = []
+    for _, event in pass_events.iterrows():
+        frame = int(event.get('frame', 0))
+        team = event.get('team', 'Unknown')
+        sender, receiver = None, event.get('player_name', 'Unknown')
+        outcome = str(event.get('outcome_type', ''))
+        if '->' in outcome:
+            sender, receiver = outcome.split('->', 1)
+        sender = sender or 'Unknown'
+        receiver = receiver or 'Unknown'
+
+        team_shots = shot_frames_by_team.get(team, set())
+        is_key_pass = any(frame <= sf <= frame + 90 for sf in team_shots)
+
+        if sender in game_df and receiver in game_df and frame in game_df.index:
+            s_pos = game_df[sender].loc[frame]
+            r_pos = game_df[receiver].loc[frame]
+            xa_val = pd.to_numeric(event.get('xa', np.nan), errors='coerce')
+            rows.append({
+                'Sender': sender,
+                'Receiver': receiver,
+                'Team': team,
+                'xA': float(xa_val) if not pd.isna(xa_val) else 0.0,
+                'KeyPass': bool(is_key_pass),
+                'x1': float(s_pos.get('pos_x', np.nan)),
+                'y1': float(s_pos.get('pos_y', np.nan)),
+                'x2': float(r_pos.get('pos_x', np.nan)),
+                'y2': float(r_pos.get('pos_y', np.nan)),
+            })
+    return pd.DataFrame(rows, columns=cols)
 
 # --- 9b. MATH: AERIAL STATS ---
 def calculate_aerial_stats(proto, game_df, pid_team, player_map):
@@ -1133,64 +1130,60 @@ def calculate_defensive_pressure(game_df, proto):
     return pd.DataFrame(results)
 
 # --- 9e. MATH: SHOT QUALITY CONCEDED (xG-Against) ---
-def calculate_xg_against(proto, game_df, player_map, shot_df):
-    """For each shot, find the closest defender and assign xG-against to them."""
-    if shot_df.empty:
+def calculate_xg_against(proto, game_df, player_map, shot_df, event_df=None):
+    """Assign conceded xG from canonical shot events to nearest defender."""
+    if event_df is not None and not event_df.empty:
+        event_df = canonicalize_event_types(event_df)
+    if event_df is not None and not event_df.empty:
+        shots = event_df[event_df['event_type'] == 'shot_taken'].copy()
+    else:
+        shots = pd.DataFrame()
+    if shots.empty and shot_df is not None and not shot_df.empty:
+        shots = shot_df.rename(columns={'Frame': 'frame', 'Team': 'team', 'xG': 'xg', 'X': 'x', 'Y': 'y', 'Result': 'outcome_type'})
+    if shots.empty:
         return pd.DataFrame()
+
     orange_players = [p.name for p in proto.players if p.is_orange]
     blue_players = [p.name for p in proto.players if not p.is_orange]
+    xga_per_player = {p.name: [] for p in proto.players}
 
-    xga_per_player = {}  # name -> list of xG values conceded
-    for p in proto.players:
-        xga_per_player[p.name] = []
-
-    for _, shot in shot_df.iterrows():
-        frame = int(shot['Frame'])
-        shooter_team = shot['Team']
-        xg = shot['xG']
-        # Defenders are the opposing team
-        defenders = blue_players if shooter_team == "Orange" else orange_players
-
-        if frame not in game_df.index:
+    for _, shot in shots.iterrows():
+        frame = int(pd.to_numeric(shot.get('frame', 0), errors='coerce') or 0)
+        shooter_team = shot.get('team')
+        xg = float(pd.to_numeric(shot.get('xg', 0.0), errors='coerce'))
+        ball_x = float(pd.to_numeric(shot.get('x', np.nan), errors='coerce'))
+        ball_y = float(pd.to_numeric(shot.get('y', np.nan), errors='coerce'))
+        defenders = blue_players if shooter_team == 'Orange' else orange_players
+        if frame not in game_df.index or pd.isna(ball_x) or pd.isna(ball_y):
             continue
 
-        # Find closest defender to ball at shot frame
-        closest_defender = None
-        min_dist = 99999
-        try:
-            ball_x, ball_y = shot['X'], shot['Y']
-            for d_name in defenders:
-                if d_name in game_df:
-                    d_data = game_df[d_name].loc[frame]
-                    dist = np.sqrt((ball_x - d_data['pos_x'])**2 + (ball_y - d_data['pos_y'])**2)
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_defender = d_name
-        except (KeyError, IndexError):
-            continue
-
+        closest_defender, min_dist = None, np.inf
+        for d_name in defenders:
+            if d_name not in game_df:
+                continue
+            d_data = game_df[d_name].loc[frame]
+            dist = float(np.hypot(ball_x - d_data['pos_x'], ball_y - d_data['pos_y']))
+            if dist < min_dist:
+                min_dist = dist
+                closest_defender = d_name
         if closest_defender:
-            xga_per_player[closest_defender].append({
-                'xG': xg, 'result': shot['Result'], 'dist': round(min_dist),
-                'frame': frame
-            })
+            xga_per_player[closest_defender].append({'xG': xg, 'result': str(shot.get('outcome_type', 'shot')).title(), 'dist': round(min_dist)})
 
-    results = []
+    rows = []
     for p in proto.players:
-        name = p.name
-        team = "Orange" if p.is_orange else "Blue"
-        events = xga_per_player.get(name, [])
+        team = 'Orange' if p.is_orange else 'Blue'
+        events = xga_per_player.get(p.name, [])
         xg_vals = [e['xG'] for e in events]
-        goals_conceded = sum(1 for e in events if e['result'] == 'Goal')
-        results.append({
-            'Name': name, 'Team': team,
+        rows.append({
+            'Name': p.name,
+            'Team': team,
             'Shots Faced': len(events),
             'xGA': round(sum(xg_vals), 2),
-            'Goals Conceded (nearest)': goals_conceded,
+            'Goals Conceded (nearest)': sum(1 for e in events if e['result'] == 'Goal'),
             'Avg Dist to Shot': int(np.mean([e['dist'] for e in events])) if events else 0,
             'High xG Faced': sum(1 for e in events if e['xG'] > 0.3),
         })
-    return pd.DataFrame(results)
+    return pd.DataFrame(rows)
 
 # --- 9f. MATH: VAEP (Valuing Actions by Estimating Probabilities) ---
 def estimate_scoring_threat(ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz, team, nearest_own_dist, nearest_opp_dist):
@@ -1207,83 +1200,60 @@ def estimate_scoring_threat(ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz, t
     threat = (positional_threat * 0.5 + possession_factor * 0.3 + vel_bonus + proximity_bonus) * height_factor
     return max(0.0, min(threat, 0.99))
 
-def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
-    """Calculate VAEP for each touch. Returns (vaep_df, vaep_summary)."""
-    max_frame = game_df.index.max()
-
-    ball_df = game_df['ball'] if 'ball' in game_df else None
-    if ball_df is None:
+def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df, event_df=None):
+    """Calculate VAEP from canonical touch/challenge/pass/shot events."""
+    if event_df is not None and not event_df.empty:
+        event_df = canonicalize_event_types(event_df)
+    if event_df is None or event_df.empty:
+        return pd.DataFrame(), pd.DataFrame()
+    action_events = event_df[event_df['event_type'].isin(['touch', 'pass_completed', 'shot_taken', 'challenge_win', 'challenge_loss', 'clear'])].copy()
+    if action_events.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Pre-compute arrays for fast lookup
-    ball_frames = ball_df.index.values
-    ball_x = ball_df['pos_x'].values
-    ball_y = ball_df['pos_y'].values
-    ball_z = ball_df['pos_z'].values if 'pos_z' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vx = ball_df['vel_x'].values if 'vel_x' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vy = ball_df['vel_y'].values if 'vel_y' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vz = ball_df['vel_z'].values if 'vel_z' in ball_df.columns else np.zeros(len(ball_df))
+    rows = []
+    for _, ev in action_events.sort_values('frame').iterrows():
+        event_type = ev['event_type']
+        base = 0.0
+        if event_type == 'shot_taken':
+            base = float(pd.to_numeric(ev.get('xg', 0.0), errors='coerce'))
+        elif event_type == 'pass_completed':
+            base = 0.05
+        elif event_type == 'challenge_win':
+            base = 0.03
+        elif event_type == 'challenge_loss':
+            base = -0.03
+        elif event_type == 'clear':
+            base = 0.02
+        elif event_type == 'touch':
+            base = 0.01
 
-    def _ball_at(frame):
-        bi = min(np.searchsorted(ball_frames, frame), len(ball_x) - 1)
-        if bi < 0:
-            return None
-        return ball_x[bi], ball_y[bi], ball_z[bi], ball_vx[bi], ball_vy[bi], ball_vz[bi]
+        pressure = str(ev.get('pressure_context', 'unknown'))
+        pressure_mult = {'high': 1.2, 'medium': 1.0, 'low': 0.9, 'unknown': 1.0}.get(pressure, 1.0)
+        rows.append({
+            'Player': ev.get('player_name', 'Unknown'),
+            'Name': ev.get('player_name', 'Unknown'),
+            'Team': ev.get('team', 'Unknown'),
+            'Frame': int(ev.get('frame', 0)),
+            'Time': round(float(ev.get('time_seconds', 0.0)), 1),
+            'Action': event_type,
+            'VAEP': round(base * pressure_mult, 4),
+            'BallX': float(pd.to_numeric(ev.get('x', np.nan), errors='coerce')),
+            'BallY': float(pd.to_numeric(ev.get('y', np.nan), errors='coerce')),
+        })
 
-    def _nearest_dists(frame, team):
-        bs = _ball_at(frame)
-        if bs is None:
-            return 5000.0, 5000.0
-        bx, by = bs[0], bs[1]
-        own_min, opp_min = 10000.0, 10000.0
-        for pname, pd_info in player_pos.items():
-            pi = min(np.searchsorted(pd_info['frames'], frame), len(pd_info['x']) - 1)
-            if pi < 0:
-                continue
-            dist = np.sqrt((pd_info['x'][pi] - bx)**2 + (pd_info['y'][pi] - by)**2)
-            if pd_info['team'] == team:
-                own_min = min(own_min, dist)
-            else:
-                opp_min = min(opp_min, dist)
-        return own_min, opp_min
-
-    touches = []
-    for hit in proto.game_stats.hits:
-        if not hit.player_id:
-            continue
-        pid = str(hit.player_id.id)
-        team = pid_team.get(pid)
-        name = pid_name.get(pid)
-        if not team or not name:
-            continue
-        frame = hit.frame_number
-        f_before = max(0, frame - 1)
-        f_after = min(max_frame, frame + 5)
-        sb = _ball_at(f_before)
-        sa = _ball_at(f_after)
-        if sb is None or sa is None:
-            continue
-        own_b, opp_b = _nearest_dists(f_before, team)
-        own_a, opp_a = _nearest_dists(f_after, team)
-        threat_before = estimate_scoring_threat(sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], team, own_b, opp_b)
-        threat_after = estimate_scoring_threat(sa[0], sa[1], sa[2], sa[3], sa[4], sa[5], team, own_a, opp_a)
-        vaep = round(threat_after - threat_before, 4)
-        touches.append({'Player': name, 'Team': team, 'Frame': frame,
-                        'Time': round(frame / REPLAY_FPS, 1), 'VAEP': vaep,
-                        'BallX': sa[0], 'BallY': sa[1]})
-
-    vaep_df = pd.DataFrame(touches)
+    vaep_df = pd.DataFrame(rows)
     summary = []
     for p in proto.players:
         name = p.name
-        team = "Orange" if p.is_orange else "Blue"
-        pt = vaep_df[vaep_df['Player'] == name] if not vaep_df.empty else pd.DataFrame()
+        team = 'Orange' if p.is_orange else 'Blue'
+        pt = vaep_df[vaep_df['Name'] == name] if not vaep_df.empty else pd.DataFrame()
         summary.append({
-            'Name': name, 'Team': team,
+            'Name': name,
+            'Team': team,
             'Total_VAEP': round(pt['VAEP'].sum(), 3) if not pt.empty else 0,
             'Avg_VAEP': round(pt['VAEP'].mean(), 4) if not pt.empty else 0,
             'Positive_Actions': int((pt['VAEP'] > 0).sum()) if not pt.empty else 0,
-            'Negative_Actions': int((pt['VAEP'] < 0).sum()) if not pt.empty else 0
+            'Negative_Actions': int((pt['VAEP'] < 0).sum()) if not pt.empty else 0,
         })
     return vaep_df, pd.DataFrame(summary)
 
@@ -1390,21 +1360,25 @@ def calculate_rotation_analysis(game_df, proto, player_pos, sample_step=5):
     return rotation_timeline, rotation_summary, double_commits_df
 
 # --- 9h. MATH: SITUATIONAL STATS ---
-def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team, shot_df=None):
-    """Calculate game-state-dependent stats: goals by period, game state, clutch moments."""
+def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team, shot_df=None, event_df=None):
+    """Calculate game-state-dependent stats from canonical goal/save events."""
+    if event_df is not None and not event_df.empty:
+        event_df = canonicalize_event_types(event_df)
     max_frame = game_df.index.max()
     match_duration = max_frame / float(REPLAY_FPS)
     half_frame = int(min(150, match_duration / 2) * REPLAY_FPS)
     last_min_frame = max(0, int((min(match_duration, 300) - 60) * REPLAY_FPS))
 
     goals = []
-    if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
+    if event_df is not None and not event_df.empty:
+        goal_events = event_df[event_df['event_type'] == 'goal'].sort_values('frame')
+        for _, g in goal_events.iterrows():
+            goals.append((int(g['frame']), g.get('team', 'Blue'), g.get('player_name', '')))
+    if not goals and hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
-            pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-            team = pid_team.get(pid, "Blue")
-            scorer = pid_name.get(pid, "")
-            goals.append((frame, team, scorer))
+            pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ''
+            goals.append((frame, pid_team.get(pid, 'Blue'), pid_name.get(pid, '')))
     goals.sort()
 
     per_player = {p.name: {'Goals_First_Half': 0, 'Goals_Second_Half': 0, 'Goals_Last_Min': 0,
@@ -1413,7 +1387,6 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
     blue_score, orange_score = 0, 0
     first_scorer_team = None
     blue_ever_led, orange_ever_led = False, False
-
     for frame, scoring_team, scorer in goals:
         if blue_score > orange_score:
             state_blue, state_orange = 'Leading', 'Trailing'
@@ -1424,10 +1397,9 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
 
         if first_scorer_team is None:
             first_scorer_team = scoring_team
-
         if scorer in per_player:
             team = player_team[scorer]
-            state = state_blue if team == "Blue" else state_orange
+            state = state_blue if team == 'Blue' else state_orange
             per_player[scorer][f'Goals_When_{state}'] += 1
             if frame <= half_frame:
                 per_player[scorer]['Goals_First_Half'] += 1
@@ -1436,43 +1408,37 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
             if frame >= last_min_frame:
                 per_player[scorer]['Goals_Last_Min'] += 1
 
-        if scoring_team == "Blue":
+        if scoring_team == 'Blue':
             blue_score += 1
         else:
             orange_score += 1
-        if blue_score > orange_score:
-            blue_ever_led = True
-        if orange_score > blue_score:
-            orange_ever_led = True
+        blue_ever_led = blue_ever_led or (blue_score > orange_score)
+        orange_ever_led = orange_ever_led or (orange_score > blue_score)
 
     blue_won = blue_score > orange_score
     orange_won = orange_score > blue_score
 
-    # Estimate last-minute saves per player using late-shot ratio
-    # For each team: fraction of saved shots in last minute → scale each player's saves
     saves_last_min = {p.name: 0 for p in proto.players}
-    if shot_df is not None and not shot_df.empty:
-        saved = shot_df[shot_df['Result'] == 'Shot']
-        for team in ("Blue", "Orange"):
-            opp = "Orange" if team == "Blue" else "Blue"
-            team_saved = saved[saved['Team'] == opp]  # shots BY opponent that were saved
-            total_team_saved = len(team_saved)
-            late_team_saved = len(team_saved[team_saved['Frame'] >= last_min_frame])
-            if total_team_saved > 0:
-                late_ratio = late_team_saved / total_team_saved
-                for p in proto.players:
-                    if player_team[p.name] == team:
-                        saves_last_min[p.name] = min(int(round(p.saves * late_ratio)), p.saves)
+    if event_df is not None and not event_df.empty:
+        save_events = event_df[event_df['event_type'] == 'save']
+        for team in ('Blue', 'Orange'):
+            team_saves = save_events[save_events['team'] != team]
+            total_team_saved = len(team_saves)
+            late_team_saved = len(team_saves[team_saves['frame'] >= last_min_frame])
+            ratio = (late_team_saved / total_team_saved) if total_team_saved else 0
+            for p in proto.players:
+                if player_team[p.name] == team:
+                    saves_last_min[p.name] = min(int(round(p.saves * ratio)), p.saves)
 
     results = []
     for p in proto.players:
         name = p.name
-        team = "Orange" if p.is_orange else "Blue"
+        team = 'Orange' if p.is_orange else 'Blue'
         s = per_player.get(name, {})
-        team_won = (team == "Blue" and blue_won) or (team == "Orange" and orange_won)
+        team_won = (team == 'Blue' and blue_won) or (team == 'Orange' and orange_won)
         team_scored_first = (first_scorer_team == team) if first_scorer_team else False
-        opp_ever_led = orange_ever_led if team == "Blue" else blue_ever_led
-        team_ever_led = blue_ever_led if team == "Blue" else orange_ever_led
+        opp_ever_led = orange_ever_led if team == 'Blue' else blue_ever_led
+        team_ever_led = blue_ever_led if team == 'Blue' else orange_ever_led
         results.append({
             'Name': name, 'Team': team,
             'Goals_First_Half': s.get('Goals_First_Half', 0),
@@ -1507,42 +1473,44 @@ def calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z,
     xs = speed_factor + reaction_factor + angle_factor + height_factor + saver_factor
     return max(0.01, min(xs, 0.99))
 
-def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
-    """Calculate xS for each saved shot. Returns (xs_events_df, xs_summary_df).
-    For each non-goal shot, finds the nearest defender and scores the save difficulty."""
-    if shot_df.empty:
+def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df, event_df=None):
+    """Calculate xS for non-goal canonical shot events."""
+    if event_df is not None and not event_df.empty:
+        event_df = canonicalize_event_types(event_df)
+    if event_df is not None and not event_df.empty:
+        shot_events = event_df[event_df['event_type'] == 'shot_taken'].copy()
+    else:
+        shot_events = pd.DataFrame()
+    if shot_events.empty and shot_df is not None and not shot_df.empty:
+        shot_events = shot_df.rename(columns={'Frame': 'frame', 'Team': 'team', 'Result': 'outcome_type', 'Speed': 'speed', 'X': 'x', 'Y': 'y', 'Z': 'z', 'Player': 'player_name'})
+    if shot_events.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    saved_shots = shot_df[shot_df['Result'] == 'Shot'].copy()
+    saved_shots = shot_events[shot_events['outcome_type'].astype(str).str.lower() != 'goal'].copy()
     if saved_shots.empty:
         return pd.DataFrame(), pd.DataFrame()
 
     events = []
     for _, shot in saved_shots.iterrows():
-        frame = shot['Frame']
-        shot_team = shot['Team']
-        defending_team = "Orange" if shot_team == "Blue" else "Blue"
-        target_y = 5120.0 if shot_team == "Blue" else -5120.0
+        frame = int(pd.to_numeric(shot.get('frame', 0), errors='coerce') or 0)
+        shot_team = shot.get('team')
+        defending_team = 'Orange' if shot_team == 'Blue' else 'Blue'
+        target_y = 5120.0 if shot_team == 'Blue' else -5120.0
 
-        # Shot properties — shot_df may not always include speed after schema conversion.
-        # Rehydrate from ball velocity when absent so xS remains stable across data sources.
-        shot_speed = pd.to_numeric(shot.get('Speed', np.nan), errors='coerce')
-        dist_to_goal = np.sqrt(shot['X']**2 + (target_y - shot['Y'])**2)
-        angle_off_center = np.arctan2(abs(shot['X']), abs(target_y - shot['Y']))
-        # Get ball Z and optional speed fallback from game_df
-        shot_z = 0
-        if 'ball' in game_df and frame in game_df.index:
-            try:
-                ball_state = game_df['ball'].loc[frame]
-                shot_z = max(ball_state['pos_z'], 0)
-                if pd.isna(shot_speed):
-                    shot_speed = np.sqrt(ball_state['vel_x']**2 + ball_state['vel_y']**2 + ball_state['vel_z']**2)
-            except (KeyError, IndexError):
-                pass
+        shot_speed = pd.to_numeric(shot.get('speed', np.nan), errors='coerce')
+        shot_x = float(pd.to_numeric(shot.get('x', np.nan), errors='coerce'))
+        shot_y = float(pd.to_numeric(shot.get('y', np.nan), errors='coerce'))
+        shot_z = float(pd.to_numeric(shot.get('z', 0), errors='coerce'))
+        if pd.isna(shot_speed) and 'ball' in game_df and frame in game_df.index:
+            ball_state = game_df['ball'].loc[frame]
+            shot_z = max(float(ball_state.get('pos_z', shot_z)), 0)
+            shot_speed = np.sqrt(ball_state['vel_x']**2 + ball_state['vel_y']**2 + ball_state['vel_z']**2)
         if pd.isna(shot_speed):
             shot_speed = 0.0
 
-        # Find nearest defending player at this frame
+        dist_to_goal = np.sqrt(shot_x**2 + (target_y - shot_y)**2)
+        angle_off_center = np.arctan2(abs(shot_x), abs(target_y - shot_y))
+
         nearest_defender = None
         nearest_dist = 99999
         for pname, pd_info in player_pos.items():
@@ -1552,40 +1520,35 @@ def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
             if pi < 0:
                 continue
             px, py = pd_info['x'][pi], pd_info['y'][pi]
-            # Distance from defender to ball
-            dist = np.sqrt((px - shot['X'])**2 + (py - shot['Y'])**2)
+            dist = np.sqrt((px - shot_x)**2 + (py - shot_y)**2)
             if dist < nearest_dist:
                 nearest_dist = dist
                 nearest_defender = pname
 
         if nearest_defender is None:
             continue
-
         xs = calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, nearest_dist)
         events.append({
             'Saver': nearest_defender, 'Team': defending_team,
             'Frame': frame, 'Time': round(frame / REPLAY_FPS, 1),
             'xS': round(xs, 3), 'ShotSpeed': int(shot_speed),
             'DistToGoal': int(dist_to_goal), 'ShotHeight': int(shot_z),
-            'SaverDist': int(nearest_dist), 'Shooter': shot['Player']
+            'SaverDist': int(nearest_dist), 'Shooter': shot.get('player_name', 'Unknown')
         })
 
     xs_events_df = pd.DataFrame(events)
-
-    # Build per-player summary
     summary = []
     for p in proto.players:
         name = p.name
-        team = "Orange" if p.is_orange else "Blue"
+        team = 'Orange' if p.is_orange else 'Blue'
         p_saves = xs_events_df[xs_events_df['Saver'] == name] if not xs_events_df.empty else pd.DataFrame()
         total_xs = round(p_saves['xS'].sum(), 2) if not p_saves.empty else 0
         avg_xs = round(p_saves['xS'].mean(), 3) if not p_saves.empty else 0
         hard_saves = int((p_saves['xS'] > 0.4).sum()) if not p_saves.empty else 0
         summary.append({
             'Name': name, 'Team': team,
-            'Saves_Nearby': len(p_saves) if not p_saves.empty else 0,
             'Total_xS': total_xs, 'Avg_xS': avg_xs,
-            'Hard_Saves': hard_saves
+            'Hard_Saves': hard_saves, 'Saves_Nearby': int((p_saves['SaverDist'] < 600).sum()) if not p_saves.empty else 0
         })
     xs_summary_df = pd.DataFrame(summary)
     return xs_events_df, xs_summary_df
@@ -1731,15 +1694,15 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     shot_df = event_table_to_shot_df(schema_tables.event)
     kickoff_df = event_table_to_kickoff_df(schema_tables.event, match_id="single_match")
     momentum_series = calculate_contextual_momentum(game_df, proto)
-    pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, pass_threshold)
+    pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, schema_tables.event, pass_threshold)
     aerial_df = calculate_aerial_stats(proto, game_df, pid_team, temp_map)
     recovery_df = calculate_recovery_time(proto, game_df, pid_team, temp_map)
     defense_df = calculate_defensive_pressure(game_df, proto)
-    xga_df = calculate_xg_against(proto, game_df, temp_map, shot_df)
-    vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df)
+    xga_df = calculate_xg_against(proto, game_df, temp_map, shot_df, schema_tables.event)
+    vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df, schema_tables.event)
     rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(game_df, proto, player_pos)
-    xs_events_df, xs_summary = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df)
-    situational_df = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df)
+    xs_events_df, xs_summary = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df, schema_tables.event)
+    situational_df = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df, schema_tables.event)
     wp_model, wp_scaler = load_win_prob_model()
     wp_result = calculate_win_probability_trained(proto, game_df, pid_team, wp_model, wp_scaler)
     if isinstance(wp_result, tuple):
@@ -3281,15 +3244,15 @@ elif app_mode == "📈 Season Batch Processor":
                     shot_df_raw = calculate_shot_data(proto, game_df, pid_team, temp_map)
                     schema_tables = build_schema_tables(manager, game_df, proto, match_id=str(game_id), file_name=f.name, shot_df=shot_df_raw)
                     shot_df = event_table_to_shot_df(schema_tables.event)
-                    pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, pass_threshold)
+                    pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, schema_tables.event, pass_threshold)
                     aerial_df_b = calculate_aerial_stats(proto, game_df, pid_team, temp_map)
                     recovery_df_b = calculate_recovery_time(proto, game_df, pid_team, temp_map)
                     defense_df_b = calculate_defensive_pressure(game_df, proto)
-                    xga_df_b = calculate_xg_against(proto, game_df, temp_map, shot_df)
-                    vaep_df_b, vaep_summary_b = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df)
+                    xga_df_b = calculate_xg_against(proto, game_df, temp_map, shot_df, schema_tables.event)
+                    vaep_df_b, vaep_summary_b = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df, schema_tables.event)
                     _, rotation_summary_b, _ = calculate_rotation_analysis(game_df, proto, player_pos)
-                    _, xs_summary_b = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df)
-                    situational_df_b = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df)
+                    _, xs_summary_b = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df, schema_tables.event)
+                    situational_df_b = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df, schema_tables.event)
                     stats = calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df_b, recovery_df_b, defense_df_b, xga_df_b, vaep_summary_b, rotation_summary_b, xs_summary_b, situational_df_b)
                     # Collect win prob training data
                     wp_train = extract_win_prob_training_data(game_df, proto, pid_team)
