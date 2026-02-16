@@ -59,6 +59,18 @@ def align_event_anchor(frame=None, time_s=None, fps=REPLAY_FPS):
     return {"frame": frame, "time_s": time_s}
 
 
+def _normalize_timeline_key_types(df, frame_col="frame", time_col="time_s"):
+    """Normalize timeline join keys to deterministic dtypes across OS/NumPy builds."""
+    out = df.copy()
+    if frame_col in out.columns:
+        out[frame_col] = pd.to_numeric(out[frame_col], errors='coerce')
+        out = out[out[frame_col].notna()].copy()
+        out[frame_col] = out[frame_col].astype('int64')
+    if time_col in out.columns:
+        out[time_col] = pd.to_numeric(out[time_col], errors='coerce').astype('float64').round(3)
+    return out
+
+
 def _build_match_timeline(game_df, proto, pid_team, pid_name, shot_df, kickoff_df, momentum_series, win_prob_df):
     """Build canonical match timeline used by all time-based match views."""
     if game_df.empty:
@@ -97,7 +109,7 @@ def _build_match_timeline(game_df, proto, pid_team, pid_name, shot_df, kickoff_d
 
     if not shot_df.empty:
         shots = shot_df.sort_values('Frame').copy()
-        shots['frame'] = shots['Frame'].astype(int)
+        shots['frame'] = shots['Frame']
         shots['blue_xg'] = np.where(shots['Team'] == 'Blue', shots['xG'].astype(float), 0.0)
         shots['orange_xg'] = np.where(shots['Team'] == 'Orange', shots['xG'].astype(float), 0.0)
         shots['xg_blue_cum'] = shots['blue_xg'].cumsum()
@@ -105,13 +117,17 @@ def _build_match_timeline(game_df, proto, pid_team, pid_name, shot_df, kickoff_d
     else:
         shots = pd.DataFrame(columns=['frame', 'xg_blue_cum', 'xg_orange_cum'])
 
+    shots = _normalize_timeline_key_types(shots, frame_col='frame', time_col=None)
+
     wp = win_prob_df[['Time', 'WinProb']].copy() if not win_prob_df.empty else pd.DataFrame(columns=['Time', 'WinProb'])
     if not wp.empty:
-        wp['time_s'] = wp['Time'].round(3)
+        wp['time_s'] = wp['Time']
+        wp = _normalize_timeline_key_types(wp, frame_col=None, time_col='time_s')
 
     pressure = momentum_series.reset_index(name='pressure_signed') if not momentum_series.empty else pd.DataFrame(columns=['index', 'pressure_signed'])
     if not pressure.empty:
-        pressure['time_s'] = pressure['index'].astype(float).round(3)
+        pressure['time_s'] = pressure['index']
+        pressure = _normalize_timeline_key_types(pressure, frame_col=None, time_col='time_s')
 
     event_rows = []
     for anchor, team, scorer in goals:
@@ -132,7 +148,7 @@ def _build_match_timeline(game_df, proto, pid_team, pid_name, shot_df, kickoff_d
             payload = json.dumps({"team": ko.get('Team', ''), "player": ko.get('Player', ''), "result": ko.get('Result', '')})
             event_rows.append({**anchor, "event_type": "kickoff", "event_payload": payload})
 
-    timeline = pd.DataFrame(rows)
+    timeline = _normalize_timeline_key_types(pd.DataFrame(rows))
     timeline['blue_score'] = timeline['frame'].apply(lambda f: sum(gf <= f for gf in blue_gf))
     timeline['orange_score'] = timeline['frame'].apply(lambda f: sum(gf <= f for gf in orange_gf))
 
@@ -158,7 +174,7 @@ def _build_match_timeline(game_df, proto, pid_team, pid_name, shot_df, kickoff_d
 
     timeline['phase'] = np.where(timeline['time_s'] >= 300.0, 'overtime', np.where(timeline['time_s'] < 30.0, 'opening', np.where(timeline['time_s'] >= 240.0, 'late_regulation', 'regulation')))
 
-    events_df = pd.DataFrame(event_rows)
+    events_df = _normalize_timeline_key_types(pd.DataFrame(event_rows))
     if not events_df.empty:
         events_df['blue_score'] = np.nan
         events_df['orange_score'] = np.nan
