@@ -349,13 +349,37 @@ def _attach_chain_context_to_events(
         return event_df
 
     out = event_df.copy()
-    seg_to_chain = possession_segment_df.set_index("segment_id")["chain_id"].to_dict() if not possession_segment_df.empty else {}
+    default_match_id = str(match_id)
+    key_cols = ["touches_in_chain", "chain_duration", "avg_ball_speed", "final_third_entries", "turnovers_forced"]
 
-    out["segment_id"] = out.apply(lambda r: frame_to_segment.get((str(r.get("match_id", match_id)), int(r.get("frame", -1)))), axis=1)
+    out_match_id = out["match_id"].astype("string") if "match_id" in out.columns else pd.Series(default_match_id, index=out.index, dtype="string")
+    out_frame = pd.to_numeric(out.get("frame"), errors="coerce")
+    out["_frame_key"] = out_match_id.fillna(default_match_id) + "|" + out_frame.astype("Int64").astype("string")
+
+    frame_to_segment_df = pd.DataFrame(
+        [(str(mid), int(frame), segment_id) for (mid, frame), segment_id in frame_to_segment.items()],
+        columns=["match_id", "frame", "segment_id"],
+    )
+    if not frame_to_segment_df.empty:
+        frame_to_segment_df["_frame_key"] = (
+            frame_to_segment_df["match_id"].astype("string") + "|" + frame_to_segment_df["frame"].astype("Int64").astype("string")
+        )
+        out = out.merge(frame_to_segment_df[["_frame_key", "segment_id"]], on="_frame_key", how="left", suffixes=("", "_mapped"))
+        out["segment_id"] = out["segment_id_mapped"].combine_first(out.get("segment_id"))
+        out = out.drop(columns=["segment_id_mapped"])
+
+    seg_to_chain = possession_segment_df.set_index("segment_id")["chain_id"] if not possession_segment_df.empty else pd.Series(dtype="object")
     out["chain_id"] = out["segment_id"].map(seg_to_chain)
 
-    for col in ["touches_in_chain", "chain_duration", "avg_ball_speed", "final_third_entries", "turnovers_forced"]:
-        out[col] = out["chain_id"].map(lambda cid: chain_summary.get(cid, {}).get(col, np.nan))
+    chain_summary_df = pd.DataFrame.from_dict(chain_summary, orient="index")
+    if not chain_summary_df.empty:
+        chain_summary_df = chain_summary_df.reindex(columns=key_cols).reset_index(names="chain_id")
+        out = out.drop(columns=key_cols, errors="ignore").merge(chain_summary_df, on="chain_id", how="left")
+    else:
+        for col in key_cols:
+            out[col] = np.nan
+
+    out = out.drop(columns=["_frame_key"])
 
     return out
 
