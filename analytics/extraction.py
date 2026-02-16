@@ -573,7 +573,7 @@ def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.DataFrame:
-    cols = ["MatchID", "Frame", "Player", "Team", "BoostUsed", "Result", "Goal (5s)", "End_X", "End_Y"]
+    cols = ["MatchID", "Frame", "Player", "Team", "Spawn", "Time to Hit", "Boost", "BoostUsed", "Result", "Goal (5s)", "End_X", "End_Y"]
     if event_df.empty:
         return pd.DataFrame(columns=cols)
 
@@ -612,21 +612,31 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
         frame = int(pd.to_numeric(getattr(row, "frame", 0), errors="coerce") or 0)
         player = "Unknown"
         team = "Unknown"
+        spawn = "Unknown"
+        time_to_hit = 0.0
+        boost = 0
         end_x = 0.0
         end_y = 0.0
 
         first_touch = next((t for t in touches if frame <= t[0] <= frame + window_frames), None)
         if first_touch is not None:
-            _, touch_player, touch_team, tx, ty = first_touch
+            touch_frame, touch_player, touch_team, tx, ty = first_touch
+            time_to_hit = round((touch_frame - frame) / float(REPLAY_FPS), 2)
             if pd.notna(touch_player) and str(touch_player).strip():
                 player = str(touch_player)
             if pd.notna(touch_team) and str(touch_team).strip():
                 team = str(touch_team)
             end_x = float(pd.to_numeric(tx, errors="coerce") or 0.0)
             end_y = float(pd.to_numeric(ty, errors="coerce") or 0.0)
+            if abs(end_x) < 400:
+                spawn = "Center"
+            elif abs(end_x) > 1500:
+                spawn = "Diagonal"
+            else:
+                spawn = "Off-Center"
 
         kickoff_goal = False
-        result = "Unknown"
+        result = "Neutral"
         scoring_goal = next((g for g in goals if frame <= g[0] <= frame + window_frames), None)
         if scoring_goal is not None:
             kickoff_goal = True
@@ -639,7 +649,10 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
             "Frame": frame,
             "Player": player,
             "Team": team,
-            "BoostUsed": 0,
+            "Spawn": spawn,
+            "Time to Hit": time_to_hit,
+            "Boost": boost,
+            "BoostUsed": boost,
             "Result": result,
             "Goal (5s)": kickoff_goal,
             "End_X": end_x,
