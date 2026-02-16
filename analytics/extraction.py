@@ -12,7 +12,6 @@ from analytics.schema import (
     EventType,
     POSSESSION_SEGMENT_CONTRACT,
     SCHEMA_VERSION,
-    normalize_event_type_series,
     normalize_tables,
 )
 from constants import REPLAY_FPS
@@ -576,74 +575,16 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
     cols = ["MatchID", "Frame", "Player", "Team", "BoostUsed", "Result", "Goal (5s)", "End_X", "End_Y"]
     if event_df.empty:
         return pd.DataFrame(columns=cols)
-
-    events = event_df.copy()
-    if "event_type" in events.columns:
-        events["event_type"] = normalize_event_type_series(events["event_type"])
-
-    kickoff = events[events["event_type"] == EventType.KICKOFF.value].copy()
+    kickoff = event_df[event_df["event_type"] == EventType.KICKOFF.value].copy()
     if kickoff.empty:
         return pd.DataFrame(columns=cols)
-
-    touch_events = events[events["event_type"] == EventType.TOUCH.value].copy()
-    goal_events = events[events["event_type"] == EventType.GOAL.value].copy()
-
-    touches = []
-    if not touch_events.empty:
-        touch_events = touch_events.sort_values("frame")
-        for row in touch_events[["frame", "player_name", "team", "x", "y"]].itertuples(index=False):
-            frame = pd.to_numeric(row.frame, errors="coerce")
-            if pd.isna(frame):
-                continue
-            touches.append((int(frame), row.player_name, row.team, row.x, row.y))
-
-    goals = []
-    if not goal_events.empty:
-        goal_events = goal_events.sort_values("frame")
-        for row in goal_events[["frame", "team"]].itertuples(index=False):
-            frame = pd.to_numeric(row.frame, errors="coerce")
-            if pd.isna(frame):
-                continue
-            goals.append((int(frame), row.team))
-
-    rows = []
-    window_frames = int(5 * REPLAY_FPS)
-    for row in kickoff.sort_values("frame").itertuples(index=False):
-        frame = int(pd.to_numeric(getattr(row, "frame", 0), errors="coerce") or 0)
-        player = "Unknown"
-        team = "Unknown"
-        end_x = 0.0
-        end_y = 0.0
-
-        first_touch = next((t for t in touches if frame <= t[0] <= frame + window_frames), None)
-        if first_touch is not None:
-            _, touch_player, touch_team, tx, ty = first_touch
-            if pd.notna(touch_player) and str(touch_player).strip():
-                player = str(touch_player)
-            if pd.notna(touch_team) and str(touch_team).strip():
-                team = str(touch_team)
-            end_x = float(pd.to_numeric(tx, errors="coerce") or 0.0)
-            end_y = float(pd.to_numeric(ty, errors="coerce") or 0.0)
-
-        kickoff_goal = False
-        result = "Unknown"
-        scoring_goal = next((g for g in goals if frame <= g[0] <= frame + window_frames), None)
-        if scoring_goal is not None:
-            kickoff_goal = True
-            scoring_team = str(scoring_goal[1]) if pd.notna(scoring_goal[1]) else "Unknown"
-            if team in {"Blue", "Orange"} and scoring_team in {"Blue", "Orange"}:
-                result = "Win" if scoring_team == team else "Loss"
-
-        rows.append({
-            "MatchID": str(match_id),
-            "Frame": frame,
-            "Player": player,
-            "Team": team,
-            "BoostUsed": 0,
-            "Result": result,
-            "Goal (5s)": kickoff_goal,
-            "End_X": end_x,
-            "End_Y": end_y,
-        })
-
-    return pd.DataFrame(rows, columns=cols).sort_values("Frame")
+    kickoff = kickoff.rename(columns={"frame": "Frame"})
+    kickoff["MatchID"] = str(match_id)
+    kickoff["Player"] = "Unknown"
+    kickoff["Team"] = "Unknown"
+    kickoff["BoostUsed"] = 0
+    kickoff["Result"] = "Unknown"
+    kickoff["Goal (5s)"] = False
+    kickoff["End_X"] = 0.0
+    kickoff["End_Y"] = 0.0
+    return kickoff[cols].sort_values("Frame")
