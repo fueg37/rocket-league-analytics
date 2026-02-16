@@ -107,7 +107,7 @@ def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType,
         "event_id": event_id,
         "frame": int(frame),
         "time_seconds": float(frame) / float(REPLAY_FPS),
-        "event_type": event_type.serialize(),
+        "event_type": str(event_type),
         "player_id": player_id,
         "player_name": player_name,
         "team": team,
@@ -211,7 +211,7 @@ def _build_chain_context(
         for frame in range(int(row.start_frame), int(row.end_frame) + 1):
             frame_to_chain[int(frame)] = str(row.chain_id)
 
-    touch_events = event_df[event_df["event_type"] == EventType.TOUCH.value].copy() if not event_df.empty else pd.DataFrame()
+    touch_events = event_df[event_df["event_type"] == str(EventType.TOUCH)].copy() if not event_df.empty else pd.DataFrame()
     touch_by_chain: dict[str, int] = {}
     if not touch_events.empty:
         for frame in pd.to_numeric(touch_events["frame"], errors="coerce").dropna().astype(int).tolist():
@@ -447,26 +447,26 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
             on_target_row = _event_base(match_id, f"shot-on-target-{idx}", frame, EventType.SHOT_ON_TARGET, None, player, team)
             on_target_row.update(shot_row)
             on_target_row["event_id"] = f"shot-on-target-{idx}"
-            on_target_row["event_type"] = EventType.SHOT_ON_TARGET.value
+            on_target_row["event_type"] = str(EventType.SHOT_ON_TARGET)
             event_rows.append(on_target_row)
 
             if result == "Goal":
                 goal_row = _event_base(match_id, f"goal-{idx}", frame, EventType.GOAL, None, player, team)
                 goal_row.update(shot_row)
                 goal_row["event_id"] = f"goal-{idx}"
-                goal_row["event_type"] = EventType.GOAL.value
+                goal_row["event_type"] = str(EventType.GOAL)
                 event_rows.append(goal_row)
             else:
                 save_row = _event_base(match_id, f"save-{idx}", frame, EventType.SAVE, None, player, team)
                 save_row.update(shot_row)
                 save_row["event_id"] = f"save-{idx}"
-                save_row["event_type"] = EventType.SAVE.value
+                save_row["event_type"] = str(EventType.SAVE)
                 event_rows.append(save_row)
                 if pressure_context == "high":
                     block_row = _event_base(match_id, f"block-{idx}", frame, EventType.BLOCK, None, player, team)
                     block_row.update(shot_row)
                     block_row["event_id"] = f"block-{idx}"
-                    block_row["event_type"] = EventType.BLOCK.value
+                    block_row["event_type"] = str(EventType.BLOCK)
                     event_rows.append(block_row)
 
     for p in proto.players:
@@ -528,7 +528,7 @@ def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
     if event_df.empty:
         return pd.DataFrame(columns=typed_columns)
 
-    subset = event_df[event_df["event_type"] == EventType.SHOT_TAKEN.value].copy()
+    subset = event_df[event_df["event_type"] == str(EventType.SHOT_TAKEN)].copy()
     if subset.empty:
         return pd.DataFrame(columns=typed_columns)
 
@@ -575,7 +575,7 @@ def event_table_to_kickoff_df(event_df: pd.DataFrame, match_id: str = "") -> pd.
     cols = ["MatchID", "Frame", "Player", "Team", "BoostUsed", "Result", "Goal (5s)", "End_X", "End_Y"]
     if event_df.empty:
         return pd.DataFrame(columns=cols)
-    kickoff = event_df[event_df["event_type"] == EventType.KICKOFF.value].copy()
+    kickoff = event_df[event_df["event_type"] == str(EventType.KICKOFF)].copy()
     if kickoff.empty:
         return pd.DataFrame(columns=cols)
     kickoff = kickoff.rename(columns={"frame": "Frame"})
