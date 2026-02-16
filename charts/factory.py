@@ -196,24 +196,23 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
             y1=i,
             line=dict(color=stem_color, width=2),
         )
-        fig.add_trace(
-            go.Scatter(
-                x=[val],
-                y=[i],
-                mode="markers+text",
-                marker=dict(size=11, color="rgba(255,255,255,0.9)", line=dict(color=accent, width=2.5)),
-                text=[labels[i]],
-                textposition="middle right",
-                textfont=dict(color=accent, size=11),
-                hovertemplate=hover_template(
-                    entity=str(row[name_col]),
-                    primary_label=f"{metric_col}: {labels[i]}",
-                    context_label=f"Team: {team}",
-                    units=units,
-                ),
-                showlegend=False,
-            )
+        player_trace = go.Scatter(
+            x=[val],
+            y=[i],
+            mode="markers+text",
+            marker=dict(size=11, color="rgba(255,255,255,0.9)", line=dict(color=accent, width=2.5)),
+            text=[labels[i]],
+            textposition="middle right",
+            textfont=dict(color=accent, size=11),
+            hovertemplate=hover_template(
+                entity=str(row[name_col]),
+                primary_label=f"{metric_col}: {labels[i]}",
+                context_label=f"Team: {team}",
+                units=units,
+            ),
+            showlegend=False,
         )
+        fig.add_trace(player_trace)
 
     fig.update_yaxes(
         tickmode="array",
