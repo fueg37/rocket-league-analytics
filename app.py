@@ -42,8 +42,6 @@ from analytics.shot_quality import (
     SHOT_COL_X,
     SHOT_COL_Y,
     SHOT_EVENT_COLUMNS,
-    calculate_xg_probability,
-    calculate_xgot_probability,
     validate_shot_metric_columns,
 )
 
@@ -769,6 +767,57 @@ def calculate_kickoff_stats(game, proto, game_df, player_map, match_id=""):
     return pd.DataFrame(kickoff_list)
 
 # --- 9. MATH: SHOTS & PASSING ---
+def calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y):
+    """Pre-shot xG from geometry + pace, bounded to calibrated floor/ceiling."""
+    dx = float(shot_x)
+    dy = float(target_y - shot_y)
+    dist_to_goal = float(np.sqrt(dx * dx + dy * dy))
+
+    vec_l = (-GOAL_HALF_W - shot_x, target_y - shot_y)
+    vec_r = (GOAL_HALF_W - shot_x, target_y - shot_y)
+    norm_l = float(np.sqrt(vec_l[0] ** 2 + vec_l[1] ** 2))
+    norm_r = float(np.sqrt(vec_r[0] ** 2 + vec_r[1] ** 2))
+
+    angle = 0.0
+    if norm_l > 0 and norm_r > 0:
+        dot = (vec_l[0] * vec_r[0] + vec_l[1] * vec_r[1]) / (norm_l * norm_r)
+        angle = float(np.arccos(np.clip(dot, -1.0, 1.0)))
+
+    speed = float(np.sqrt(vel_x ** 2 + vel_y ** 2 + vel_z ** 2))
+    base_xg = (angle * 0.85) * np.exp(-0.00045 * dist_to_goal)
+    speed_factor = np.clip(1.0 + (speed - 1400.0) / 2000.0, 0.5, 1.5)
+    height_factor = 1.15 if float(shot_z) > 150.0 else 1.0
+    return float(np.clip(base_xg * speed_factor * height_factor, 0.01, 0.99))
+
+
+def calculate_xgot_probability(target_x, target_z, shot_speed, shot_angle, dist_to_goal, goalkeeper_dist, shot_z=None):
+    """Post-shot xGOT heuristic using placement, pace/reaction pressure, and keeper distance."""
+    tx = float(target_x)
+    tz = float(target_z)
+    speed = max(float(shot_speed), 0.0)
+    angle = abs(float(shot_angle))
+    dist = max(float(dist_to_goal), 1.0)
+    gk_dist = float(goalkeeper_dist) if pd.notna(goalkeeper_dist) else 1200.0
+    sz = max(float(shot_z), 0.0) if shot_z is not None and pd.notna(shot_z) else tz
+
+    horizontal_edge = np.clip(abs(tx) / GOAL_HALF_W, 0.0, 1.0)
+    vertical_edge = np.clip(tz / GOAL_HEIGHT, 0.0, 1.0)
+    corner_proximity = np.sqrt(horizontal_edge * vertical_edge)
+    angle_pressure = np.clip(angle / (np.pi / 2), 0.0, 1.0)
+    placement_score = 0.20 + 0.38 * corner_proximity + 0.12 * horizontal_edge + 0.08 * angle_pressure
+
+    speed_pressure = np.clip((speed - 900.0) / 1800.0, 0.0, 1.0)
+    reaction_window = dist / max(speed, 400.0)
+    reaction_pressure = np.clip(1.0 - reaction_window / 1.1, 0.0, 1.0)
+    height_pressure = np.clip((sz - 150.0) / 450.0, 0.0, 1.0)
+    pressure_score = 0.25 * speed_pressure + 0.20 * reaction_pressure + 0.06 * height_pressure
+
+    keeper_factor = np.clip((gk_dist - 350.0) / 1700.0, -0.25, 0.35)
+
+    xgot = placement_score + pressure_score + keeper_factor
+    return float(np.clip(xgot, 0.01, 0.99))
+
+
 def calculate_shot_data(proto, game_df, pid_team, player_map):
     hits = proto.game_stats.hits
     shot_list = []
@@ -863,7 +912,6 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
             shot_angle = float(np.arctan2(abs(shot_x), abs(target_y - shot_y)))
 
             xg = calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y)
-            xgot = calculate_xgot_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y)
 
             defending_team = "Orange" if shooter_team == "Blue" else "Blue"
             defenders = team_players.get(defending_team, [])
@@ -891,6 +939,19 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
                     on_target = bool(abs(target_x) <= GOAL_HALF_W and 0 <= target_z <= GOAL_HEIGHT)
             else:
                 on_target = False
+
+            if on_target:
+                xgot = calculate_xgot_probability(
+                    target_x,
+                    target_z,
+                    speed,
+                    shot_angle,
+                    dist_to_goal,
+                    goalkeeper_dist,
+                    shot_z=shot_z,
+                )
+            else:
+                xgot = 0.0
 
         is_big_chance = bool(xg > 0.40 and pd.notna(goalkeeper_dist) and goalkeeper_dist > 500)
         result = "Goal" if (is_lib_goal or is_goal_hit) else "Shot"
@@ -1215,7 +1276,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
         if closest_defender:
             xga_per_player[closest_defender].append({
                 COL_XG: xg, 'result': shot[SHOT_COL_RESULT], 'dist': round(min_dist),
-                'frame': frame
+                'frame': frame, 'on_target': bool(shot.get(COL_ON_TARGET, False))
             })
 
     results = []
@@ -1225,9 +1286,11 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
         events = xga_per_player.get(name, [])
         xg_vals = [e[COL_XG] for e in events]
         goals_conceded = sum(1 for e in events if e['result'] == 'Goal')
+        on_target_faced = sum(1 for e in events if e.get('on_target', False))
         results.append({
             'Name': name, 'Team': team,
             'Shots Faced': len(events),
+            'On Target Faced': on_target_faced,
             'xGA': round(sum(xg_vals), 2),
             'Goals Conceded (nearest)': goals_conceded,
             'Avg Dist to Shot': int(np.mean([e['dist'] for e in events])) if events else 0,
@@ -1661,6 +1724,7 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
             team = "Orange" if player.is_orange else "Blue"
             p_shots = shot_df[shot_df[SHOT_COL_PLAYER] == name] if not shot_df.empty else pd.DataFrame()
             xg_sum = p_shots[COL_XG].sum() if not p_shots.empty else 0
+            xgot_sum = p_shots[COL_XGOT].sum() if (not p_shots.empty and COL_XGOT in p_shots.columns) else 0
             big_chances = len(p_shots[p_shots['BigChance'] == True]) if not p_shots.empty else 0
             p_passes = pass_df[pass_df['Sender'] == name] if not pass_df.empty else pd.DataFrame()
             xa_sum = p_passes['xA'].sum() if not p_passes.empty else 0
@@ -1673,6 +1737,7 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
             p_data = {
                 "Name": name, "Team": team, "Goals": player.goals, "Assists": player.assists, "Saves": player.saves,
                 "Shots": player.shots, "Score": player.score, "xG": round(xg_sum, 2), "xA": round(xa_sum, 2),
+                "xGOT": round(xgot_sum, 2), "xGOT - Goals": round(xgot_sum - player.goals, 2),
                 "Big Chances": big_chances, "Key Passes": key_passes, "Possession": poss_pct,
                 "Rating": round(final_rating, 1), "IsBot": getattr(player, 'is_bot', False),
                 "Boost Used": 0, "Wasted Boost": 0, "Avg Speed": 0, "Time Supersonic": 0,
@@ -1681,7 +1746,8 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
                 "Aerial Hits": 0, "Aerial %": 0, "Avg Aerial Height": 0, "Time Airborne (s)": 0,
                 "Avg Recovery (s)": 0, "Fast Recoveries": 0, "Recovery < 1s %": 0,
                 "Shadow %": 0, "Pressure Time (s)": 0,
-                "xGA": 0, "Shots Faced": 0, "Goals Conceded (nearest)": 0,
+                "xGA": 0, "Shots Faced": 0, "On Target Faced": 0, "Goals Conceded (nearest)": 0,
+                "Goals Prevented": 0.0,
                 "Total_VAEP": 0.0, "Avg_VAEP": 0.0, "Positive_Actions": 0, "Negative_Actions": 0,
                 "Time_1st%": 0.0, "Time_2nd%": 0.0, "DoubleCommits": 0, "RotationBreaks": 0,
                 "Total_xS": 0.0, "Avg_xS": 0.0, "Hard_Saves": 0, "Saves_Nearby": 0,
@@ -1748,7 +1814,7 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
                 (aerial_df, ['Aerial Hits', 'Aerial %', 'Avg Aerial Height', 'Time Airborne (s)']),
                 (recovery_df, ['Avg Recovery (s)', 'Fast Recoveries', 'Recovery < 1s %']),
                 (defense_df, ['Shadow %', 'Pressure Time (s)']),
-                (xga_df, ['xGA', 'Shots Faced', 'Goals Conceded (nearest)']),
+                (xga_df, ['xGA', 'Shots Faced', 'On Target Faced', 'Goals Conceded (nearest)']),
                 (vaep_summary, ['Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']),
                 (rotation_summary, ['Time_1st%', 'Time_2nd%', 'DoubleCommits', 'RotationBreaks']),
                 (xs_summary, ['Total_xS', 'Avg_xS', 'Hard_Saves', 'Saves_Nearby']),
@@ -1762,6 +1828,7 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
                         for c in cols:
                             if c in row.columns:
                                 p_data[c] = row.iloc[0][c]
+            p_data['Goals Prevented'] = round(float(p_data.get('On Target Faced', 0)) - float(p_data.get('Goals Conceded (nearest)', 0)), 2)
             stats.append(p_data)
     return pd.DataFrame(stats)
 
@@ -2148,6 +2215,8 @@ def render_dashboard(df, shot_df, pass_df):
                         st.caption("Attack")
                         st.write(f"⚽ Goals: {p['Goals']}")
                         st.write(f"🎯 xG: {p['xG']}")
+                        st.write(f"🥅 xGOT: {p.get('xGOT', 0)}")
+                        st.write(f"📈 xGOT-Goals: {p.get('xGOT - Goals', 0)}")
                         st.write(f"🔥 Big Chances: {p['Big Chances']}")
                     with sc2:
                         st.caption("Playmaking")
@@ -2159,6 +2228,7 @@ def render_dashboard(df, shot_df, pass_df):
                         st.write(f"🛡️ Saves: {p['Saves']}")
                         st.write(f"⏱️ Poss: {p['Possession']}%")
                         st.write(f"🛡️ xGA: {p.get('xGA', 0)}")
+                        st.write(f"🧤 Goals Prevented: {p.get('Goals Prevented', 0)}")
                         st.write(f"👤 Shadow: {p.get('Shadow %', 0)}%")
                     with sc4:
                         st.caption("Mechanics")
@@ -2337,6 +2407,8 @@ if app_mode == "🔍 Single Match Analysis":
                     ("Shooting %",      round(b_goals / max(b_shots, 1) * 100),             round(o_goals / max(o_shots, 1) * 100)),
                     ("Score",           int(blue_df['Score'].sum()),                        int(orange_df['Score'].sum())),
                     ("xG",              round(blue_df['xG'].sum(), 2),                      round(orange_df['xG'].sum(), 2)),
+                    ("xGOT",            round(blue_df.get('xGOT', pd.Series([0])).sum(), 2),   round(orange_df.get('xGOT', pd.Series([0])).sum(), 2)),
+                    ("xGOT - Goals",    round(blue_df.get('xGOT - Goals', pd.Series([0])).sum(), 2), round(orange_df.get('xGOT - Goals', pd.Series([0])).sum(), 2)),
                     ("Possession",      round(blue_df['Possession'].sum()),                 round(orange_df['Possession'].sum())),
                     ("Boost Used",      int(blue_df['Boost Used'].sum()),                   int(orange_df['Boost Used'].sum())),
                     ("Time Supersonic", round(blue_df['Time Supersonic'].sum(), 1),          round(orange_df['Time Supersonic'].sum(), 1)),
@@ -2734,7 +2806,7 @@ if app_mode == "🔍 Single Match Analysis":
                         color_discrete_map=TEAM_COLOR_MAP)
                     fig_dist.update_layout()
                     st.plotly_chart(fig_dist, use_container_width=True)
-                xga_cols = ['Name', 'Team', 'Shots Faced', 'xGA', 'Goals Conceded (nearest)', 'Avg Dist to Shot', 'High xG Faced']
+                xga_cols = ['Name', 'Team', 'Shots Faced', 'On Target Faced', 'Goals Conceded (nearest)', 'Goals Prevented', 'xGA', 'Avg Dist to Shot', 'High xG Faced']
                 st.dataframe(xga_df[xga_cols].sort_values('xGA', ascending=False), use_container_width=True, hide_index=True)
                 st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
             st.divider()
@@ -3327,7 +3399,8 @@ elif app_mode == "📈 Season Batch Processor":
                               ('Aerial Hits', 0), ('Aerial %', 0.0), ('Avg Aerial Height', 0), ('Time Airborne (s)', 0.0),
                               ('Avg Recovery (s)', 0.0), ('Fast Recoveries', 0), ('Recovery < 1s %', 0.0),
                               ('Shadow %', 0.0), ('Pressure Time (s)', 0.0),
-                              ('xGA', 0.0), ('Shots Faced', 0), ('Goals Conceded (nearest)', 0),
+                              ('xGA', 0.0), ('Shots Faced', 0), ('On Target Faced', 0), ('Goals Conceded (nearest)', 0), ('Goals Prevented', 0.0),
+                              ('xGOT', 0.0), ('xGOT - Goals', 0.0),
                               ('Total_VAEP', 0.0), ('Avg_VAEP', 0.0), ('Positive_Actions', 0), ('Negative_Actions', 0),
                               ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0),
                               ('Total_xS', 0.0), ('Avg_xS', 0.0), ('Hard_Saves', 0), ('Saves_Nearby', 0),
@@ -3336,6 +3409,9 @@ elif app_mode == "📈 Season Batch Processor":
                               ('Scored_First', False), ('Comeback_Win', False), ('Blown_Lead', False)]:
             if col not in season.columns:
                 season[col] = default
+        for ncol in ['xG', 'xA', 'xGOT', 'xGOT - Goals', 'xGA', 'Goals Prevented', 'Shots Faced', 'On Target Faced', 'Goals Conceded (nearest)']:
+            if ncol in season.columns:
+                season[ncol] = pd.to_numeric(season[ncol], errors='coerce').fillna(0)
         st.divider()
         st.write(f"📚 **Career Database:** {len(season['MatchID'].unique())} Matches Loaded")
         players = sorted(season['Name'].unique())
@@ -3425,18 +3501,19 @@ elif app_mode == "📈 Season Batch Processor":
                 _streak_label = "-"
         else:
             _streak_label = "-"
-        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
         c1.metric("Games", len(hero_df))
         c2.metric("Win Rate", f"{(hero_df['Won'].sum()/len(hero_df)*100):.1f}%")
         if 'Rating' in hero_df: c3.metric("Avg Rating", f"{hero_df['Rating'].mean():.2f}")
         if 'xG' in hero_df: c4.metric("Total xG", f"{hero_df['xG'].sum():.2f}")
-        c5.metric("Current Streak", _streak_label)
-        c6.metric("Best W Streak", _max_w_streak)
+        if 'xGOT' in hero_df: c5.metric("Total xGOT", f"{hero_df['xGOT'].sum():.2f}")
+        c6.metric("Current Streak", _streak_label)
+        c7.metric("Best W Streak", _max_w_streak)
 
         t1, t2, t3, t4, t8, t9, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "💡 Insights", "📊 Situational", "📊 Log", "🗓️ Sessions", "📸 Export"])
         with t1:
             st.subheader("Performance Trends")
-            metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'Avg Speed', 'Luck', 'Carry_Time',
+            metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'Avg Speed', 'Luck', 'Carry_Time',
                 'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA',
                 'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'DoubleCommits',
                 'Total_xS', 'Avg_xS', 'Hard_Saves',
@@ -3591,7 +3668,7 @@ elif app_mode == "📈 Season Batch Processor":
             st.plotly_chart(fig, use_container_width=True)
         with t8:
             st.subheader("Career Insights")
-            _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xA', 'Avg Speed',
+            _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'xA', 'Avg Speed',
                 'Aerial Hits', 'Aerial %', 'Avg Recovery (s)', 'Shadow %', 'xGA',
                 'Total_VAEP', 'Avg_VAEP', 'Total_xS', 'Time_1st%', 'DoubleCommits', 'Possession', 'Carry_Time']
             _available_insight = [s for s in _insight_stats if s in hero_df.columns and hero_df[s].notna().any()]
