@@ -10,5 +10,3 @@ env/
 # Temporary replay files
 *.replay
 *.csv
-# Local model artifacts
-analytics/artifacts/*.joblib
