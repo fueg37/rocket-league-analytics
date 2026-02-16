@@ -24,7 +24,9 @@ from utils import (
 )
 from analytics.schema import SCHEMA_VERSION
 from analytics.extraction import build_schema_tables, event_table_to_shot_df, event_table_to_kickoff_df
+from analytics.features import build_post_shot_features, build_pre_shot_features, classify_pressure_context
 from analytics.migrations import migrate_dataframe
+from analytics.xg_model import load_or_train_latest
 
 from charts.theme import apply_chart_theme
 from charts.factory import comparison_dumbbell, player_rank_lollipop, time_series_chart
@@ -295,26 +297,15 @@ def get_parsed_replay_data(file_bytes, file_name):
             except OSError: pass
 
 # --- 6. MATH: PROBABILITY (xG) ---
-def calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y):
-    dist = np.sqrt(shot_x**2 + (target_y - shot_y)**2)
-    vec_l = np.array([-893 - shot_x, target_y - shot_y])
-    vec_r = np.array([893 - shot_x, target_y - shot_y])
-    try:
-        norm_l = np.linalg.norm(vec_l)
-        norm_r = np.linalg.norm(vec_r)
-        if norm_l == 0 or norm_r == 0: return 0
-        unit_l = vec_l / norm_l
-        unit_r = vec_r / norm_r
-        dot = np.dot(unit_l, unit_r)
-        angle = np.arccos(np.clip(dot, -1.0, 1.0))
-    except (ValueError, FloatingPointError): angle = 0
-    base_xg = (angle * 0.85) * np.exp(-0.00045 * dist)
-    speed = np.sqrt(vel_x**2 + vel_y**2 + vel_z**2)
-    speed_factor = 1.0 + (speed - 1400) / 2000.0
-    speed_factor = max(0.5, min(speed_factor, 1.5))
-    height_factor = 1.15 if shot_z > 150 else 1.0
-    xg = base_xg * speed_factor * height_factor
-    return min(max(xg, 0.01), 0.99)
+@st.cache_resource(show_spinner=False)
+def get_xg_scorer():
+    return load_or_train_latest()
+
+
+def calculate_xg_probability(pre_shot_features, post_shot_features):
+    scorer = get_xg_scorer()
+    xg_pre, xg_post = scorer.predict(pre_shot_features, post_shot_features)
+    return xg_pre, xg_post, scorer.metadata.model_version, scorer.metadata.calibration_version
 
 # --- 6b. MATH: LUCK % (POISSON BINOMIAL) ---
 def calculate_luck_percentage(shot_df, team, actual_goals):
@@ -760,6 +751,47 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
     hits = proto.game_stats.hits
     shot_list = []
 
+    def _player_xy(name, frame):
+        if name in game_df and frame in game_df.index:
+            row = game_df[name].loc[frame]
+            return float(row.get('pos_x', 0.0)), float(row.get('pos_y', 0.0))
+        return np.nan, np.nan
+
+    def _nearest_defender_info(shooter_team, frame, ball_pos):
+        orange_players = [p.name for p in proto.players if p.is_orange]
+        blue_players = [p.name for p in proto.players if not p.is_orange]
+        defenders = orange_players if shooter_team == 'Blue' else blue_players
+        nearest_name, defender_dist = None, np.nan
+        try:
+            frame_data = game_df.loc[frame]
+            for d_name in defenders:
+                if d_name in frame_data:
+                    d_pos = frame_data[d_name]
+                    dist = float(np.hypot(ball_pos[0]-d_pos.get('pos_x', 0.0), ball_pos[1]-d_pos.get('pos_y', 0.0)))
+                    if np.isnan(defender_dist) or dist < defender_dist:
+                        defender_dist = dist
+                        nearest_name = d_name
+        except Exception:
+            pass
+        return nearest_name, defender_dist
+
+    def _buildup_seconds(shooter_name, frame):
+        if shooter_name not in game_df or frame <= 0:
+            return 0.0
+        start = max(0, frame - int(8 * REPLAY_FPS))
+        try:
+            player_xy = game_df[shooter_name].loc[start:frame][['pos_x','pos_y']].copy()
+            ball_xy = game_df['ball'].loc[start:frame][['pos_x','pos_y']].copy() if 'ball' in game_df else pd.DataFrame()
+            if player_xy.empty or ball_xy.empty:
+                return 0.0
+            d = np.hypot(player_xy['pos_x'].values - ball_xy['pos_x'].values, player_xy['pos_y'].values - ball_xy['pos_y'].values)
+            close = d <= 900
+            if not np.any(close):
+                return 0.0
+            frames = int(np.sum(close))
+            return round(frames / float(REPLAY_FPS), 2)
+        except Exception:
+            return 0.0
 
     # Build a tight goal frame map: only the LAST hit before each goal gets credit
     # Map each goal to the exact scorer frame from metadata
@@ -837,29 +869,56 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
             target_y = 5120 if shooter_team == "Blue" else -5120
 
             if ball_pos and ball_vel:
-                xg = calculate_xg_probability(ball_pos[0], ball_pos[1], ball_pos[2], ball_vel[0], ball_vel[1], ball_vel[2], target_y)
-                is_big_chance = False
-                defender_dist = 99999
-                if xg > 0.40:
-                    orange_players = [p.name for p in proto.players if p.is_orange]
-                    blue_players = [p.name for p in proto.players if not p.is_orange]
-                    defenders = orange_players if shooter_team == "Blue" else blue_players
-                    try:
-                        frame_data = game_df.loc[frame]
-                        for d_name in defenders:
-                            if d_name in frame_data:
-                                d_pos = frame_data[d_name]
-                                dist = np.sqrt((ball_pos[0]-d_pos['pos_x'])**2 + (ball_pos[1]-d_pos['pos_y'])**2)
-                                if dist < defender_dist: defender_dist = dist
-                    except (KeyError, IndexError):
-                        pass
-                    if defender_dist > 500: is_big_chance = True
+                shot_speed = float(np.sqrt(ball_vel[0]**2 + ball_vel[1]**2 + ball_vel[2]**2))
+                nearest_defender, defender_dist = _nearest_defender_info(shooter_team, frame, ball_pos)
+                pressure_context = classify_pressure_context(defender_dist)
+                shooter_boost = np.nan
+                shooter_speed = np.nan
+                if player_name in game_df and frame in game_df.index:
+                    prow = game_df[player_name].loc[frame]
+                    shooter_boost = float(pd.to_numeric(prow.get('boost', np.nan), errors='coerce'))
+                    p_vel = np.array([
+                        float(pd.to_numeric(prow.get('vel_x', 0.0), errors='coerce')),
+                        float(pd.to_numeric(prow.get('vel_y', 0.0), errors='coerce')),
+                        float(pd.to_numeric(prow.get('vel_z', 0.0), errors='coerce')),
+                    ])
+                    shooter_speed = float(np.linalg.norm(p_vel))
+                buildup_seconds = _buildup_seconds(player_name, frame)
+                keeper_distance, keeper_line_offset = np.nan, np.nan
+                if nearest_defender:
+                    kx, ky = _player_xy(nearest_defender, frame)
+                    if not np.isnan(kx) and not np.isnan(ky):
+                        keeper_distance = float(np.hypot(ball_pos[0] - kx, ball_pos[1] - ky))
+                        keeper_line_offset = float(abs(target_y - ky))
+
+                pre_features = build_pre_shot_features(
+                    shot_x=ball_pos[0], shot_y=ball_pos[1], shot_z=ball_pos[2],
+                    shooter_speed=shooter_speed if not np.isnan(shooter_speed) else 0.0,
+                    nearest_defender_distance=defender_dist,
+                    shooter_boost=shooter_boost if not np.isnan(shooter_boost) else 0.0,
+                    buildup_seconds=buildup_seconds,
+                    team=shooter_team,
+                )
+                post_features = build_post_shot_features(
+                    shot_x=ball_pos[0], shot_y=ball_pos[1], shot_z=ball_pos[2],
+                    vel_x=ball_vel[0], vel_y=ball_vel[1], vel_z=ball_vel[2],
+                    keeper_distance=keeper_distance if not np.isnan(keeper_distance) else 3000.0,
+                    keeper_line_offset=keeper_line_offset if not np.isnan(keeper_line_offset) else 1200.0,
+                    team=shooter_team,
+                )
+                xg_pre, xg_post, model_version, calibration_version = calculate_xg_probability(pre_features, post_features)
+                is_big_chance = bool(xg_pre > 0.40 and (np.isnan(defender_dist) or defender_dist > 500))
                 result = "Goal" if (is_lib_goal or is_goal_hit) else "Shot"
                 shot_list.append({
                     "Player": player_name, "Team": shooter_team, "Frame": frame,
-                    "xG": round(xg, 2), "Result": result, "BigChance": is_big_chance,
+                    "xG": round(xg_pre, 3), "xG_pre": round(xg_pre, 3), "xG_post": round(xg_post, 3),
+                    "xGModelVersion": model_version, "xGCalibrationVersion": calibration_version,
+                    "Result": result, "BigChance": is_big_chance,
                     "X": ball_pos[0], "Y": ball_pos[1],
-                    "Speed": int(np.sqrt(ball_vel[0]**2 + ball_vel[1]**2 + ball_vel[2]**2))
+                    "Speed": int(shot_speed),
+                    "PressureContext": pressure_context,
+                    "NearestDefenderDistance": defender_dist,
+                    "ShooterBoost": shooter_boost,
                 })
 
     if shot_list:
@@ -893,7 +952,7 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         final_df = pd.concat([shots_only, goals_only], ignore_index=True)
  
         return final_df
-    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "Result", "BigChance", "X", "Y", "Speed"])
+    return pd.DataFrame(columns=["Player", "Team", "Frame", "xG", "xG_pre", "xG_post", "xGModelVersion", "xGCalibrationVersion", "Result", "BigChance", "X", "Y", "Speed", "PressureContext", "NearestDefenderDistance", "ShooterBoost"])
 
 def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, event_df=None, max_time_diff=2.0):
     """Build pass table from canonical pass events with shot-linked key pass attribution."""
@@ -1135,7 +1194,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df, event_df=None):
     else:
         shots = pd.DataFrame()
     if shots.empty and shot_df is not None and not shot_df.empty:
-        shots = shot_df.rename(columns={'Frame': 'frame', 'Team': 'team', 'xG': 'xg', 'X': 'x', 'Y': 'y', 'Result': 'outcome_type'})
+        shots = shot_df.rename(columns={'Frame': 'frame', 'Team': 'team', 'xG_post': 'xg_post', 'xG': 'xg', 'X': 'x', 'Y': 'y', 'Result': 'outcome_type'})
     if shots.empty:
         return pd.DataFrame()
 
@@ -1146,7 +1205,7 @@ def calculate_xg_against(proto, game_df, player_map, shot_df, event_df=None):
     for _, shot in shots.iterrows():
         frame = int(pd.to_numeric(shot.get('frame', 0), errors='coerce') or 0)
         shooter_team = shot.get('team')
-        xg = float(pd.to_numeric(shot.get('xg', 0.0), errors='coerce'))
+        xg = float(pd.to_numeric(shot.get('xg_post', shot.get('xg', 0.0)), errors='coerce'))
         ball_x = float(pd.to_numeric(shot.get('x', np.nan), errors='coerce'))
         ball_y = float(pd.to_numeric(shot.get('y', np.nan), errors='coerce'))
         defenders = blue_players if shooter_team == 'Orange' else orange_players

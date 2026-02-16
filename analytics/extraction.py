@@ -5,6 +5,7 @@ from typing import Dict, List
 import numpy as np
 import pandas as pd
 
+from analytics.features import classify_pressure_context
 from analytics.schema import AnalyticsTables, EventType, SCHEMA_VERSION, normalize_tables
 from constants import REPLAY_FPS
 from utils import build_pid_name_map, build_pid_team_map
@@ -92,16 +93,6 @@ def _distance_to_goal(ball_x: float, ball_y: float, team: str) -> float:
     return float(np.hypot(ball_x, target_y - ball_y))
 
 
-def _pressure_context(nearest_defender_distance: float) -> str:
-    if pd.isna(nearest_defender_distance):
-        return "unknown"
-    if nearest_defender_distance <= 500:
-        return "high"
-    if nearest_defender_distance <= 1200:
-        return "medium"
-    return "low"
-
-
 def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType, player_id=None, player_name=None, team=None) -> Dict:
     return {
         "schema_version": SCHEMA_VERSION,
@@ -127,6 +118,10 @@ def _event_base(match_id: str, event_id: str, frame: int, event_type: EventType,
         "shot_angle": np.nan,
         "shooter_boost": np.nan,
         "distance_to_goal": np.nan,
+        "xg_pre": np.nan,
+        "xg_post": np.nan,
+        "xg_model_version": None,
+        "xg_calibration_version": None,
         "xg": np.nan,
         "xa": np.nan,
     }
@@ -234,12 +229,14 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
             z = float(_safe_ball_state(ball_df, frame).get("ball_z", np.nan))
             result = str(row.get("Result", "Shot"))
             speed = float(pd.to_numeric(row.get("Speed", np.nan), errors="coerce"))
-            xg = float(pd.to_numeric(row.get("xG", 0.0), errors="coerce"))
+            xg_pre = float(pd.to_numeric(row.get("xG_pre", row.get("xG", 0.0)), errors="coerce"))
+            xg_post = float(pd.to_numeric(row.get("xG_post", row.get("xG", 0.0)), errors="coerce"))
+            xg = xg_pre
             nearest_defender_distance = _nearest_defender_distance(game_df, proto, frame, team, x, y)
             shot_angle = _shot_angle(x, y, team) if team in {"Blue", "Orange"} else np.nan
             shooter_boost = _shooter_boost(game_df, player, frame)
             distance_to_goal = _distance_to_goal(x, y, team) if team in {"Blue", "Orange"} else np.nan
-            pressure_context = _pressure_context(nearest_defender_distance)
+            pressure_context = classify_pressure_context(nearest_defender_distance)
             is_big_chance = bool(row.get("BigChance", False))
 
             shot_row = _event_base(match_id, f"shot-taken-{idx}", frame, EventType.SHOT_TAKEN, None, player, team)
@@ -258,6 +255,10 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
                 "shot_angle": shot_angle,
                 "shooter_boost": shooter_boost,
                 "distance_to_goal": distance_to_goal,
+                "xg_pre": xg_pre,
+                "xg_post": xg_post,
+                "xg_model_version": str(row.get("xGModelVersion", "legacy")),
+                "xg_calibration_version": str(row.get("xGCalibrationVersion", "legacy")),
                 "xg": xg,
             })
             event_rows.append(shot_row)
@@ -357,7 +358,7 @@ def build_schema_tables(manager, game_df: pd.DataFrame, proto, match_id: str, fi
 def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
     typed_columns = [
         "Player", "Team", "Frame", "Time", "Result", "OutcomeType", "OnTarget",
-        "xG", "XA", "Speed", "PressureContext", "NearestDefenderDistance", "ShotAngle",
+        "xG", "xG_pre", "xG_post", "XGModelVersion", "XGCalibrationVersion", "XA", "Speed", "PressureContext", "NearestDefenderDistance", "ShotAngle",
         "ShooterBoost", "DistanceToGoal", "BigChance", "X", "Y", "Z",
     ]
     if event_df.empty:
@@ -375,6 +376,10 @@ def event_table_to_shot_df(event_df: pd.DataFrame) -> pd.DataFrame:
         "outcome_type": "OutcomeType",
         "is_on_target": "OnTarget",
         "xg": "xG",
+        "xg_pre": "xG_pre",
+        "xg_post": "xG_post",
+        "xg_model_version": "XGModelVersion",
+        "xg_calibration_version": "XGCalibrationVersion",
         "xa": "XA",
         "speed": "Speed",
         "pressure_context": "PressureContext",

@@ -6,7 +6,7 @@ from typing import Iterable, Mapping
 
 import pandas as pd
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 class EventType(str, Enum):
@@ -106,6 +106,10 @@ EVENT_CONTRACT = TableContract(
         "shot_angle": "float64",
         "shooter_boost": "float64",
         "distance_to_goal": "float64",
+        "xg_pre": "float64",
+        "xg_post": "float64",
+        "xg_model_version": "string",
+        "xg_calibration_version": "string",
         "xg": "float64",
         "xa": "float64",
     },
