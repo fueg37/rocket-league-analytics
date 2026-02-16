@@ -2156,7 +2156,7 @@ if app_mode == "🔍 Single Match Analysis":
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
-        t1, t2, t3, t3b, t4, t5, t6, t8, t9, t10, t7 = st.tabs(["🚀 Kickoffs", "🌊 Match Narrative", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "⚡ Speed", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "📸 Export"])
+        t2, t1, t3, t3b, t4, t5, t8, t9, t10, t7 = st.tabs(["🌊 Match Narrative", "🚀 Kickoffs", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "📸 Export"])
             
         with t1:
             st.subheader("Kickoff Analysis")
@@ -2206,6 +2206,76 @@ if app_mode == "🔍 Single Match Analysis":
 
         with t2:
             st.subheader("Match Narrative")
+
+            # --- TEAM STATS OVERVIEW (ballchasing-style tug-of-war) ---
+            if not df.empty:
+                blue_df = df[df['Team'] == 'Blue']
+                orange_df = df[df['Team'] == 'Orange']
+                b_goals = int(blue_df['Goals'].sum())
+                o_goals = int(orange_df['Goals'].sum())
+                b_shots = int(blue_df['Shots'].sum())
+                o_shots = int(orange_df['Shots'].sum())
+                overview_stats = [
+                    ("Goals",           b_goals,                                            o_goals),
+                    ("Shots",           b_shots,                                            o_shots),
+                    ("Saves",           int(blue_df['Saves'].sum()),                        int(orange_df['Saves'].sum())),
+                    ("Assists",         int(blue_df['Assists'].sum()),                      int(orange_df['Assists'].sum())),
+                    ("Shooting %",      round(b_goals / max(b_shots, 1) * 100),             round(o_goals / max(o_shots, 1) * 100)),
+                    ("Score",           int(blue_df['Score'].sum()),                        int(orange_df['Score'].sum())),
+                    ("xG",              round(blue_df['xG'].sum(), 2),                      round(orange_df['xG'].sum(), 2)),
+                    ("Possession",      round(blue_df['Possession'].sum()),                 round(orange_df['Possession'].sum())),
+                    ("Boost Used",      int(blue_df['Boost Used'].sum()),                   int(orange_df['Boost Used'].sum())),
+                    ("Time Supersonic", round(blue_df['Time Supersonic'].sum(), 1),          round(orange_df['Time Supersonic'].sum(), 1)),
+                    ("Aerial Hits",     int(blue_df['Aerial Hits'].sum()),                  int(orange_df['Aerial Hits'].sum())),
+                ]
+                # Reverse for top-first display (Plotly y-axis goes bottom-up)
+                ov_labels = [s[0] for s in overview_stats][::-1]
+                ov_blue   = [s[1] for s in overview_stats][::-1]
+                ov_orange = [s[2] for s in overview_stats][::-1]
+                blue_fracs, orange_fracs = [], []
+                for bv, ov in zip(ov_blue, ov_orange):
+                    total = abs(bv) + abs(ov)
+                    if total > 0:
+                        blue_fracs.append(-bv / total)
+                        orange_fracs.append(ov / total)
+                    else:
+                        blue_fracs.append(-0.5)
+                        orange_fracs.append(0.5)
+
+                fig_overview = go.Figure()
+                fig_overview.add_trace(go.Bar(
+                    y=ov_labels, x=blue_fracs, orientation='h',
+                    marker_color=TEAM_COLORS["Blue"]["primary"], showlegend=False,
+                    hovertemplate='%{y}: %{customdata}<extra>Blue</extra>',
+                    customdata=ov_blue,
+                ))
+                fig_overview.add_trace(go.Bar(
+                    y=ov_labels, x=orange_fracs, orientation='h',
+                    marker_color=TEAM_COLORS["Orange"]["primary"], showlegend=False,
+                    hovertemplate='%{y}: %{customdata}<extra>Orange</extra>',
+                    customdata=ov_orange,
+                ))
+                # Centered stat labels + value annotations at edges
+                for i, (label, bv, ov) in enumerate(zip(ov_labels, ov_blue, ov_orange)):
+                    fig_overview.add_annotation(x=0, y=i, text=f"<b>{label}</b>",
+                        showarrow=False, font=dict(color='white', size=13), xanchor='center')
+                    fig_overview.add_annotation(x=-1.05, y=i, text=f"<b>{bv}</b>",
+                        showarrow=False, font=dict(color='white', size=13), xanchor='right')
+                    fig_overview.add_annotation(x=1.05, y=i, text=f"<b>{ov}</b>",
+                        showarrow=False, font=dict(color='white', size=13), xanchor='left')
+                fig_overview.update_layout(
+                    barmode='relative',
+                    xaxis=dict(visible=False, range=[-1.15, 1.15]),
+                    yaxis=dict(visible=False),
+                    plot_bgcolor='#1e1e1e', paper_bgcolor='rgba(0,0,0,0)',
+                    font=dict(color='white'),
+                    height=max(380, len(overview_stats) * 36),
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    bargap=0.25,
+                )
+                st.plotly_chart(fig_overview, use_container_width=True)
+            st.divider()
+
             # --- A. WIN PROBABILITY CHART ---
             try:
                 if not win_prob_df.empty:
@@ -2426,15 +2496,6 @@ if app_mode == "🔍 Single Match Analysis":
                     ))
                     fig.update_layout(get_field_layout(f"{target} Heatmap"))
                     st.plotly_chart(fig, use_container_width=True)
-
-        with t6:
-            c1, c2 = st.columns(2)
-            with c1:
-                fig = px.bar(df, x='Name', y='Time Supersonic', color='Team', title="Time Supersonic (s)", color_discrete_map=TEAM_COLOR_MAP)
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                fig = px.bar(df, x='Name', y='Boost Used', color='Team', title="Total Boost Used", color_discrete_map=TEAM_COLOR_MAP)
-                st.plotly_chart(fig, use_container_width=True)
 
         with t8:
             st.subheader("Advanced Analytics")
