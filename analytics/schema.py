@@ -23,66 +23,6 @@ class EventType(str, Enum):
     BOOST_PICKUP = "boost_pickup"
     KICKOFF = "kickoff"
 
-    def serialize(self) -> str:
-        return self.value
-
-    @classmethod
-    def parse(cls, raw: object) -> "EventType":
-        if isinstance(raw, cls):
-            return raw
-        if raw is None or pd.isna(raw):
-            raise ValueError("event type is missing")
-
-        token = str(raw).strip()
-        if not token:
-            raise ValueError("event type is empty")
-
-        if token.startswith("EventType."):
-            token = token.split(".", 1)[1]
-
-        member = cls.__members__.get(token)
-        if member is not None:
-            return member
-
-        lowered = token.lower()
-        try:
-            return cls(lowered)
-        except ValueError as exc:
-            raise ValueError(f"unknown event type: {raw}") from exc
-
-
-KNOWN_EVENT_TYPE_VALUES = frozenset(event_type.value for event_type in EventType)
-
-
-def serialize_event_type(event_type: EventType | str) -> str:
-    return EventType.parse(event_type).serialize()
-
-
-def normalize_event_type_value(raw: object) -> str:
-    return EventType.parse(raw).serialize()
-
-
-def normalize_event_type_series(series: pd.Series) -> pd.Series:
-    return series.map(normalize_event_type_value)
-
-
-def validate_event_types(df: pd.DataFrame, column: str = "event_type") -> None:
-    if df is None or df.empty or column not in df.columns:
-        return
-
-    unknown_values: set[str] = set()
-    for value in df[column].dropna().tolist():
-        token = str(value).strip()
-        if not token:
-            continue
-        try:
-            EventType.parse(value)
-        except ValueError:
-            unknown_values.add(token)
-
-    if unknown_values:
-        raise ValueError(f"Unknown event types in '{column}': {sorted(unknown_values)}")
-
 
 SHOT_LIFECYCLE_EVENT_TYPES = frozenset({
     EventType.SHOT_TAKEN,
