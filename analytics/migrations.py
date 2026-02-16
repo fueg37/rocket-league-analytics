@@ -26,6 +26,7 @@ EVENT_V4_DEFAULTS = {
     "xg_post": 0.0,
     "xg_model_version": "legacy",
     "xg_calibration_version": "legacy",
+    "source_shot_event_id": "",
 }
 
 def _apply_schema_version(df: pd.DataFrame) -> pd.DataFrame:

@@ -158,6 +158,7 @@ EVENT_CONTRACT = TableContract(
         "metric_value": "float64",
         "is_key_play": "bool",
         "outcome_type": "string",
+        "source_shot_event_id": "string",
         "is_on_target": "bool",
         "is_big_chance": "bool",
         "speed": "float64",
