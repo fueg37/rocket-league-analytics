@@ -22,7 +22,7 @@ from utils import (
     get_team_players, build_player_positions,
     frame_to_seconds, seconds_to_frame, fmt_time,
 )
-from analytics.schema import EventType, SCHEMA_VERSION, validate_event_types
+from analytics.schema import EventType, SCHEMA_VERSION, ensure_columns, validate_event_types
 from analytics.extraction import build_schema_tables, event_table_to_shot_df, event_table_to_kickoff_df
 from analytics.features import build_post_shot_features, build_pre_shot_features, classify_pressure_context
 from analytics.migrations import migrate_dataframe
@@ -52,6 +52,35 @@ def _events_of_type(event_df, *event_types: EventType) -> pd.DataFrame:
     validate_event_types(event_df)
     allowed = {event_type.value for event_type in event_types}
     return event_df[event_df["event_type"].isin(allowed)].copy()
+
+
+def normalize_kickoff_table(kickoff_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Backward/forward compatible kickoff table normalization for UI use.
+    Keeps analytics displays stable even when historical CSV rows came from
+    earlier schemas that did not include all kickoff fields.
+    """
+    if kickoff_df is None or kickoff_df.empty:
+        return kickoff_df
+
+    out = kickoff_df.copy()
+    if "Boost" not in out.columns and "BoostUsed" in out.columns:
+        out["Boost"] = out["BoostUsed"]
+
+    defaults = {
+        "Player": "Unknown",
+        "Spawn": "Unknown",
+        "Time to Hit": 0.0,
+        "Boost": 0,
+        "Result": "Neutral",
+        "Goal (5s)": False,
+        "End_X": 0.0,
+        "End_Y": 0.0,
+    }
+    out = ensure_columns(out, defaults.keys())
+    for col, default_value in defaults.items():
+        out[col] = out[col].fillna(default_value)
+    return out
 
 # --- 1. SETUP & IMPORTS ---
 try:
@@ -1833,7 +1862,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     shot_df_raw = calculate_shot_data(proto, game_df, pid_team, temp_map)
     schema_tables = build_schema_tables(manager, game_df, proto, match_id="single_match", file_name="session_upload", shot_df=shot_df_raw)
     shot_df = event_table_to_shot_df(schema_tables.event)
-    kickoff_df = event_table_to_kickoff_df(schema_tables.event, match_id="single_match")
+    kickoff_df = normalize_kickoff_table(event_table_to_kickoff_df(schema_tables.event, match_id="single_match"))
     momentum_series = calculate_contextual_momentum(game_df, proto)
     pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, schema_tables.event, pass_threshold)
     aerial_df = calculate_aerial_stats(proto, game_df, pid_team, temp_map)
@@ -2323,7 +2352,7 @@ if app_mode == "🔍 Single Match Analysis":
         schema_tables = _m["schema_tables"]
         shot_df = event_table_to_shot_df(schema_tables.event)
         pass_df = _m["pass_df"]
-        kickoff_df = event_table_to_kickoff_df(schema_tables.event, match_id=st.session_state.active_match)
+        kickoff_df = normalize_kickoff_table(event_table_to_kickoff_df(schema_tables.event, match_id=st.session_state.active_match))
         momentum_series = _m["momentum_series"]
         aerial_df = _m["aerial_df"]
         recovery_df = _m["recovery_df"]
@@ -2387,6 +2416,7 @@ if app_mode == "🔍 Single Match Analysis":
                         fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color='white')))
                         st.plotly_chart(fig, use_container_width=True)
                     st.markdown("#### Kickoff Log")
+                    disp_kickoff = normalize_kickoff_table(disp_kickoff)
                     disp_cols = ['Player', 'Spawn', 'Time to Hit', 'Boost', 'Result', 'Goal (5s)']
                     _style_fn = lambda x: 'color: green' if x == 'Win' or x == True else ('color: red' if x == 'Loss' else 'color: gray')
                     _styler = disp_kickoff[disp_cols].style
@@ -3399,7 +3429,7 @@ elif app_mode == "📈 Season Batch Processor":
                     wp_train = extract_win_prob_training_data(game_df, proto, pid_team)
                     if not wp_train.empty:
                         wp_training_list.append(wp_train)
-                    kickoff_df = event_table_to_kickoff_df(schema_tables.event, match_id=game_id)
+                    kickoff_df = normalize_kickoff_table(event_table_to_kickoff_df(schema_tables.event, match_id=game_id))
                     if not stats.empty and 'IsBot' in stats.columns and filter_ghosts: stats = stats[~stats['IsBot']]
                     if not stats.empty:
                         stats['MatchID'] = str(game_id)
