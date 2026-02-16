@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from analytics.schema import SCHEMA_VERSION, normalize_event_type_series, validate_event_types
+from analytics.schema import SCHEMA_VERSION, normalize_event_type_value, validate_event_types
 
 
 EVENT_V3_DEFAULTS = {
@@ -60,7 +60,10 @@ def _normalize_event_types(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "event_type" not in out.columns:
         return out
-    out["event_type"] = normalize_event_type_series(out["event_type"])
+
+    event_type = out["event_type"]
+    has_non_blank_value = event_type.notna() & event_type.astype(str).str.strip().ne("")
+    out.loc[has_non_blank_value, "event_type"] = event_type.loc[has_non_blank_value].map(normalize_event_type_value)
     return out
 
 def _migrate_event_v2_to_v3(df: pd.DataFrame) -> pd.DataFrame:
