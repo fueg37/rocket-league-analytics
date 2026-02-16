@@ -22,7 +22,7 @@ from utils import (
     get_team_players, build_player_positions,
     frame_to_seconds, seconds_to_frame, fmt_time,
 )
-from analytics.schema import SCHEMA_VERSION
+from analytics.schema import EventType, SCHEMA_VERSION, validate_event_types
 from analytics.extraction import build_schema_tables, event_table_to_shot_df, event_table_to_kickoff_df
 from analytics.features import build_post_shot_features, build_pre_shot_features, classify_pressure_context
 from analytics.migrations import migrate_dataframe
@@ -44,6 +44,14 @@ def themed_figure(*args, tier="support", intent=None, **kwargs):
 def themed_px(factory, *args, tier="support", intent=None, **kwargs):
     fig = factory(*args, **kwargs)
     return apply_chart_theme(fig, tier=tier, intent=intent)
+
+
+def _events_of_type(event_df, *event_types: EventType) -> pd.DataFrame:
+    if event_df is None or event_df.empty:
+        return pd.DataFrame()
+    validate_event_types(event_df)
+    allowed = {event_type.value for event_type in event_types}
+    return event_df[event_df["event_type"].isin(allowed)].copy()
 
 # --- 1. SETUP & IMPORTS ---
 try:
@@ -1044,7 +1052,7 @@ def calculate_advanced_passing(proto, game_df, pid_team, player_map, shot_df, ev
     if event_df is None or event_df.empty:
         return pd.DataFrame(columns=cols)
 
-    pass_events = event_df[event_df['event_type'] == 'pass_completed'].copy()
+    pass_events = _events_of_type(event_df, EventType.PASS_COMPLETED)
     if pass_events.empty:
         return pd.DataFrame(columns=cols)
 
@@ -1274,7 +1282,7 @@ def calculate_defensive_pressure(game_df, proto):
 def calculate_xg_against(proto, game_df, player_map, shot_df, event_df=None):
     """Assign conceded xG from canonical shot events to nearest defender."""
     if event_df is not None and not event_df.empty:
-        shots = event_df[event_df['event_type'] == 'shot_taken'].copy()
+        shots = _events_of_type(event_df, EventType.SHOT_TAKEN)
     else:
         shots = pd.DataFrame()
     if shots.empty and shot_df is not None and not shot_df.empty:
@@ -1343,7 +1351,7 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df, even
     """Calculate VAEP from canonical touch/challenge/pass/shot events."""
     if event_df is None or event_df.empty:
         return pd.DataFrame(), pd.DataFrame()
-    action_events = event_df[event_df['event_type'].isin(['touch', 'pass_completed', 'shot_taken', 'challenge_win', 'challenge_loss', 'clear'])].copy()
+    action_events = _events_of_type(event_df, EventType.TOUCH, EventType.PASS_COMPLETED, EventType.SHOT_TAKEN, EventType.CHALLENGE_WIN, EventType.CHALLENGE_LOSS, EventType.CLEAR)
     if action_events.empty:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -1351,17 +1359,17 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df, even
     for _, ev in action_events.sort_values('frame').iterrows():
         event_type = ev['event_type']
         base = 0.0
-        if event_type == 'shot_taken':
+        if event_type == EventType.SHOT_TAKEN.value:
             base = float(pd.to_numeric(ev.get('xg', 0.0), errors='coerce'))
-        elif event_type == 'pass_completed':
+        elif event_type == EventType.PASS_COMPLETED.value:
             base = 0.05
-        elif event_type == 'challenge_win':
+        elif event_type == EventType.CHALLENGE_WIN.value:
             base = 0.03
-        elif event_type == 'challenge_loss':
+        elif event_type == EventType.CHALLENGE_LOSS.value:
             base = -0.03
-        elif event_type == 'clear':
+        elif event_type == EventType.CLEAR.value:
             base = 0.02
-        elif event_type == 'touch':
+        elif event_type == EventType.TOUCH.value:
             base = 0.01
 
         pressure = str(ev.get('pressure_context', 'unknown'))
@@ -1506,7 +1514,7 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
 
     goals = []
     if event_df is not None and not event_df.empty:
-        goal_events = event_df[event_df['event_type'] == 'goal'].sort_values('frame')
+        goal_events = _events_of_type(event_df, EventType.GOAL).sort_values('frame')
         for _, g in goal_events.iterrows():
             goals.append((int(g['frame']), g.get('team', 'Blue'), g.get('player_name', '')))
     if not goals and hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
@@ -1555,7 +1563,7 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
 
     saves_last_min = {p.name: 0 for p in proto.players}
     if event_df is not None and not event_df.empty:
-        save_events = event_df[event_df['event_type'] == 'save']
+        save_events = _events_of_type(event_df, EventType.SAVE)
         for team in ('Blue', 'Orange'):
             team_saves = save_events[save_events['team'] != team]
             total_team_saved = len(team_saves)
@@ -1611,7 +1619,7 @@ def calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z,
 def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df, event_df=None):
     """Calculate xS for non-goal canonical shot events."""
     if event_df is not None and not event_df.empty:
-        shot_events = event_df[event_df['event_type'] == 'shot_taken'].copy()
+        shot_events = _events_of_type(event_df, EventType.SHOT_TAKEN)
     else:
         shot_events = pd.DataFrame()
     if shot_events.empty and shot_df is not None and not shot_df.empty:
