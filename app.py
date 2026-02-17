@@ -44,6 +44,7 @@ from analytics.shot_quality import (
     SHOT_EVENT_COLUMNS,
     validate_shot_metric_columns,
 )
+from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_VERSION
 
 logger = logging.getLogger(__name__)
 
@@ -1595,111 +1596,22 @@ def calculate_situational_stats(game_df, proto, pid_team, pid_name, player_team,
         })
     return pd.DataFrame(results)
 
-# --- 9i. MATH: EXPECTED SAVES (xS) ---
-def calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, saver_dist):
-    """Calculate expected save difficulty. Returns [0.01, 0.99].
-    Higher = harder save (more impressive if saved)."""
-    # Speed factor: faster shots are harder to save
-    speed_norm = min(shot_speed / 4000.0, 1.5)
-    speed_factor = 0.3 * (speed_norm ** 0.8)
-    # Reaction time proxy: closer shots = less time to react
-    reaction_time = dist_to_goal / max(shot_speed, 500.0)
-    reaction_factor = max(0.0, 0.3 * (1.0 - min(reaction_time / 1.0, 1.0)))
-    # Angle: shots aimed at corners are harder
-    angle_factor = 0.2 * min(abs(angle_off_center) / (np.pi / 2), 1.0)
-    # Height: aerial saves are harder
-    height_factor = 0.15 * min(max(shot_z - 200, 0) / 600.0, 1.0)
-    # Saver distance: if saver was far from optimal position, harder save
-    saver_factor = 0.1 * min(saver_dist / 2000.0, 1.0)
-    xs = speed_factor + reaction_factor + angle_factor + height_factor + saver_factor
-    return max(0.01, min(xs, 0.99))
-
+# --- 9i. MATH: SAVE IMPACT ANALYTICS (SDI/Expected Save Prob) ---
 def calculate_expected_saves(proto, game_df, player_pos, player_map, shot_df):
-    """Calculate xS for each saved shot. Returns (xs_events_df, xs_summary_df).
-    For each non-goal shot, finds the nearest defender and scores the save difficulty."""
-    if shot_df.empty:
-        return pd.DataFrame(), pd.DataFrame()
+    """Compatibility wrapper for save analytics.
 
-    saved_shots = shot_df[shot_df[SHOT_COL_RESULT] == 'Shot'].copy()
-    if saved_shots.empty:
-        return pd.DataFrame(), pd.DataFrame()
-
-    events = []
-    for _, shot in saved_shots.iterrows():
-        frame = shot[SHOT_COL_FRAME]
-        shot_team = shot['Team']
-        defending_team = "Orange" if shot_team == "Blue" else "Blue"
-        target_y = 5120.0 if shot_team == "Blue" else -5120.0
-
-        shot_speed = shot['Speed']
-        dist_to_goal = shot.get(COL_DIST_TO_GOAL, np.nan)
-        if pd.isna(dist_to_goal):
-            dist_to_goal = np.sqrt(shot[SHOT_COL_X]**2 + (target_y - shot[SHOT_COL_Y])**2)
-
-        angle_off_center = shot.get(COL_SHOT_ANGLE, np.nan)
-        if pd.isna(angle_off_center):
-            angle_off_center = np.arctan2(abs(shot[SHOT_COL_X]), abs(target_y - shot[SHOT_COL_Y]))
-
-        shot_z = shot.get(COL_SHOT_Z, np.nan)
-        if pd.isna(shot_z):
-            shot_z = 0
-            if 'ball' in game_df and frame in game_df.index:
-                try:
-                    shot_z = max(game_df['ball'].loc[frame]['pos_z'], 0)
-                except (KeyError, IndexError):
-                    pass
-
-        # Find nearest defending player at this frame
-        nearest_defender = None
-        nearest_dist = 99999
-        for pname, pd_info in player_pos.items():
-            if pd_info['team'] != defending_team:
-                continue
-            pi = min(np.searchsorted(pd_info['frames'], frame), len(pd_info['x']) - 1)
-            if pi < 0:
-                continue
-            px, py = pd_info['x'][pi], pd_info['y'][pi]
-            # Distance from defender to ball
-            dist = np.sqrt((px - shot[SHOT_COL_X])**2 + (py - shot[SHOT_COL_Y])**2)
-            if dist < nearest_dist:
-                nearest_dist = dist
-                nearest_defender = pname
-
-        if nearest_defender is None:
-            continue
-
-        saver_dist = shot.get(COL_GOALKEEPER_DIST, np.nan)
-        if pd.isna(saver_dist):
-            saver_dist = nearest_dist
-
-        xs = calculate_xs_probability(shot_speed, dist_to_goal, angle_off_center, shot_z, saver_dist)
-        events.append({
-            'Saver': nearest_defender, 'Team': defending_team,
-            'Frame': frame, 'Time': round(frame / REPLAY_FPS, 1),
-            'xS': round(xs, 3), 'ShotSpeed': int(shot_speed),
-            'DistToGoal': int(dist_to_goal), 'ShotHeight': int(shot_z),
-            'SaverDist': int(saver_dist), 'Shooter': shot['Player']
-        })
-
-    xs_events_df = pd.DataFrame(events)
-
-    # Build per-player summary
-    summary = []
-    for p in proto.players:
-        name = p.name
-        team = "Orange" if p.is_orange else "Blue"
-        p_saves = xs_events_df[xs_events_df['Saver'] == name] if not xs_events_df.empty else pd.DataFrame()
-        total_xs = round(p_saves['xS'].sum(), 2) if not p_saves.empty else 0
-        avg_xs = round(p_saves['xS'].mean(), 3) if not p_saves.empty else 0
-        hard_saves = int((p_saves['xS'] > 0.4).sum()) if not p_saves.empty else 0
-        summary.append({
-            'Name': name, 'Team': team,
-            'Saves_Nearby': len(p_saves) if not p_saves.empty else 0,
-            'Total_xS': total_xs, 'Avg_xS': avg_xs,
-            'Hard_Saves': hard_saves
-        })
-    xs_summary_df = pd.DataFrame(summary)
-    return xs_events_df, xs_summary_df
+    Returns (save_events_df, save_summary_df) with canonical save-impact fields
+    plus legacy alias columns consumed by older views.
+    """
+    pid_team = build_pid_team_map(proto)
+    return calculate_save_analytics(
+        proto=proto,
+        shot_df=shot_df,
+        player_pos=player_pos,
+        player_map=player_map,
+        pid_team=pid_team,
+        scoring_mode="heuristic",
+    )
 
 # --- 10. MATH: AGGREGATE ---
 def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, recovery_df=None, defense_df=None, xga_df=None, vaep_summary=None, rotation_summary=None, xs_summary=None, situational_df=None):
@@ -1751,7 +1663,7 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
                 "Goals Prevented": 0.0,
                 "Total_VAEP": 0.0, "Avg_VAEP": 0.0, "Positive_Actions": 0, "Negative_Actions": 0,
                 "Time_1st%": 0.0, "Time_2nd%": 0.0, "DoubleCommits": 0, "RotationBreaks": 0,
-                "Total_xS": 0.0, "Avg_xS": 0.0, "Hard_Saves": 0, "Saves_Nearby": 0,
+                "Total_SaveImpact": 0.0, "Avg_SaveImpact": 0.0, "Total_SaveDifficulty": 0.0, "Avg_SaveDifficulty": 0.0, "Total_ExpectedSaves": 0.0, "Actual_Saves": 0, "HighDifficultySaves": 0, "Total_xS": 0.0, "Avg_xS": 0.0, "Hard_Saves": 0, "Saves_Nearby": 0,
                 "Goals_First_Half": 0, "Goals_Second_Half": 0, "Goals_Last_Min": 0, "Saves_Last_Min": 0,
                 "Goals_When_Leading": 0, "Goals_When_Trailing": 0, "Goals_When_Tied": 0,
                 "Scored_First": False, "Comeback_Win": False, "Blown_Lead": False,
@@ -1818,7 +1730,7 @@ def calculate_final_stats(proto, game_df, shot_df, pass_df, aerial_df=None, reco
                 (xga_df, ['xGA', 'Shots Faced', 'On Target Faced', 'Goals Conceded (nearest)']),
                 (vaep_summary, ['Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']),
                 (rotation_summary, ['Time_1st%', 'Time_2nd%', 'DoubleCommits', 'RotationBreaks']),
-                (xs_summary, ['Total_xS', 'Avg_xS', 'Hard_Saves', 'Saves_Nearby']),
+                (xs_summary, ['Total_SaveImpact', 'Avg_SaveImpact', 'Total_SaveDifficulty', 'Avg_SaveDifficulty', 'Total_ExpectedSaves', 'Actual_Saves', 'HighDifficultySaves', 'Total_xS', 'Avg_xS', 'Hard_Saves', 'Saves_Nearby']),
                 (situational_df, ['Goals_First_Half', 'Goals_Second_Half', 'Goals_Last_Min', 'Saves_Last_Min',
                                   'Goals_When_Leading', 'Goals_When_Trailing', 'Goals_When_Tied',
                                   'Scored_First', 'Comeback_Win', 'Blown_Lead']),
@@ -2932,33 +2844,46 @@ if app_mode == "🔍 Single Match Analysis":
                 st.info("No VAEP data available.")
             st.divider()
 
-            # --- SECTION 7: Expected Saves (xS) ---
-            st.markdown("#### Expected Saves (xS)")
-            if not xs_summary.empty and xs_summary['Saves_Nearby'].sum() > 0:
+            # --- SECTION 7: Save Impact (SDI + Expected Save Probability) ---
+            st.markdown("#### Save Impact")
+            if not xs_summary.empty and xs_summary['SaveEvents'].sum() > 0:
+                ranked = xs_summary[xs_summary['SaveEvents'] > 0].copy()
                 xs1, xs2 = st.columns(2)
                 with xs1:
-                    fig_xs_bar = player_rank_lollipop(
-                        xs_summary[xs_summary['Saves_Nearby'] > 0],
-                        'Total_xS',
-                    )
-                    fig_xs_bar.update_layout(title="Total xS (Save Difficulty)")
-                    st.plotly_chart(fig_xs_bar, use_container_width=True)
+                    fig_impact = player_rank_lollipop(ranked, 'Total_SaveImpact')
+                    fig_impact.update_layout(title="Total Save Impact (Actual - Expected)")
+                    st.plotly_chart(fig_impact, use_container_width=True)
                 with xs2:
-                    fig_xs_avg = player_rank_lollipop(
-                        xs_summary[xs_summary['Saves_Nearby'] > 0],
-                        'Avg_xS',
-                    )
-                    fig_xs_avg.update_layout(title="Avg xS per Save")
-                    st.plotly_chart(fig_xs_avg, use_container_width=True)
-                xs_show_cols = ['Name', 'Team', 'Saves_Nearby', 'Total_xS', 'Avg_xS', 'Hard_Saves']
-                st.dataframe(xs_summary[xs_show_cols].sort_values('Total_xS', ascending=False),
-                    use_container_width=True, hide_index=True)
-                # Individual save events
+                    fig_difficulty = player_rank_lollipop(ranked, 'Avg_SaveDifficulty')
+                    fig_difficulty.update_layout(title="Avg Save Difficulty Index (SDI)")
+                    st.plotly_chart(fig_difficulty, use_container_width=True)
+
+                xs_show_cols = [
+                    'Name', 'Team', 'SaveEvents', 'Actual_Saves', 'Total_ExpectedSaves',
+                    'Total_SaveImpact', 'Avg_SaveDifficulty', 'HighDifficultySaves'
+                ]
+                st.dataframe(
+                    ranked[xs_show_cols].sort_values('Total_SaveImpact', ascending=False),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
                 if not xs_events_df.empty:
                     with st.expander("Individual Save Events"):
-                        st.dataframe(xs_events_df[['Saver', 'Shooter', 'Time', 'xS', 'ShotSpeed', 'ShotHeight', 'SaverDist']].sort_values('xS', ascending=False),
-                            use_container_width=True, hide_index=True)
-                st.caption("xS: save difficulty based on shot speed, distance, angle, height, and saver positioning. Higher = more impressive save.")
+                        event_cols = [
+                            'Saver', 'Shooter', 'Time', 'SaveImpact', 'SaveDifficultyIndex',
+                            'ExpectedSaveProb', 'ShotSpeed', 'ShotHeight', 'SaverDist',
+                            'AttributionSource', 'AttributionConfidence'
+                        ]
+                        st.dataframe(
+                            xs_events_df[event_cols].sort_values('SaveImpact', ascending=False),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                st.caption(
+                    f"Save analytics model: {SAVE_METRIC_MODEL_VERSION}. SDI is a heuristic difficulty index (0-1). "
+                    "ExpectedSaveProb estimates chance the defense saves. SaveImpact = 1 - ExpectedSaveProb for completed saves."
+                )
             else:
                 st.info("No save events to analyze.")
 
@@ -3489,7 +3414,7 @@ elif app_mode == "📈 Season Batch Processor":
                               ('xGOT', 0.0), ('xGOT - Goals', 0.0),
                               ('Total_VAEP', 0.0), ('Avg_VAEP', 0.0), ('Positive_Actions', 0), ('Negative_Actions', 0),
                               ('Time_1st%', 0.0), ('Time_2nd%', 0.0), ('DoubleCommits', 0), ('RotationBreaks', 0),
-                              ('Total_xS', 0.0), ('Avg_xS', 0.0), ('Hard_Saves', 0), ('Saves_Nearby', 0),
+                              ('Total_SaveImpact', 0.0), ('Avg_SaveImpact', 0.0), ('Total_SaveDifficulty', 0.0), ('Avg_SaveDifficulty', 0.0), ('Total_ExpectedSaves', 0.0), ('Actual_Saves', 0), ('HighDifficultySaves', 0), ('Total_xS', 0.0), ('Avg_xS', 0.0), ('Hard_Saves', 0), ('Saves_Nearby', 0),
                               ('Goals_First_Half', 0), ('Goals_Second_Half', 0), ('Goals_Last_Min', 0), ('Saves_Last_Min', 0),
                               ('Goals_When_Leading', 0), ('Goals_When_Trailing', 0), ('Goals_When_Tied', 0),
                               ('Scored_First', False), ('Comeback_Win', False), ('Blown_Lead', False)]:
@@ -3602,7 +3527,7 @@ elif app_mode == "📈 Season Batch Processor":
             metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'Avg Speed', 'Luck', 'Carry_Time',
                 'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA',
                 'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'DoubleCommits',
-                'Total_xS', 'Avg_xS', 'Hard_Saves',
+                'Total_SaveImpact', 'Avg_SaveImpact', 'Total_SaveDifficulty', 'Avg_SaveDifficulty', 'HighDifficultySaves',
                 'Goals_First_Half', 'Goals_Second_Half', 'Goals_Last_Min', 'Saves_Last_Min',
                 'Goals_When_Leading', 'Goals_When_Trailing', 'Goals_When_Tied'])
             t_opt1, t_opt2 = st.columns(2)
@@ -3756,7 +3681,7 @@ elif app_mode == "📈 Season Batch Processor":
             st.subheader("Career Insights")
             _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'xA', 'Avg Speed',
                 'Aerial Hits', 'Aerial %', 'Avg Recovery (s)', 'Shadow %', 'xGA',
-                'Total_VAEP', 'Avg_VAEP', 'Total_xS', 'Time_1st%', 'DoubleCommits', 'Possession', 'Carry_Time']
+                'Total_VAEP', 'Avg_VAEP', 'Total_SaveImpact', 'Avg_SaveDifficulty', 'Time_1st%', 'DoubleCommits', 'Possession', 'Carry_Time']
             _available_insight = [s for s in _insight_stats if s in hero_df.columns and hero_df[s].notna().any()]
 
             # --- 1. Win vs Loss Stat Splits ---
@@ -3826,7 +3751,7 @@ elif app_mode == "📈 Season Batch Processor":
 
             # --- 3. Personal Bests ---
             st.markdown("#### Personal Bests")
-            pb_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'Total_VAEP', 'Total_xS', 'Avg Speed']
+            pb_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'Total_VAEP', 'Total_SaveImpact', 'Avg Speed']
             pb_avail = [s for s in pb_stats if s in hero_df.columns]
             pb_cols = st.columns(min(len(pb_avail), 4))
             for i, s in enumerate(pb_avail):
