@@ -9,6 +9,9 @@ from __future__ import annotations
 import math
 from typing import Iterable, Mapping
 
+from analytics.contracts import flatten_metric_contract, metric_contract
+from analytics.stats_uncertainty import bootstrap_mean_interval, deterministic_seed, reliability_from_sample_size
+
 
 # Canonical metric columns
 COL_XG = "xG"
@@ -31,12 +34,46 @@ SHOT_COL_X = "X"
 SHOT_COL_Y = "Y"
 SHOT_COL_SPEED = "Speed"
 
-SHOT_EVENT_COLUMNS = (
+
+BASIC_SHOT_METRIC_COLUMNS = (
     SHOT_COL_PLAYER,
     SHOT_COL_TEAM,
     SHOT_COL_FRAME,
     COL_XG,
     COL_XGOT,
+    COL_ON_TARGET,
+    COL_TARGET_X,
+    COL_TARGET_Z,
+    SHOT_COL_RESULT,
+    SHOT_COL_X,
+    SHOT_COL_Y,
+)
+
+UNCERTAINTY_SHOT_METRIC_COLUMNS = (
+    "xG_CI_Low",
+    "xG_CI_High",
+    "xG_SampleSize",
+    "xG_Reliability",
+    "xGOT_CI_Low",
+    "xGOT_CI_High",
+    "xGOT_SampleSize",
+    "xGOT_Reliability",
+)
+
+SHOT_EVENT_COLUMNS = (
+    SHOT_COL_PLAYER,
+    SHOT_COL_TEAM,
+    SHOT_COL_FRAME,
+    COL_XG,
+    "xG_CI_Low",
+    "xG_CI_High",
+    "xG_SampleSize",
+    "xG_Reliability",
+    COL_XGOT,
+    "xGOT_CI_Low",
+    "xGOT_CI_High",
+    "xGOT_SampleSize",
+    "xGOT_Reliability",
     COL_ON_TARGET,
     COL_TARGET_X,
     COL_TARGET_Z,
@@ -182,24 +219,80 @@ def calculate_xgot_probability(
     return min(max(xgot, 0.01), 0.99)
 
 
+
+def calculate_xg_contract(
+    shot_x: float,
+    shot_y: float,
+    shot_z: float,
+    vel_x: float,
+    vel_y: float,
+    vel_z: float,
+    target_y: float,
+):
+    """Return xG in the shared uncertainty-aware scalar contract."""
+    xg = calculate_xg_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y)
+    spread = max(0.01, min(0.12, 0.08 * (1.0 - xg) + 0.02))
+    contract = metric_contract(
+        xg,
+        ci_low=max(0.0, xg - spread),
+        ci_high=min(1.0, xg + spread),
+        sample_size=1,
+        reliability="low",
+    )
+    return flatten_metric_contract("xG", contract)
+
+
+def calculate_xgot_contract(
+    shot_x: float,
+    shot_y: float,
+    shot_z: float,
+    vel_x: float,
+    vel_y: float,
+    vel_z: float,
+    target_y: float,
+):
+    """Return xGOT in the shared uncertainty-aware scalar contract."""
+    xgot = calculate_xgot_probability(shot_x, shot_y, shot_z, vel_x, vel_y, vel_z, target_y)
+    spread = max(0.015, min(0.16, 0.10 * (1.0 - xgot) + 0.03))
+    contract = metric_contract(
+        xgot,
+        ci_low=max(0.0, xgot - spread),
+        ci_high=min(1.0, xgot + spread),
+        sample_size=1,
+        reliability="low",
+    )
+    return flatten_metric_contract("xGOT", contract)
+
+
+def aggregate_metric_contract(values: Iterable[float], metric_name: str) -> dict[str, float | int | str]:
+    """Aggregate a scalar metric into mean + bootstrap interval contract columns."""
+    vals = [float(v) for v in values]
+    sample_size = len(vals)
+    if sample_size == 0:
+        return flatten_metric_contract(metric_name, metric_contract(0.0, sample_size=0, reliability="low"))
+    seed = deterministic_seed(metric_name, sample_size, round(sum(vals), 6))
+    mean, ci_low, ci_high = bootstrap_mean_interval(vals, seed=seed)
+    return flatten_metric_contract(
+        metric_name,
+        metric_contract(
+            mean,
+            ci_low=ci_low,
+            ci_high=ci_high,
+            sample_size=sample_size,
+            reliability=reliability_from_sample_size(sample_size),
+        ),
+    )
+
 def validate_shot_metric_columns(
     columns: Iterable[str], required: Iterable[str] | None = None
 ) -> tuple[bool, list[str]]:
-    """Validate required shot metric columns before chart rendering."""
+    """Validate required shot metric columns before chart rendering.
+
+    Contract fields are optional for backward compatibility; callers may pass
+    an explicit `required` list when strict uncertainty columns are needed.
+    """
     col_set = set(columns)
-    expected = list(required) if required is not None else [
-        SHOT_COL_PLAYER,
-        SHOT_COL_TEAM,
-        SHOT_COL_FRAME,
-        COL_XG,
-        COL_XGOT,
-        COL_ON_TARGET,
-        COL_TARGET_X,
-        COL_TARGET_Z,
-        SHOT_COL_RESULT,
-        SHOT_COL_X,
-        SHOT_COL_Y,
-    ]
+    expected = list(required) if required is not None else list(BASIC_SHOT_METRIC_COLUMNS)
     missing = [c for c in expected if c not in col_set]
     return len(missing) == 0, missing
 

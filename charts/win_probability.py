@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 
+from analytics.contracts import flatten_metric_contract, metric_contract
+from analytics.stats_uncertainty import bayesian_binomial_interval, deterministic_seed, reliability_from_sample_size
+from charts.formatters import reliability_badge
 from charts.theme import apply_chart_theme
 from constants import REPLAY_FPS, TEAM_COLORS
 
@@ -102,6 +105,44 @@ def _masked_series(times: np.ndarray, values: np.ndarray, states: np.ndarray, ta
     return np.where(mask, times, np.nan), np.where(mask, values, np.nan)
 
 
+
+def build_win_probability_contracts(
+    win_prob_df: pd.DataFrame,
+    *,
+    confidence: float = 0.95,
+) -> tuple[pd.DataFrame, dict[str, float | int | str]]:
+    """Create event-level + aggregate win-probability uncertainty contracts."""
+    if win_prob_df is None or win_prob_df.empty:
+        return pd.DataFrame(), flatten_metric_contract("WinProb", metric_contract(50.0, ci_low=50.0, ci_high=50.0, sample_size=0, reliability="low"))
+
+    df = win_prob_df.copy()
+    probs = pd.to_numeric(df.get("WinProb", 50), errors="coerce").fillna(50.0).clip(0, 100)
+    sample_size = len(df)
+    blue_advantage = int((probs >= 50).sum())
+    mean, lo, hi = bayesian_binomial_interval(
+        blue_advantage,
+        sample_size,
+        confidence=confidence,
+        seed=deterministic_seed("winprob", sample_size, float(probs.sum())),
+    )
+    aggregate = flatten_metric_contract(
+        "WinProb",
+        metric_contract(
+            float(probs.mean()),
+            ci_low=lo * 100.0,
+            ci_high=hi * 100.0,
+            sample_size=sample_size,
+            reliability=reliability_from_sample_size(sample_size),
+        ),
+    )
+
+    event_spread = (6.0 + (100.0 / max(1, sample_size)))
+    df["WinProb_CI_Low"] = (probs - event_spread).clip(lower=0)
+    df["WinProb_CI_High"] = (probs + event_spread).clip(upper=100)
+    df["WinProb_SampleSize"] = 1
+    df["WinProb_Reliability"] = "low"
+    return df, aggregate
+
 def build_win_probability_chart(
     win_prob_df: pd.DataFrame,
     is_overtime: bool,
@@ -116,19 +157,23 @@ def build_win_probability_chart(
         fig.update_layout(title=f"{title_prefix}Win Probability")
         return fig
 
-    times = pd.to_numeric(win_prob_df["Time"], errors="coerce").fillna(0).to_numpy(dtype=float)
+    contract_df, aggregate_contract = build_win_probability_contracts(win_prob_df)
+    times = pd.to_numeric(contract_df["Time"], errors="coerce").fillna(0).to_numpy(dtype=float)
     probs_raw = (
-        pd.to_numeric(win_prob_df["WinProb"], errors="coerce").fillna(50).clip(0, 100).to_numpy(dtype=float)
+        pd.to_numeric(contract_df["WinProb"], errors="coerce").fillna(50).clip(0, 100).to_numpy(dtype=float)
     )
     score_diff = (
-        pd.to_numeric(win_prob_df.get("ScoreDiff", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
+        pd.to_numeric(contract_df.get("ScoreDiff", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
     )
     probs = _smooth_probability(probs_raw, window=5)
+    ci_low = pd.to_numeric(contract_df.get("WinProb_CI_Low"), errors="coerce").fillna(pd.Series(probs_raw)).to_numpy(dtype=float)
+    ci_high = pd.to_numeric(contract_df.get("WinProb_CI_High"), errors="coerce").fillna(pd.Series(probs_raw)).to_numpy(dtype=float)
 
     states = _assign_states(probs)
     states = _debounce_states(states, min_run=3)
 
     subtitle = (model_meta or {}).get("subtitle", "")
+    contract_badge = reliability_badge(aggregate_contract.get("WinProb_Reliability", "low"), int(aggregate_contract.get("WinProb_SampleSize", 0)))
 
     blue_color = TEAM_COLORS["Blue"]["primary"]
     orange_color = TEAM_COLORS["Orange"]["primary"]
@@ -145,7 +190,32 @@ def build_win_probability_chart(
         layer="below",
     )
 
-    # Threshold-centered fill for directional control.
+    # Uncertainty ribbon and threshold-centered fill for directional control.
+
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=ci_high,
+            mode="lines",
+            line=dict(width=0),
+            hoverinfo="skip",
+            showlegend=False,
+            name="CI High",
+        )
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=ci_low,
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            fillcolor="rgba(148,163,184,0.18)",
+            hoverinfo="skip",
+            showlegend=True,
+            name="Confidence Band",
+        )
+    )
     base = np.full_like(probs, 50.0)
     above = np.where(probs >= 50, probs, 50)
     below = np.where(probs <= 50, probs, 50)
@@ -271,16 +341,15 @@ def build_win_probability_chart(
         ),
     )
 
-    if subtitle:
-        fig.add_annotation(
-            xref="paper",
-            yref="paper",
-            x=0,
-            y=1.11,
-            text=subtitle,
-            showarrow=False,
-            xanchor="left",
-            font=dict(size=10, color="#c9d1d9"),
-        )
+    fig.add_annotation(
+        xref="paper",
+        yref="paper",
+        x=0,
+        y=1.11,
+        text=f"{subtitle} | {contract_badge}" if subtitle else contract_badge,
+        showarrow=False,
+        xanchor="left",
+        font=dict(size=10, color="#c9d1d9"),
+    )
 
     return fig

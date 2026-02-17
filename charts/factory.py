@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -11,6 +12,7 @@ from charts.theme import apply_chart_theme, semantic_color
 from charts.formatters import (
     format_metric_series,
     format_metric_value,
+    reliability_badge,
     title_case_label,
 )
 from analytics.shot_quality import (
@@ -183,9 +185,14 @@ def session_composite_chart(summary_df):
         subplot_titles=("Win Rate %", "Avg Rating"),
     )
 
+    win_low = pd.to_numeric(ordered.get("Win Rate % CI Low", ordered["Win Rate %"]), errors="coerce").fillna(ordered["Win Rate %"])
+    win_high = pd.to_numeric(ordered.get("Win Rate % CI High", ordered["Win Rate %"]), errors="coerce").fillna(ordered["Win Rate %"])
+    rel_col = ordered.get("Win Rate % Reliability", pd.Series(["low"] * len(ordered)))
+
     hover_base = (
         "Session %{x}<br>"
         "Games per Session: %{customdata[0]}<br>"
+        "Reliability: %{customdata[1]}<br>"
     )
 
     fig.add_trace(
@@ -194,11 +201,20 @@ def session_composite_chart(summary_df):
             y=ordered["Win Rate %"],
             name="Win Rate %",
             marker_color=semantic_color("outcome", "win"),
-            text=ordered["Games per Session"].map(lambda v: f"n={int(v)}"),
+            text=[reliability_badge(rel_col.iloc[i], int(ordered["Games per Session"].iloc[i])) for i in range(len(ordered))],
             textposition="outside",
             cliponaxis=False,
-            customdata=ordered[["Games per Session"]],
-            hovertemplate=hover_base + "Win Rate %: %{y:.1f}%<extra></extra>",
+            customdata=np.column_stack([ordered["Games per Session"], rel_col, win_low, win_high]),
+            hovertemplate=hover_base + "Win Rate %: %{y:.1f}%<br>95% CI: [%{customdata[2]:.1f}%, %{customdata[3]:.1f}%]<extra></extra>",
+            error_y=dict(
+                type="data",
+                symmetric=False,
+                array=(win_high - ordered["Win Rate %"]).clip(lower=0),
+                arrayminus=(ordered["Win Rate %"] - win_low).clip(lower=0),
+                color="rgba(255,255,255,0.6)",
+                thickness=1,
+                width=3,
+            ),
         ),
         row=1,
         col=1,
@@ -212,8 +228,8 @@ def session_composite_chart(summary_df):
             mode="lines+markers",
             line=dict(color=semantic_color("dual_series", "secondary"), width=3),
             marker=dict(size=8),
-            customdata=ordered[["Games per Session"]],
-            hovertemplate=hover_base + "Avg Rating: %{y:.2f}<extra></extra>",
+            customdata=np.column_stack([ordered["Games per Session"], rel_col]),
+            hovertemplate=hover_base + "Avg Rating: %{y:.2f}<br>Use CI-aware summaries where available<extra></extra>",
         ),
         row=2,
         col=1,

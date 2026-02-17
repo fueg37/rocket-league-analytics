@@ -55,7 +55,9 @@ from analytics.shot_quality import (
     SHOT_COL_TEAM,
     SHOT_COL_X,
     SHOT_COL_Y,
+    BASIC_SHOT_METRIC_COLUMNS,
     SHOT_EVENT_COLUMNS,
+    UNCERTAINTY_SHOT_METRIC_COLUMNS,
     validate_shot_metric_columns,
 )
 from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_VERSION
@@ -1924,7 +1926,7 @@ def build_export_shot_map(shot_df, proto, include_goal_mouth=False):
     fig.update_layout(get_field_layout(""))
     fig.update_layout(title=None, margin=dict(l=0, r=0, t=0, b=0))
     if not shot_df.empty:
-        ok, _ = validate_shot_metric_columns(shot_df.columns)
+        ok, _ = validate_shot_metric_columns(shot_df.columns, required=BASIC_SHOT_METRIC_COLUMNS)
         if not ok:
             return fig
         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
@@ -2381,7 +2383,6 @@ if app_mode == "🔍 Single Match Analysis":
         focus_players = st.sidebar.multiselect(
             "🎯 Focus Analysis On:",
             all_players,
-            default=st.session_state.shared_focus_players,
             key="shared_focus_players",
             help="Shared player filter synced across related match tabs.",
         )
@@ -2616,7 +2617,8 @@ if app_mode == "🔍 Single Match Analysis":
 
         shot_schema_ok, shot_schema_missing = (True, [])
         if not shot_df.empty:
-            shot_schema_ok, shot_schema_missing = validate_shot_metric_columns(shot_df.columns)
+            shot_schema_ok, shot_schema_missing = validate_shot_metric_columns(shot_df.columns, required=BASIC_SHOT_METRIC_COLUMNS)
+            _, shot_uncertainty_missing = validate_shot_metric_columns(shot_df.columns, required=UNCERTAINTY_SHOT_METRIC_COLUMNS)
 
         with t3:
             if not shot_df.empty:
