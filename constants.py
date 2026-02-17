@@ -50,3 +50,10 @@ TEAM_COLORS = {
 
 # Convenience: Plotly color_discrete_map used in px.bar / px.scatter
 TEAM_COLOR_MAP = {t: TEAM_COLORS[t]["primary"] for t in TEAM_COLORS}
+
+
+# ── Canonical categorical orders ────────────────────────────────────────
+KICKOFF_SPAWN_ORDER = ["Center", "Off-Center", "Diagonal"]
+GAME_STATE_ORDER = ["Leading", "Tied", "Trailing"]
+ZONE_ORDER = ["Def", "Mid", "Off", "Wall"]
+TEAM_ORDER = ["Blue", "Orange"]

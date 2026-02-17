@@ -152,7 +152,7 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
     cols = [name_col, team_col, metric_col]
     rank_df = df[cols].copy()
     rank_df[metric_col] = pd.to_numeric(rank_df[metric_col], errors="coerce").fillna(0)
-    rank_df = rank_df.sort_values(metric_col, ascending=False).reset_index(drop=True)
+    rank_df = rank_df.sort_values([metric_col, name_col], ascending=[False, True], kind='mergesort').reset_index(drop=True)
 
     fig = go.Figure()
     labels = _format_values(rank_df[metric_col])
