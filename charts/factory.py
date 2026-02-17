@@ -178,6 +178,19 @@ def coach_report_timeline_chart(
     coach_report_df: pd.DataFrame,
 ):
     """Build a tactical timeline combining win probability, momentum, and coach opportunities."""
+
+    def _normalized_uncertainty_series(df: pd.DataFrame, column: str) -> pd.Series:
+        """Return a numeric Series aligned to the plotting dataframe index."""
+        if column not in df.columns:
+            return pd.Series(np.nan, index=df.index, dtype=float)
+
+        values = df[column]
+        if np.isscalar(values):
+            return pd.Series([values] * len(df), index=df.index, dtype=float)
+
+        series = pd.to_numeric(pd.Series(values), errors="coerce")
+        return series.reindex(df.index)
+
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     wp = win_prob_df.copy() if win_prob_df is not None else pd.DataFrame()
@@ -229,16 +242,19 @@ def coach_report_timeline_chart(
         if not report.empty:
             max_missed = max(float(report["MissedSwing"].abs().max()), 1e-6)
             report["marker_size"] = 9 + 18 * (report["MissedSwing"].abs() / max_missed)
-            report["action"] = report.get("RecommendedAction", "n/a").fillna("n/a").astype(str)
-            report["role"] = report.get("Role", "n/a").fillna("n/a").astype(str)
-            p10 = pd.to_numeric(report.get("ExpectedSwingP10", np.nan), errors="coerce")
-            p90 = pd.to_numeric(report.get("ExpectedSwingP90", np.nan), errors="coerce")
+            report["action"] = pd.Series(report.get("RecommendedAction", "n/a"), index=report.index).fillna("n/a").astype(str)
+            report["role"] = pd.Series(report.get("Role", "n/a"), index=report.index).fillna("n/a").astype(str)
+            report["ExpectedSwingMean"] = _normalized_uncertainty_series(report, "ExpectedSwingMean")
+            p10 = _normalized_uncertainty_series(report, "ExpectedSwingP10")
+            p90 = _normalized_uncertainty_series(report, "ExpectedSwingP90")
+            report["ExpectedSwingIntervalWidth"] = _normalized_uncertainty_series(report, "ExpectedSwingIntervalWidth")
+            interval_present = pd.notna(p10) & pd.notna(p90)
             interval_labels = np.where(
-                p10.notna() & p90.notna(),
+                interval_present,
                 "[" + p10.round(3).astype(str) + ", " + p90.round(3).astype(str) + "]",
                 "n/a",
             )
-            clip_key = report.get("ClipKey", "n/a").fillna("n/a").astype(str)
+            clip_key = pd.Series(report.get("ClipKey", "n/a"), index=report.index).fillna("n/a").astype(str)
 
             customdata = np.column_stack(
                 [
