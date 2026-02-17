@@ -2,9 +2,12 @@
 
 Eliminates the 14+ duplicated player/team mapping patterns scattered across app.py.
 """
+import math
+from numbers import Real
+
 import numpy as np
 
-from constants import REPLAY_FPS
+from constants import REPLAY_FPS, SPEED_CANONICAL_UNIT, SPEED_DISPLAY_UNIT_DEFAULT, UU_PER_SEC_TO_MPH
 
 
 # ── Player / Team Mappings ──────────────────────────────────────────────
@@ -76,3 +79,44 @@ def fmt_time(seconds):
     m = int(seconds) // 60
     s = int(seconds) % 60
     return f"{m}:{s:02d}"
+
+
+# ── Speed Unit Helpers ───────────────────────────────────────────────────
+
+def uu_per_sec_to_mph(value: float) -> float:
+    """Convert speed from Unreal Units/second (uu/s) to miles/hour (mph)."""
+    return float(value) * UU_PER_SEC_TO_MPH
+
+
+def format_speed(value, unit=SPEED_DISPLAY_UNIT_DEFAULT, precision=1, na="N/A") -> str:
+    """Format a speed value with defensive handling and unit conversion.
+
+    Input values are always interpreted as uu/s. Conversion is only applied for
+    display units (currently mph and uu/s).
+    """
+    if value is None or isinstance(value, bool):
+        return na
+
+    if not isinstance(value, Real):
+        return na
+
+    numeric_value = float(value)
+    if math.isnan(numeric_value):
+        return na
+
+    normalized_unit = str(unit or SPEED_DISPLAY_UNIT_DEFAULT).strip().lower()
+    if normalized_unit == "mph":
+        converted_value = uu_per_sec_to_mph(numeric_value)
+        display_unit = "mph"
+    elif normalized_unit in {"uu/s", "uups"}:
+        converted_value = numeric_value
+        display_unit = SPEED_CANONICAL_UNIT
+    else:
+        return na
+
+    try:
+        decimals = max(0, int(precision))
+    except (TypeError, ValueError):
+        decimals = 1
+
+    return f"{converted_value:.{decimals}f} {display_unit}"

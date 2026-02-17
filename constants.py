@@ -6,6 +6,12 @@ Single source of truth for field geometry, team colors, and app configuration.
 # ── Replay ──────────────────────────────────────────────────────────────
 REPLAY_FPS = 30  # Standard replay frame rate
 
+# ── Speed units ──────────────────────────────────────────────────────────
+SPEED_CANONICAL_UNIT = "uu/s"
+SPEED_DISPLAY_UNIT_DEFAULT = "mph"
+UU_PER_SEC_TO_MPH = 0.0223694
+SUPERSONIC_SPEED_UU_PER_SEC = 2200
+
 # ── Persistence ─────────────────────────────────────────────────────────
 DB_FILE = "career_stats.csv"
 KICKOFF_DB_FILE = "career_kickoffs.csv"

@@ -16,6 +16,7 @@ from constants import (
     MAX_STORED_MATCHES, FIELD_HALF_X, FIELD_HALF_Y, WALL_HEIGHT,
     GOAL_HALF_W, GOAL_DEPTH, GOAL_HEIGHT, CENTER_CIRCLE_R,
     AXIS_PAD_X, AXIS_PAD_Y, TEAM_COLORS, TEAM_COLOR_MAP,
+    SUPERSONIC_SPEED_UU_PER_SEC,
 )
 from utils import (
     build_pid_team_map, build_pid_name_map, build_player_team_map,
@@ -1118,9 +1119,8 @@ def calculate_aerial_stats(proto, game_df, pid_team, player_map):
 
 # --- 9c. MATH: RECOVERY TIME ---
 def calculate_recovery_time(proto, game_df, pid_team, player_map):
-    """After each hit, measure how many seconds until the player reaches supersonic (2200 uu/s)."""
+    """After each hit, measure how many seconds until the player reaches supersonic."""
     hits = proto.game_stats.hits
-    SUPERSONIC = 2200
     MAX_RECOVERY_FRAMES = 5 * REPLAY_FPS  # cap at 5 seconds
 
     recovery_events = []  # per-hit recovery times
@@ -1142,7 +1142,7 @@ def calculate_recovery_time(proto, game_df, pid_team, player_map):
                 continue
             vels = window[['vel_x', 'vel_y', 'vel_z']].to_numpy()
             speeds = np.linalg.norm(vels, axis=1)
-            supersonic_idx = np.where(speeds >= SUPERSONIC)[0]
+            supersonic_idx = np.where(speeds >= SUPERSONIC_SPEED_UU_PER_SEC)[0]
             if len(supersonic_idx) > 0:
                 recovery_frames = supersonic_idx[0]
                 recovery_sec = recovery_frames / float(REPLAY_FPS)
