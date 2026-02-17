@@ -552,7 +552,7 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
     return apply_chart_theme(fig, tier="support")
 
 
-def chemistry_network_chart(pair_df: pd.DataFrame, *, min_samples: int = 3, title: str = "Chemistry Network"):
+def chemistry_network_chart(pair_df: pd.DataFrame, *, min_samples: int = 3, title: str = "Partnership Network"):
     """Render player chemistry graph (nodes=players, edges=chemistry strength)."""
     fig = go.Figure()
     if pair_df is None or pair_df.empty:
@@ -621,12 +621,39 @@ def chemistry_network_chart(pair_df: pd.DataFrame, *, min_samples: int = 3, titl
 def chemistry_ranking_table(pair_df: pd.DataFrame, *, top_n: int = 20) -> pd.DataFrame:
     """Season-level pair ranking table for UI display."""
     if pair_df is None or pair_df.empty:
-        return pd.DataFrame(columns=["Rank", "Team", "Pair", "Chemistry", "CI", "Samples", "Reliability"])
+        return pd.DataFrame(columns=[
+            "Rank",
+            "Team",
+            "Partnership",
+            "Partnership Index",
+            "Impact (xGD/match)",
+            "Win Lift",
+            "Confidence Interval",
+            "Samples",
+            "Confidence",
+        ])
     out = pair_df.copy()
-    out["Pair"] = out["Player1"].astype(str) + " + " + out["Player2"].astype(str)
-    score_col = "ChemistryScore_Shrunk" if "ChemistryScore_Shrunk" in out.columns else "ChemistryScore"
-    out = out.sort_values(score_col, ascending=False).head(int(top_n)).reset_index(drop=True)
+    out["Partnership"] = out["Player1"].astype(str) + " + " + out["Player2"].astype(str)
+    index_col = "Partnership Index" if "Partnership Index" in out.columns else ("ChemistryScore_Shrunk" if "ChemistryScore_Shrunk" in out.columns else "ChemistryScore")
+    impact_col = "expected_xgd_lift_per_match" if "expected_xgd_lift_per_match" in out.columns else "ExpectedValueGain_Shrunk"
+    win_lift_col = "win_rate_lift_points" if "win_rate_lift_points" in out.columns else None
+    conf_col = "confidence_level" if "confidence_level" in out.columns else "Reliability"
+
+    out = out.sort_values(index_col, ascending=False).head(int(top_n)).reset_index(drop=True)
     out["Rank"] = np.arange(1, len(out) + 1)
-    out["Chemistry"] = out[score_col].map(lambda v: f"{float(v):.3f}")
-    out["CI"] = out.apply(lambda r: f"[{float(r.get('CI_Low', 0)):.3f}, {float(r.get('CI_High', 0)):.3f}]", axis=1)
-    return out[["Rank", "Team", "Pair", "Chemistry", "CI", "Samples", "Reliability"]]
+    out["Partnership Index"] = out[index_col].map(lambda v: f"{float(v):.1f}")
+    out["Impact (xGD/match)"] = out[impact_col].map(lambda v: f"{float(v):+.3f}")
+    out["Win Lift"] = out[win_lift_col].map(lambda v: f"{float(v):+.2f} pts") if win_lift_col else "N/A"
+    out["Confidence Interval"] = out.apply(lambda r: f"[{float(r.get('ci_low', r.get('CI_Low', 0))):.1f}, {float(r.get('ci_high', r.get('CI_High', 0))):.1f}]", axis=1)
+    out["Confidence"] = out[conf_col].astype(str).str.title()
+    return out[[
+        "Rank",
+        "Team",
+        "Partnership",
+        "Partnership Index",
+        "Impact (xGD/match)",
+        "Win Lift",
+        "Confidence Interval",
+        "Samples",
+        "Confidence",
+    ]]
