@@ -553,7 +553,7 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
 
 
 def chemistry_network_chart(pair_df: pd.DataFrame, *, min_samples: int = 3, title: str = "Partnership Network"):
-    """Render player chemistry graph (nodes=players, edges=chemistry strength)."""
+    """Render player chemistry graph with contract-aware edge and node semantics."""
     fig = go.Figure()
     if pair_df is None or pair_df.empty:
         fig.update_layout(title=title)
@@ -574,34 +574,62 @@ def chemistry_network_chart(pair_df: pd.DataFrame, *, min_samples: int = 3, titl
     radius = 1.0
     pos = {p: (radius * np.cos(t), radius * np.sin(t)) for p, t in zip(players, theta)}
 
-    strength_col = "ChemistryScore_Shrunk" if "ChemistryScore_Shrunk" in data.columns else "ChemistryScore"
-    min_s, max_s = float(data[strength_col].min()), float(data[strength_col].max())
-    span = max(1e-9, max_s - min_s)
+    index_col = "Partnership Index" if "Partnership Index" in data.columns else ("ChemistryScore_Shrunk" if "ChemistryScore_Shrunk" in data.columns else "ChemistryScore")
+    impact_col = "expected_xgd_lift_per_match" if "expected_xgd_lift_per_match" in data.columns else "ExpectedValueGain_Shrunk"
+    confidence_col = "confidence_level" if "confidence_level" in data.columns else "Reliability"
+    sample_col = "sample_count" if "sample_count" in data.columns else "Samples"
+    driver_col = "primary_driver_label" if "primary_driver_label" in data.columns else None
 
+    data[index_col] = pd.to_numeric(data.get(index_col, 0), errors="coerce").fillna(0.0)
+    data[impact_col] = pd.to_numeric(data.get(impact_col, 0), errors="coerce").fillna(0.0)
+    data[sample_col] = pd.to_numeric(data.get(sample_col, data.get("Samples", 0)), errors="coerce").fillna(0).astype(int)
+
+    min_index, max_index = float(data[index_col].min()), float(data[index_col].max())
+    index_span = max(1e-9, max_index - min_index)
+    max_abs_impact = max(1e-9, float(data[impact_col].abs().max()))
+
+    confidence_weight = {"high": 1.0, "medium": 0.75, "low": 0.5}
+
+    def _impact_rgba(impact: float) -> str:
+        intensity = min(1.0, abs(impact) / max_abs_impact)
+        alpha = 0.18 + (0.72 * intensity)
+        # Positive impact: cool cyan, negative impact: warm red.
+        return f"rgba(99, 210, 255, {alpha:.2f})" if impact >= 0 else f"rgba(242, 99, 143, {alpha:.2f})"
+
+    weighted_degree = {p: 0.0 for p in players}
     for _, row in data.iterrows():
         x0, y0 = pos[row["Player1"]]
         x1, y1 = pos[row["Player2"]]
-        strength = float(row[strength_col])
-        norm = (strength - min_s) / span
+        partnership_index = float(row[index_col])
+        impact = float(row[impact_col])
+        conf = str(row.get(confidence_col, "Low")).strip().lower()
+        samples = int(row.get(sample_col, row.get("Samples", 0)))
+        primary_driver = str(row.get(driver_col, "Balanced chemistry")).strip() if driver_col else "Balanced chemistry"
+        norm = (partnership_index - min_index) / index_span
         width = 1.0 + 6.0 * norm
-        color = f"rgba(99, 210, 255, {0.18 + 0.72 * norm:.2f})"
+        color = _impact_rgba(impact)
+        conf_weight = confidence_weight.get(conf, 0.5)
+        weighted_value = partnership_index * conf_weight * max(1.0, np.sqrt(max(samples, 1) / max(min_samples, 1)))
+        weighted_degree[row["Player1"]] += weighted_value
+        weighted_degree[row["Player2"]] += weighted_value
+
         fig.add_trace(go.Scatter(
             x=[x0, x1], y=[y0, y1], mode="lines", showlegend=False,
             line=dict(width=width, color=color),
+            customdata=[[partnership_index, impact, str(row.get(confidence_col, "Low")).title(), samples, primary_driver]],
             hovertemplate=(
                 f"{row['Player1']} ↔ {row['Player2']}<br>"
-                f"Strength: {strength:.3f}<br>"
-                f"Samples: {int(row['Samples'])}<extra></extra>"
+                "Partnership Index: %{customdata[0]:.1f}<br>"
+                "Projected xGD Impact: %{customdata[1]:+.3f}<br>"
+                "Confidence: %{customdata[2]} (%{customdata[3]} samples)<br>"
+                "Primary Driver: %{customdata[4]}<extra></extra>"
             ),
         ))
 
-    degree = {p: 0.0 for p in players}
-    for _, row in data.iterrows():
-        score = float(row[strength_col])
-        degree[row["Player1"]] += score
-        degree[row["Player2"]] += score
-
-    node_size = [18 + 7 * (degree[p] - min(degree.values())) / max(1e-9, (max(degree.values()) - min(degree.values()))) for p in players]
+    min_degree = min(weighted_degree.values())
+    max_degree = max(weighted_degree.values())
+    degree_span = max(1e-9, max_degree - min_degree)
+    node_size = [18 + 9 * (weighted_degree[p] - min_degree) / degree_span for p in players]
     fig.add_trace(go.Scatter(
         x=[pos[p][0] for p in players],
         y=[pos[p][1] for p in players],
