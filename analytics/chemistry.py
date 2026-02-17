@@ -18,6 +18,32 @@ CHEMISTRY_COMPONENT_COLUMNS = [
     "PressureReleaseReliability",
 ]
 
+COMPONENT_LABELS = {
+    "ExpectedValueGain": "Chance Creation",
+    "RotationalComplementarity": "Rotation Balance",
+    "PossessionHandoffEfficiency": "Possession Linking",
+    "PressureReleaseReliability": "Pressure Release",
+}
+
+CONTEXT_LABELS = {
+    "context_score_leading": "Leading game states",
+    "context_score_tied": "Tied game states",
+    "context_score_trailing": "Trailing game states",
+    "context_score_defensive_third": "Defensive third",
+    "context_score_offensive_third": "Offensive third",
+    "context_score_high_pressure": "High-pressure phases",
+}
+
+CONTEXT_PRIORITY = list(CONTEXT_LABELS.keys())
+
+
+@dataclass(frozen=True)
+class ExplanationThresholds:
+    strong_sample_count: int = 14
+    medium_sample_count: int = 8
+    tight_ci_width: float = 10.0
+    wide_ci_width: float = 22.0
+
 
 @dataclass(frozen=True)
 class ChemistryShrinkageConfig:
@@ -50,6 +76,8 @@ def _normalize_presence_frames(frames_df: pd.DataFrame) -> pd.DataFrame:
         "RotationRole": frames_df[rotation_col].astype(str) if rotation_col else "Unknown",
         "PossessionTeam": frames_df[possession_col].astype(str) if possession_col else frames_df[team_col].astype(str),
         "UnderPressure": pd.to_numeric(frames_df[pressure_col], errors="coerce").fillna(0).astype(int) if pressure_col else 0,
+        "ScoreDelta": pd.to_numeric(frames_df[_get_col(frames_df, ["ScoreDelta", "score_delta", "GoalDiff", "goal_diff"], default=None)], errors="coerce").fillna(0.0) if _get_col(frames_df, ["ScoreDelta", "score_delta", "GoalDiff", "goal_diff"], default=None) else 0.0,
+        "FieldThird": frames_df[_get_col(frames_df, ["FieldThird", "PitchThird", "ZoneThird", "field_third"], default=None)].astype(str) if _get_col(frames_df, ["FieldThird", "PitchThird", "ZoneThird", "field_third"], default=None) else frames_df[rotation_col].astype(str) if rotation_col else "Unknown",
     })
     return norm.dropna(subset=["Frame", "Player", "Team"])
 
@@ -100,6 +128,103 @@ def _ci(values: Iterable[float], seed_parts: Sequence[object], cfg: ChemistryShr
     return bootstrap_mean_interval(values, confidence=cfg.confidence, iterations=cfg.bootstrap_iterations, seed=deterministic_seed(*seed_parts))
 
 
+def _classify_confidence_tier(row: pd.Series, thresholds: ExplanationThresholds) -> str:
+    sample_count = int(pd.to_numeric(row.get("sample_count", row.get("Samples", 0)), errors="coerce") or 0)
+    ci_low = float(pd.to_numeric(row.get("ci_low", row.get("CI_Low", 0.0)), errors="coerce") or 0.0)
+    ci_high = float(pd.to_numeric(row.get("ci_high", row.get("CI_High", 0.0)), errors="coerce") or 0.0)
+    ci_width = max(0.0, ci_high - ci_low)
+    if sample_count >= thresholds.strong_sample_count and ci_width <= thresholds.tight_ci_width:
+        return "high"
+    if sample_count >= thresholds.medium_sample_count and ci_width <= thresholds.wide_ci_width:
+        return "medium"
+    return "low"
+
+
+def _context_mean(granular: pd.DataFrame, group_keys: Sequence[str], flag_col: str) -> pd.Series:
+    selected = granular[granular[flag_col] > 0]
+    if selected.empty:
+        return pd.Series(dtype=float)
+    return selected.groupby(list(group_keys))["ChemistryScore"].mean()
+
+
+def _build_primary_secondary_driver_labels(summary: pd.DataFrame) -> pd.DataFrame:
+    pct_cols = [f"{col}_ContributionPct" for col in CHEMISTRY_COMPONENT_COLUMNS]
+    labels = []
+    secondary_labels = []
+    for _, row in summary.iterrows():
+        sorted_cols = sorted(
+            pct_cols,
+            key=lambda c: float(pd.to_numeric(row.get(c, 0.0), errors="coerce") or 0.0),
+            reverse=True,
+        )
+        primary = sorted_cols[0].replace("_ContributionPct", "") if sorted_cols else CHEMISTRY_COMPONENT_COLUMNS[0]
+        secondary = sorted_cols[1].replace("_ContributionPct", "") if len(sorted_cols) > 1 else primary
+        labels.append(COMPONENT_LABELS.get(primary, primary))
+        secondary_labels.append(COMPONENT_LABELS.get(secondary, secondary))
+    summary["primary_driver_label"] = labels
+    summary["secondary_driver_label"] = secondary_labels
+    return summary
+
+
+def _build_context_driver_labels(summary: pd.DataFrame) -> pd.DataFrame:
+    best_labels = []
+    risk_labels = []
+    for _, row in summary.iterrows():
+        context_scores = {k: float(pd.to_numeric(row.get(k, 0.0), errors="coerce") or 0.0) for k in CONTEXT_PRIORITY}
+        best_key = max(CONTEXT_PRIORITY, key=lambda k: context_scores[k])
+        risk_key = min(CONTEXT_PRIORITY, key=lambda k: context_scores[k])
+        best_labels.append(CONTEXT_LABELS[best_key])
+        risk_labels.append(CONTEXT_LABELS[risk_key])
+    summary["best_context_label"] = best_labels
+    summary["risk_context_label"] = risk_labels
+    return summary
+
+
+def _driver_phrase(label: str) -> str:
+    phrases = {
+        "Pressure Release": "absorbing pressure and exiting cleanly",
+        "Chance Creation": "turning possession into chance creation",
+        "Rotation Balance": "staying connected through rotation cycles",
+        "Possession Linking": "sustaining possession through clean handoffs",
+    }
+    return phrases.get(label, "building stable two-player sequences")
+
+
+def _certainty_prefix(tier: str) -> str:
+    if tier == "high":
+        return "Strongest when"
+    if tier == "medium":
+        return "Often strongest when"
+    return "Shows signs of being strongest when"
+
+
+def _certainty_verb(tier: str) -> str:
+    if tier == "high":
+        return "Best used in"
+    if tier == "medium":
+        return "Often useful in"
+    return "May be best used in"
+
+
+def add_chemistry_explanations(df: pd.DataFrame, *, thresholds: ExplanationThresholds | None = None) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+    t = thresholds or ExplanationThresholds()
+    out = df.copy()
+    primary_explanations = []
+    context_explanations = []
+    for _, row in out.iterrows():
+        tier = _classify_confidence_tier(row, t)
+        primary = str(row.get("primary_driver_label", "Chemistry"))
+        best_context = str(row.get("best_context_label", "neutral contexts")).lower()
+        driver_phrase = _driver_phrase(primary)
+        primary_explanations.append(f"{_certainty_prefix(tier)} {driver_phrase}.")
+        context_explanations.append(f"{_certainty_verb(tier)} {best_context} for {primary.lower()}.")
+    out["primary_driver_explanation"] = primary_explanations
+    out["context_usage_explanation"] = context_explanations
+    return out
+
+
 def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFrame, *, config: ChemistryShrinkageConfig | None = None) -> pd.DataFrame:
     cfg = config or ChemistryShrinkageConfig()
     frames = _normalize_presence_frames(frames_df)
@@ -114,6 +239,16 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
         if len(players) < 2:
             continue
         ev_frame = events[(events["Frame"] == frame) & (events["Team"] == team)]
+        score_delta = float(pd.to_numeric(grp.get("ScoreDelta", 0.0), errors="coerce").fillna(0.0).mean())
+        state_leading = int(score_delta > 0)
+        state_tied = int(score_delta == 0)
+        state_trailing = int(score_delta < 0)
+
+        field_values = grp.get("FieldThird", pd.Series(["Unknown"] * len(grp), index=grp.index)).astype(str).str.lower()
+        state_def_third = int(field_values.str.contains("def|back").mean() >= 0.5)
+        state_off_third = int(field_values.str.contains("off|att|front").mean() >= 0.5)
+        high_pressure = int(pd.to_numeric(grp["UnderPressure"], errors="coerce").fillna(0).mean() > 0)
+
         for p1, p2 in combinations(players, 2):
             base = float(baseline_by_player.get(p1, 0.0) + baseline_by_player.get(p2, 0.0)) / 2.0
             joint_events = ev_frame[ev_frame["Players"].apply(lambda x: p1 in x and p2 in x)]
@@ -122,11 +257,10 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
             roles = grp.set_index("Player")["RotationRole"].to_dict()
             role_comp = 1.0 if roles.get(p1) != roles.get(p2) else 0.2
 
-            handoffs = ev_frame[(ev_frame["FromPlayer"] == p1) & (ev_frame["ToPlayer"] == p2) | (ev_frame["FromPlayer"] == p2) & (ev_frame["ToPlayer"] == p1)]
+            handoffs = ev_frame[((ev_frame["FromPlayer"] == p1) & (ev_frame["ToPlayer"] == p2)) | ((ev_frame["FromPlayer"] == p2) & (ev_frame["ToPlayer"] == p1))]
             handoff_eff = float(handoffs["Success"].mean()) if not handoffs.empty else 0.0
 
-            pressured = int(grp["UnderPressure"].mean() > 0)
-            pr_rel = float(ev_frame["PressureRelease"].mean()) if pressured and not ev_frame.empty else 0.0
+            pr_rel = float(ev_frame["PressureRelease"].mean()) if high_pressure and not ev_frame.empty else 0.0
 
             rows.append({
                 "Team": team,
@@ -137,42 +271,32 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
                 "RotationalComplementarity": role_comp,
                 "PossessionHandoffEfficiency": handoff_eff,
                 "PressureReleaseReliability": pr_rel,
+                "state_leading": state_leading,
+                "state_tied": state_tied,
+                "state_trailing": state_trailing,
+                "state_defensive_third": state_def_third,
+                "state_offensive_third": state_off_third,
+                "state_high_pressure": high_pressure,
             })
 
     granular = pd.DataFrame(rows)
     if granular.empty:
         return pd.DataFrame(columns=[
-            "Team",
-            "Player1",
-            "Player2",
-            "Samples",
-            *CHEMISTRY_COMPONENT_COLUMNS,
-            "ChemistryScore",
-            "ChemistryScore_Shrunk",
-            "CI_Low",
-            "CI_High",
-            "Reliability",
-            "Partnership Index",
-            "Value Lift",
-            "Rotation Fit",
-            "Handoff Quality",
-            "Pressure Escape",
-            "confidence_level",
-            "ci_low",
-            "ci_high",
-            "sample_count",
-            "expected_xgd_lift_per_match",
-            "win_rate_lift_points",
-            "PartnershipIndex",
-            "ConfidenceLevel",
-            "SampleCount",
-            "CI_Low_Index",
-            "CI_High_Index",
+            "Team", "Player1", "Player2", "Samples", *CHEMISTRY_COMPONENT_COLUMNS,
+            "ChemistryScore", "ChemistryScore_Shrunk", "CI_Low", "CI_High", "Reliability",
+            "Partnership Index", "Value Lift", "Rotation Fit", "Handoff Quality", "Pressure Escape",
+            "confidence_level", "ci_low", "ci_high", "sample_count", "expected_xgd_lift_per_match",
+            "win_rate_lift_points", "PartnershipIndex", "ConfidenceLevel", "SampleCount", "CI_Low_Index", "CI_High_Index",
+            *[f"{col}_ContributionPct" for col in CHEMISTRY_COMPONENT_COLUMNS],
+            *CONTEXT_PRIORITY,
+            "primary_driver_label", "secondary_driver_label", "best_context_label", "risk_context_label",
+            "primary_driver_explanation", "context_usage_explanation",
         ])
 
     granular["ChemistryScore"] = granular[CHEMISTRY_COMPONENT_COLUMNS].mean(axis=1)
     global_means = {col: float(pd.to_numeric(granular[col], errors="coerce").fillna(0).mean()) for col in (CHEMISTRY_COMPONENT_COLUMNS + ["ChemistryScore"])}
-    summary = granular.groupby(["Team", "Player1", "Player2"], as_index=False).agg(
+    group_keys = ["Team", "Player1", "Player2"]
+    summary = granular.groupby(group_keys, as_index=False).agg(
         Samples=("Frame", "nunique"),
         ExpectedValueGain=("ExpectedValueGain", "mean"),
         RotationalComplementarity=("RotationalComplementarity", "mean"),
@@ -183,9 +307,23 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
 
     for col in CHEMISTRY_COMPONENT_COLUMNS + ["ChemistryScore"]:
         gmean = global_means.get(col, float(summary[col].mean()))
-        summary[f"{col}_Shrunk"] = [
-            _shrink(float(v), int(n), gmean, cfg) for v, n in zip(summary[col], summary["Samples"])
-        ]
+        summary[f"{col}_Shrunk"] = [_shrink(float(v), int(n), gmean, cfg) for v, n in zip(summary[col], summary["Samples"])]
+
+    for context_col, state_col in {
+        "context_score_leading": "state_leading",
+        "context_score_tied": "state_tied",
+        "context_score_trailing": "state_trailing",
+        "context_score_defensive_third": "state_defensive_third",
+        "context_score_offensive_third": "state_offensive_third",
+        "context_score_high_pressure": "state_high_pressure",
+    }.items():
+        context_series = _context_mean(granular, group_keys, state_col)
+        if context_series.empty:
+            summary[context_col] = summary["ChemistryScore"]
+        else:
+            context_df = context_series.rename(context_col).reset_index()
+            summary = summary.merge(context_df, on=group_keys, how="left")
+            summary[context_col] = summary[context_col].fillna(summary["ChemistryScore"])
 
     cis = []
     for _, row in summary.iterrows():
@@ -198,8 +336,19 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
     summary["Reliability"] = summary["Samples"].map(lambda n: reliability_from_sample_size(int(n)))
     summary["ChemistryScore_Shrunk"] = summary["ChemistryScore_Shrunk"].astype(float)
 
+    shrunk_component_cols = [f"{col}_Shrunk" for col in CHEMISTRY_COMPONENT_COLUMNS]
+    positive_mass = summary[shrunk_component_cols].clip(lower=0.0).sum(axis=1)
+    for raw_col, shrunk_col in zip(CHEMISTRY_COMPONENT_COLUMNS, shrunk_component_cols):
+        pct_col = f"{raw_col}_ContributionPct"
+        summary[pct_col] = (
+            summary[shrunk_col].clip(lower=0.0) / positive_mass.where(positive_mass > 0, 1.0) * 100.0
+        ).fillna(25.0)
+
     summary = apply_partnership_contract(summary)
-    # Migration aliases: retain legacy chemistry fields while emitting the new contract.
+    summary = _build_primary_secondary_driver_labels(summary)
+    summary = _build_context_driver_labels(summary)
+    summary = add_chemistry_explanations(summary)
+
     summary["PartnershipIndex"] = summary["Partnership Index"]
     summary["ConfidenceLevel"] = summary["confidence_level"]
     summary["SampleCount"] = summary["sample_count"]
