@@ -12,7 +12,17 @@ from charts.theme import apply_chart_theme
 from constants import REPLAY_FPS, TEAM_COLORS
 
 
-def extract_goal_events(proto: Any, pid_team: dict[str, str], pid_name_map: dict[str, str] | None = None, max_frame: int | None = None) -> list[dict[str, Any]]:
+STATE_BLUE = "Favored Blue"
+STATE_TOSSUP = "Toss-up"
+STATE_ORANGE = "Favored Orange"
+
+
+def extract_goal_events(
+    proto: Any,
+    pid_team: dict[str, str],
+    pid_name_map: dict[str, str] | None = None,
+    max_frame: int | None = None,
+) -> list[dict[str, Any]]:
     """Extract goal timeline events for chart annotation layers."""
     events: list[dict[str, Any]] = []
     if not hasattr(proto, "game_metadata") or not hasattr(proto.game_metadata, "goals"):
@@ -23,7 +33,11 @@ def extract_goal_events(proto: Any, pid_team: dict[str, str], pid_name_map: dict
         if max_frame is not None:
             frame = min(frame, int(max_frame))
 
-        scorer_pid = str(goal.player_id.id) if hasattr(goal, "player_id") and hasattr(goal.player_id, "id") else ""
+        scorer_pid = (
+            str(goal.player_id.id)
+            if hasattr(goal, "player_id") and hasattr(goal.player_id, "id")
+            else ""
+        )
         team = pid_team.get(scorer_pid, "Blue")
         scorer_name = pid_name_map.get(scorer_pid, "Unknown") if pid_name_map else "Unknown"
 
@@ -40,10 +54,52 @@ def extract_goal_events(proto: Any, pid_team: dict[str, str], pid_name_map: dict
     return events
 
 
-def _state_series(times: np.ndarray, values: np.ndarray, mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    x = np.where(mask, times, np.nan)
-    y = np.where(mask, values, np.nan)
-    return x, y
+def _smooth_probability(values: np.ndarray, window: int = 5) -> np.ndarray:
+    """Centered rolling mean for visual smoothness without changing data semantics."""
+    if window <= 1:
+        return values
+    return (
+        pd.Series(values)
+        .rolling(window=window, center=True, min_periods=1)
+        .mean()
+        .to_numpy(dtype=float)
+    )
+
+
+def _assign_states(probs: np.ndarray, low: float = 45.0, high: float = 55.0) -> np.ndarray:
+    states = np.full(len(probs), STATE_TOSSUP, dtype=object)
+    states[probs > high] = STATE_BLUE
+    states[probs < low] = STATE_ORANGE
+    return states
+
+
+def _debounce_states(states: np.ndarray, min_run: int = 3) -> np.ndarray:
+    """Reduce one-second flicker between adjacent state bands."""
+    if len(states) <= 2 or min_run <= 1:
+        return states
+
+    out = states.copy()
+    i = 0
+    n = len(out)
+    while i < n:
+        j = i + 1
+        while j < n and out[j] == out[i]:
+            j += 1
+        run_len = j - i
+
+        if run_len < min_run:
+            left = out[i - 1] if i > 0 else None
+            right = out[j] if j < n else None
+            replacement = left if left == right and left is not None else (left or right or out[i])
+            out[i:j] = replacement
+        i = j
+
+    return out
+
+
+def _masked_series(times: np.ndarray, values: np.ndarray, states: np.ndarray, target: str) -> tuple[np.ndarray, np.ndarray]:
+    mask = states == target
+    return np.where(mask, times, np.nan), np.where(mask, values, np.nan)
 
 
 def build_win_probability_chart(
@@ -61,8 +117,16 @@ def build_win_probability_chart(
         return fig
 
     times = pd.to_numeric(win_prob_df["Time"], errors="coerce").fillna(0).to_numpy(dtype=float)
-    probs = pd.to_numeric(win_prob_df["WinProb"], errors="coerce").fillna(50).clip(0, 100).to_numpy(dtype=float)
-    score_diff = pd.to_numeric(win_prob_df.get("ScoreDiff", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
+    probs_raw = (
+        pd.to_numeric(win_prob_df["WinProb"], errors="coerce").fillna(50).clip(0, 100).to_numpy(dtype=float)
+    )
+    score_diff = (
+        pd.to_numeric(win_prob_df.get("ScoreDiff", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
+    )
+    probs = _smooth_probability(probs_raw, window=5)
+
+    states = _assign_states(probs)
+    states = _debounce_states(states, min_run=3)
 
     model_label = (model_meta or {}).get("label", "Heuristic")
     subtitle = (model_meta or {}).get("subtitle", "")
@@ -77,46 +141,62 @@ def build_win_probability_chart(
         x1=float(times.max()),
         y0=45,
         y1=55,
-        fillcolor="rgba(148,163,184,0.12)",
+        fillcolor="rgba(148,163,184,0.10)",
         line=dict(width=0),
         layer="below",
     )
 
-    # Advantage area fills around 50% threshold
+    # Threshold-centered fill for directional control.
     base = np.full_like(probs, 50.0)
     above = np.where(probs >= 50, probs, 50)
     below = np.where(probs <= 50, probs, 50)
-
     fig.add_trace(go.Scatter(x=times, y=base, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig.add_trace(go.Scatter(x=times, y=above, mode="lines", line=dict(width=0), fill="tonexty", fillcolor="rgba(0,123,255,0.18)", hoverinfo="skip", showlegend=False))
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=above,
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            fillcolor="rgba(0,123,255,0.16)",
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
     fig.add_trace(go.Scatter(x=times, y=base, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig.add_trace(go.Scatter(x=times, y=below, mode="lines", line=dict(width=0), fill="tonexty", fillcolor="rgba(255,153,0,0.18)", hoverinfo="skip", showlegend=False))
+    fig.add_trace(
+        go.Scatter(
+            x=times,
+            y=below,
+            mode="lines",
+            line=dict(width=0),
+            fill="tonexty",
+            fillcolor="rgba(255,153,0,0.16)",
+            hoverinfo="skip",
+            showlegend=False,
+        )
+    )
 
-    # Segmented semantic lines
-    favored_blue = probs > 55
-    tossup = (probs >= 45) & (probs <= 55)
-    favored_orange = probs < 45
-    segments = [
-        (favored_blue, "Favored Blue", blue_color),
-        (tossup, "Toss-up", "#c9d1d9"),
-        (favored_orange, "Favored Orange", orange_color),
-    ]
-
-    customdata = np.column_stack([score_diff, np.full_like(probs, model_label, dtype=object)])
+    customdata = np.column_stack([score_diff, np.full_like(probs, model_label, dtype=object), probs_raw])
     hovertemplate = (
         "<b>t=%{x:.0f}s</b><br>Blue Win: %{y:.1f}%"
+        "<br>Raw model output: %{customdata[2]:.1f}%"
         "<br>Score Diff (Blue-Orange): %{customdata[0]:.0f}"
         "<br>Model: %{customdata[1]}<extra></extra>"
     )
 
-    for mask, name, color in segments:
-        x_seg, y_seg = _state_series(times, probs, mask)
+    for name, color in (
+        (STATE_BLUE, blue_color),
+        (STATE_TOSSUP, "#c9d1d9"),
+        (STATE_ORANGE, orange_color),
+    ):
+        x_seg, y_seg = _masked_series(times, probs, states, name)
         fig.add_trace(
             go.Scatter(
                 x=x_seg,
                 y=y_seg,
                 mode="lines",
-                line=dict(color=color, width=3),
+                line=dict(color=color, width=3, shape="spline", smoothing=0.55),
                 name=name,
                 legendgroup=name,
                 customdata=customdata,
@@ -125,30 +205,49 @@ def build_win_probability_chart(
             )
         )
 
-    # Threshold and phase markers
+    # Neutral threshold line.
     fig.add_shape(
         type="line",
         x0=float(times.min()),
         y0=50,
         x1=float(times.max()),
         y1=50,
-        line=dict(color="rgba(201,209,217,0.7)", width=1, dash="dot"),
+        line=dict(color="rgba(201,209,217,0.65)", width=1, dash="dot"),
     )
 
     if is_overtime:
-        fig.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.8)")
-        fig.add_annotation(x=300, y=103, text="OT Start", showarrow=False, font=dict(size=10, color="#ffcc00"))
-        fig.add_vrect(x0=300, x1=float(times.max()), fillcolor="rgba(255,204,0,0.07)", line_width=0, layer="below")
+        fig.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.75)")
+        fig.add_annotation(
+            x=300,
+            y=102,
+            text="OT Start",
+            showarrow=False,
+            font=dict(size=10, color="#ffcc00"),
+        )
+        fig.add_vrect(
+            x0=300,
+            x1=float(times.max()),
+            fillcolor="rgba(255,204,0,0.06)",
+            line_width=0,
+            layer="below",
+        )
 
-    # Goal event layer
+    # Goal event layer: short top stems to avoid full-chart clutter.
     for evt in events or []:
         color = blue_color if evt.get("team") == "Blue" else orange_color
         x = float(evt.get("time", 0))
-        fig.add_vline(x=x, line_width=1, line_dash="dot", line_color=f"{color}")
+        fig.add_shape(
+            type="line",
+            x0=x,
+            x1=x,
+            y0=84,
+            y1=100,
+            line=dict(color=color, width=1, dash="dot"),
+        )
         fig.add_trace(
             go.Scatter(
                 x=[x],
-                y=[99],
+                y=[100],
                 mode="markers",
                 marker=dict(size=8, symbol="diamond", color=color, line=dict(color="white", width=1)),
                 name=evt.get("label", "Goal"),
@@ -161,16 +260,18 @@ def build_win_probability_chart(
     fig.update_layout(
         title=title,
         yaxis=dict(title="Blue Win %", range=[0, 100], dtick=25, showgrid=True),
-        xaxis=dict(
-            title="Time (Seconds)",
-            showgrid=True,
-            dtick=30,
-            rangeslider=dict(visible=True, thickness=0.08, bgcolor="rgba(255,255,255,0.05)"),
-        ),
+        xaxis=dict(title="Time (Seconds)", showgrid=True, dtick=30),
         height=320,
-        margin=dict(l=24, r=24, t=70, b=26),
+        margin=dict(l=24, r=24, t=84, b=44),
         hovermode="x unified",
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        legend=dict(
+            orientation="h",
+            yanchor="bottom",
+            y=1.01,
+            xanchor="right",
+            x=1,
+            font=dict(size=10),
+        ),
     )
 
     if subtitle:
@@ -178,7 +279,7 @@ def build_win_probability_chart(
             xref="paper",
             yref="paper",
             x=0,
-            y=1.2,
+            y=1.11,
             text=subtitle,
             showarrow=False,
             xanchor="left",
