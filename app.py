@@ -194,6 +194,93 @@ def _build_opportunity_comparison_grid(row: pd.Series) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _build_coach_role_impact_chart(report_df: pd.DataFrame) -> go.Figure:
+    """Summarize cumulative missed swing by contextual role."""
+    role_df = report_df.copy()
+    role_df["MissedSwing"] = pd.to_numeric(role_df["MissedSwing"], errors="coerce")
+    role_df = role_df.dropna(subset=["Role", "MissedSwing"])
+
+    role_summary = (
+        role_df.groupby("Role", as_index=False)
+        .agg(TotalMissedSwing=("MissedSwing", "sum"), OpportunityCount=("Role", "size"))
+        .sort_values("TotalMissedSwing", ascending=False)
+    )
+    role_summary["RoleLabel"] = role_summary["Role"].map(lambda value: title_case_label(str(value)))
+
+    fig = themed_px(
+        px.bar,
+        role_summary,
+        x="TotalMissedSwing",
+        y="RoleLabel",
+        orientation="h",
+        text="TotalMissedSwing",
+        custom_data=["OpportunityCount"],
+        tier="support",
+        intent="outcome",
+        variant="negative",
+    )
+    fig.update_traces(
+        marker_color=semantic_color("outcome", "negative"),
+        texttemplate="%{x:+.3f}",
+        hovertemplate="Role: %{y}<br>Total missed swing: %{x:+.3f}<br>Windows: %{customdata[0]}<extra></extra>",
+    )
+    fig.update_layout(
+        title="Role Impact (Missed Swing)",
+        xaxis_title="Cumulative Missed Swing",
+        yaxis_title="",
+        showlegend=False,
+    )
+    return fig
+
+
+def _build_coach_action_mix_chart(report_df: pd.DataFrame) -> go.Figure:
+    """Show recommended-action mix weighted by absolute missed swing."""
+    action_df = report_df.copy()
+    action_df["MissedSwing"] = pd.to_numeric(action_df["MissedSwing"], errors="coerce")
+    action_df = action_df.dropna(subset=["RecommendedAction", "MissedSwing"])
+    action_df["Weight"] = action_df["MissedSwing"].abs()
+
+    action_summary = (
+        action_df.groupby("RecommendedAction", as_index=False)
+        .agg(
+            WeightedSwing=("Weight", "sum"),
+            AvgMissedSwing=("MissedSwing", "mean"),
+            OpportunityCount=("RecommendedAction", "size"),
+        )
+        .sort_values("WeightedSwing", ascending=False)
+    )
+    action_summary["ActionLabel"] = action_summary["RecommendedAction"].map(
+        lambda value: title_case_label(str(value).replace("_", " "))
+    )
+
+    fig = themed_px(
+        px.bar,
+        action_summary,
+        x="ActionLabel",
+        y="WeightedSwing",
+        text="WeightedSwing",
+        custom_data=["OpportunityCount", "AvgMissedSwing"],
+        tier="support",
+        intent="threshold",
+        variant="emphasis",
+    )
+    fig.update_traces(
+        marker_color=semantic_color("threshold", "emphasis"),
+        texttemplate="%{y:.3f}",
+        hovertemplate=(
+            "Action: %{x}<br>Weighted swing: %{y:.3f}<br>Windows: %{customdata[0]}"
+            "<br>Avg missed swing: %{customdata[1]:+.3f}<extra></extra>"
+        ),
+    )
+    fig.update_layout(
+        title="Recommended Action Mix (Weighted by Swing)",
+        xaxis_title="Recommended Corrective Action",
+        yaxis_title="Weighted Swing (|MissedSwing|)",
+        showlegend=False,
+    )
+    return fig
+
+
 def apply_dark_export_legibility(fig: go.Figure):
     """Ensure export charts keep high-contrast text/grid in dark theme."""
     fig.update_layout(
@@ -3504,6 +3591,52 @@ if app_mode == "🔍 Single Match Analysis":
                 timeline_fig = coach_report_timeline_chart(win_prob_df, momentum_series, coach_report_df)
                 st.plotly_chart(timeline_fig, use_container_width=True)
                 st.caption("Timeline aligns win probability and momentum with missed-opportunity markers so you can scan context before reviewing clips.")
+
+                role_impact_fig = _build_coach_role_impact_chart(coach_report_df)
+                action_mix_fig = _build_coach_action_mix_chart(coach_report_df)
+                chart_col_1, chart_col_2 = st.columns(2)
+                with chart_col_1:
+                    st.plotly_chart(role_impact_fig, use_container_width=True)
+                with chart_col_2:
+                    st.plotly_chart(action_mix_fig, use_container_width=True)
+
+                role_context = (
+                    coach_report_df.assign(MissedSwing=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce"))
+                    .dropna(subset=["Role", "MissedSwing"])
+                    .groupby("Role", as_index=False)
+                    .agg(TotalMissedSwing=("MissedSwing", "sum"), OpportunityCount=("Role", "size"))
+                    .sort_values("TotalMissedSwing", ascending=False)
+                    .head(1)
+                )
+                action_context = (
+                    coach_report_df.assign(
+                        MissedSwing=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce"),
+                        SwingWeight=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce").abs(),
+                    )
+                    .dropna(subset=["RecommendedAction", "SwingWeight"])
+                    .groupby("RecommendedAction", as_index=False)
+                    .agg(WeightedSwing=("SwingWeight", "sum"), OpportunityCount=("RecommendedAction", "size"))
+                    .sort_values("WeightedSwing", ascending=False)
+                    .head(1)
+                )
+
+                insight_col_1, insight_col_2 = st.columns(2)
+                with insight_col_1:
+                    if not role_context.empty:
+                        top_role = role_context.iloc[0]
+                        st.info(
+                            f"**Top costly role context:** {title_case_label(str(top_role['Role']))} "
+                            f"accounts for {top_role['TotalMissedSwing']:+.3f} cumulative swing "
+                            f"across {int(top_role['OpportunityCount'])} key windows."
+                        )
+                with insight_col_2:
+                    if not action_context.empty:
+                        top_action = action_context.iloc[0]
+                        st.info(
+                            f"**Top corrective action signal:** {title_case_label(str(top_action['RecommendedAction']).replace('_', ' '))} "
+                            f"shows the largest weighted impact ({top_action['WeightedSwing']:.3f}) "
+                            f"across {int(top_action['OpportunityCount'])} opportunities."
+                        )
 
                 top_report = coach_report_df.head(5).copy()
                 top_report["ExpectedSwing"] = pd.to_numeric(top_report["ExpectedSwing"], errors="coerce").round(3)
