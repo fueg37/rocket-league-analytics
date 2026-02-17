@@ -72,6 +72,7 @@ from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_V
 from analytics.possession_value import compute_action_value_deltas, encode_replay_states
 from analytics.aggregations.value_reports import build_player_value_reports
 from analytics.counterfactuals import build_coach_report
+from analytics.narrative_engine import generate_narrative_report
 
 logger = logging.getLogger(__name__)
 
@@ -2703,6 +2704,71 @@ if app_mode == "🔍 Single Match Analysis":
 
         with t2:
             st.subheader("Match Narrative")
+
+            with st.expander("🧠 Narrative Studio", expanded=True):
+                ns_col1, ns_col2, ns_col3 = st.columns(3)
+                with ns_col1:
+                    ns_tone = st.selectbox("Audience Tone", ["balanced", "hype", "coach"], index=0, key="ns_tone")
+                with ns_col2:
+                    ns_verbosity = st.selectbox("Verbosity", ["brief", "standard", "deep"], index=1, key="ns_verbosity")
+                with ns_col3:
+                    ns_role = st.selectbox(
+                        "Role Target",
+                        ["solo_queue", "team_scrim", "coaching_review"],
+                        index=2,
+                        format_func=lambda r: r.replace("_", " ").title(),
+                        key="ns_role_target",
+                    )
+
+                narrative_report = generate_narrative_report(
+                    momentum_series=momentum_series,
+                    possession_value_df=vaep_df,
+                    rotation_summary=rotation_summary,
+                    shot_df=shot_df,
+                    save_events_df=xs_events_df,
+                    situational_df=situational_df,
+                    kickoff_df=kickoff_df,
+                    tone=ns_tone,
+                    verbosity=ns_verbosity,
+                    role_target=ns_role,
+                )
+                if narrative_report.claims:
+                    for claim in narrative_report.claims:
+                        st.markdown(f"**{claim.phase.replace('_', ' ').title()}** — {claim.text}")
+                        st.caption(f"{claim.confidence_language.title()} ({claim.confidence:.2f})")
+                        for ev in claim.evidence:
+                            ev_bits = [f"source={ev.source}"]
+                            if ev.row_index is not None:
+                                ev_bits.append(f"row={ev.row_index}")
+                            if ev.frame is not None:
+                                ev_bits.append(f"frame={ev.frame}")
+                            st.caption(f"Evidence: {', '.join(ev_bits)} · {ev.detail}")
+                    st.markdown("**Role-targeted recommendations**")
+                    for rec in narrative_report.recommendations:
+                        st.markdown(f"- {rec}")
+                else:
+                    st.info("Narrative Studio could not generate evidence-linked claims for the current dataset.")
+
+                md_out = narrative_report.to_markdown()
+                json_out = narrative_report.to_json()
+                export_col1, export_col2 = st.columns(2)
+                with export_col1:
+                    st.download_button(
+                        "Download Narrative (Markdown)",
+                        data=md_out,
+                        file_name="narrative_studio_report.md",
+                        mime="text/markdown",
+                        key="download_narrative_md",
+                    )
+                with export_col2:
+                    st.download_button(
+                        "Download Narrative (JSON)",
+                        data=json_out,
+                        file_name="narrative_studio_report.json",
+                        mime="application/json",
+                        key="download_narrative_json",
+                    )
+            st.divider()
 
             # --- TEAM STATS OVERVIEW (ballchasing-style tug-of-war) ---
             if not df.empty:
