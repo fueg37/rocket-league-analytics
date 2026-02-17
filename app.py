@@ -281,6 +281,107 @@ def _build_coach_action_mix_chart(report_df: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def _parse_clip_window(clip_key: str, fallback_frame: int) -> tuple[int, int, int]:
+    frame = int(fallback_frame)
+    start_frame = max(0, frame - int(2.5 * REPLAY_FPS))
+    end_frame = frame + int(2.5 * REPLAY_FPS)
+    if not clip_key:
+        return frame, start_frame, end_frame
+
+    try:
+        parts = dict(part.split(":", 1) for part in str(clip_key).split("|") if ":" in part)
+        frame = int(parts.get("frame", frame))
+        if "window" in parts and "-" in parts["window"]:
+            w_start, w_end = parts["window"].split("-", 1)
+            start_frame = int(w_start)
+            end_frame = int(w_end)
+    except Exception:
+        pass
+    return frame, max(0, start_frame), max(start_frame, end_frame)
+
+
+def _build_coach_snapshot_figure(game_df, proto, *, frame: int, clip_key: str, role_hint: str = "") -> go.Figure:
+    fig = themed_figure()
+    fig.update_layout(get_field_layout(f"Coach Snapshot • Frame {frame}"))
+    fig.update_layout(height=420, margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
+
+    ball_xy = np.array([0.0, 0.0], dtype=float)
+    if "ball" in game_df and not game_df["ball"].empty:
+        ball_df = game_df["ball"]
+        ball_idx = min(np.searchsorted(ball_df.index.values, frame), len(ball_df) - 1)
+        ball_row = ball_df.iloc[ball_idx]
+        ball_xy = np.array([
+            float(pd.to_numeric(ball_row.get("pos_x", 0.0), errors="coerce") or 0.0),
+            float(pd.to_numeric(ball_row.get("pos_y", 0.0), errors="coerce") or 0.0),
+        ])
+        fig.add_trace(go.Scatter(
+            x=[ball_xy[0]], y=[ball_xy[1]], mode="markers+text",
+            marker=dict(size=16, color="white", symbol="circle", line=dict(width=2, color="black")),
+            text=["Ball"], textposition="top center", textfont=dict(color="white", size=10),
+            hovertemplate="<b>Ball</b><br>x: %{x:.0f}<br>y: %{y:.0f}<extra></extra>",
+        ))
+
+    player_rows = []
+    for p in proto.players:
+        if p.name not in game_df:
+            continue
+        pdf = game_df[p.name]
+        if pdf.empty or "pos_x" not in pdf.columns or "pos_y" not in pdf.columns:
+            continue
+        p_idx = min(np.searchsorted(pdf.index.values, frame), len(pdf) - 1)
+        prow = pdf.iloc[p_idx]
+        px = float(pd.to_numeric(prow.get("pos_x", np.nan), errors="coerce"))
+        py = float(pd.to_numeric(prow.get("pos_y", np.nan), errors="coerce"))
+        if not np.isfinite(px) or not np.isfinite(py):
+            continue
+        boost = float(pd.to_numeric(prow.get("boost", np.nan), errors="coerce"))
+        team = "Orange" if p.is_orange else "Blue"
+        dist_to_ball = float(np.hypot(px - ball_xy[0], py - ball_xy[1]))
+        player_rows.append(
+            {
+                "Player": p.name,
+                "Team": team,
+                "X": px,
+                "Y": py,
+                "Boost": boost if np.isfinite(boost) else np.nan,
+                "DistToBall": dist_to_ball,
+            }
+        )
+
+    player_df = pd.DataFrame(player_rows)
+    if not player_df.empty:
+        role_labels = {1: "1st", 2: "2nd", 3: "3rd"}
+        player_df = player_df.sort_values(["Team", "DistToBall"]).copy()
+        player_df["RoleRank"] = player_df.groupby("Team").cumcount() + 1
+        player_df["RoleAnnotation"] = player_df["RoleRank"].map(role_labels).fillna("Rot")
+
+        for team in ("Blue", "Orange"):
+            tdf = player_df[player_df["Team"] == team]
+            if tdf.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=tdf["X"], y=tdf["Y"], mode="markers+text",
+                marker=dict(size=12, color=TEAM_COLORS[team]["solid"], symbol="diamond", line=dict(width=1, color="white")),
+                text=[f"{row.Player} ({row.RoleAnnotation})" for row in tdf.itertuples()],
+                textposition="top center", textfont=dict(color="white", size=9),
+                hovertemplate=(
+                    "<b>%{text}</b><br>Team: " + team + "<br>x: %{x:.0f}<br>y: %{y:.0f}" +
+                    "<extra></extra>"
+                ),
+            ))
+
+        if role_hint:
+            fig.add_annotation(
+                xref="paper", yref="paper", x=0.01, y=0.02,
+                text=f"Role context: {title_case_label(str(role_hint))}",
+                showarrow=False, align="left",
+                font=dict(size=10, color="rgba(255,255,255,0.85)"),
+                bgcolor="rgba(0,0,0,0.3)",
+            )
+
+    return fig
+
+
 def apply_dark_export_legibility(fig: go.Figure):
     """Ensure export charts keep high-contrast text/grid in dark theme."""
     fig.update_layout(
@@ -3684,6 +3785,37 @@ if app_mode == "🔍 Single Match Analysis":
                     render_dataframe(detail_grid, use_container_width=True, hide_index=True)
                     st.caption(
                         f"Role-aware view for {detail_row['Role']}: {detail_row['RecommendationText']}"
+                    )
+
+                st.markdown("#### Tactical Snapshot (selected opportunity)")
+                selected_frame, window_start, window_end = _parse_clip_window(
+                    str(detail_row.get("ClipKey", "")),
+                    int(pd.to_numeric(detail_row.get("Frame", 0), errors="coerce") or 0),
+                )
+                snapshot_col, meta_col = st.columns([3, 2])
+                with snapshot_col:
+                    snapshot_fig = _build_coach_snapshot_figure(
+                        game_df,
+                        proto,
+                        frame=selected_frame,
+                        clip_key=str(detail_row.get("ClipKey", "")),
+                        role_hint=str(detail_row.get("Role", "")),
+                    )
+                    st.plotly_chart(snapshot_fig, use_container_width=True)
+                with meta_col:
+                    st.caption("Export-ready lookup metadata")
+                    st.code(
+                        "\n".join([
+                            f"ClipKey: {detail_row.get('ClipKey', '—')}",
+                            f"Frame: {selected_frame}",
+                            f"WindowStartFrame: {window_start}",
+                            f"WindowEndFrame: {window_end}",
+                            f"WindowSeconds: {window_start / REPLAY_FPS:.2f}-{window_end / REPLAY_FPS:.2f}",
+                        ]),
+                        language="text",
+                    )
+                    st.caption(
+                        "Snapshot is static and scoped to selected row only to keep initial Coach Report load fast."
                     )
 
         with t7:
