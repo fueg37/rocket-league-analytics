@@ -7,7 +7,11 @@ import plotly.graph_objects as go
 
 from constants import GOAL_HALF_W, GOAL_HEIGHT, REPLAY_FPS, TEAM_COLORS
 from charts.theme import apply_chart_theme, semantic_color
-from utils import format_speed
+from charts.formatters import (
+    format_metric_series,
+    format_metric_value,
+    title_case_label,
+)
 from analytics.shot_quality import (
     COL_ON_TARGET,
     COL_TARGET_X,
@@ -30,15 +34,6 @@ _STEM_COLOR = {
     "Blue": "rgba(74, 124, 196, 0.35)",
     "Orange": "rgba(196, 138, 74, 0.35)",
 }
-
-
-def _format_values(series: pd.Series) -> list[str]:
-    values = pd.to_numeric(series, errors="coerce").fillna(0)
-    if (values % 1 == 0).all():
-        return [f"{v:,.0f}" for v in values]
-    if values.abs().max() < 10:
-        return [f"{v:,.2f}" for v in values]
-    return [f"{v:,.1f}" for v in values]
 
 
 def kickoff_kpi_indicator(win_rate: float, title: str, tier: str = "detail"):
@@ -155,7 +150,7 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
     rank_df = rank_df.sort_values([metric_col, name_col], ascending=[False, True], kind='mergesort').reset_index(drop=True)
 
     fig = go.Figure()
-    labels = _format_values(rank_df[metric_col])
+    labels = format_metric_series(rank_df[metric_col], metric_col, include_unit=False)
 
     for i, row in rank_df.iterrows():
         team = row[team_col]
@@ -180,7 +175,7 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
                 text=[labels[i]],
                 textposition="middle right",
                 textfont=dict(color=accent, size=11),
-                hovertemplate=f"<b>{row[name_col]}</b><br>{metric_col}: %{{x}}<extra>{team}</extra>",
+                hovertemplate=f"Player: {row[name_col]}<br>Team: {team}<br>Metric: {title_case_label(metric_col)}: {format_metric_value(row[metric_col], metric_col)}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -192,8 +187,8 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
         autorange="reversed",
         title=None,
     )
-    fig.update_xaxes(title=metric_col, rangemode="tozero")
-    fig.update_layout(title=metric_col)
+    fig.update_xaxes(title=title_case_label(metric_col), rangemode="tozero")
+    fig.update_layout(title=title_case_label(metric_col))
 
     return apply_chart_theme(fig, tier="support")
 
@@ -259,10 +254,10 @@ def comparison_dumbbell(
                 y=[i],
                 mode="markers+text",
                 marker=dict(size=11, color="white", line=dict(color=left_color, width=2.5)),
-                text=[_format_values(pd.Series([left_val]))[0]],
+                text=[format_metric_value(left_val, left_label, include_unit=False)],
                 textposition="middle left",
                 textfont=dict(size=10, color=left_color),
-                hovertemplate=f"<b>{row[entity_col]}</b><br>{left_label}: %{{x}}<extra></extra>",
+                hovertemplate=f"Player: {row[entity_col]}<br>Metric: {title_case_label(left_label)}: {format_metric_value(left_val, left_label)}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -272,10 +267,10 @@ def comparison_dumbbell(
                 y=[i],
                 mode="markers+text",
                 marker=dict(size=11, color="white", line=dict(color=right_color, width=2.5)),
-                text=[_format_values(pd.Series([right_val]))[0]],
+                text=[format_metric_value(right_val, right_label, include_unit=False)],
                 textposition="middle right",
                 textfont=dict(size=10, color=right_color),
-                hovertemplate=f"<b>{row[entity_col]}</b><br>{right_label}: %{{x}}<extra></extra>",
+                hovertemplate=f"Player: {row[entity_col]}<br>Metric: {title_case_label(right_label)}: {format_metric_value(right_val, right_label)}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -298,10 +293,10 @@ def comparison_dumbbell(
         autorange="reversed",
         title=None,
     )
-    fig.update_xaxes(title=f"{left_label} vs {right_label}", zeroline=False)
+    fig.update_xaxes(title=f"{title_case_label(left_label)} vs {title_case_label(right_label)}", zeroline=False)
     fig.update_layout(
         margin=dict(l=10, r=10, t=45, b=10),
-        title=f"{left_label} vs {right_label} (Δ = {right_label} − {left_label})",
+        title=f"{title_case_label(left_label)} vs {title_case_label(right_label)} (Δ = {title_case_label(right_label)} − {title_case_label(left_label)})",
     )
 
     # Legend-style endpoint labels in-chart for quick semantic mapping.
@@ -310,7 +305,7 @@ def comparison_dumbbell(
         yref="paper",
         x=0.0,
         y=1.08,
-        text=f"<span style='color:{left_color}'>●</span> {left_label}",
+        text=f"<span style='color:{left_color}'>●</span> {title_case_label(left_label)}",
         showarrow=False,
         xanchor="left",
         font=dict(size=11),
@@ -320,7 +315,7 @@ def comparison_dumbbell(
         yref="paper",
         x=0.18,
         y=1.08,
-        text=f"<span style='color:{right_color}'>●</span> {right_label}",
+        text=f"<span style='color:{right_color}'>●</span> {title_case_label(right_label)}",
         showarrow=False,
         xanchor="left",
         font=dict(size=11),
@@ -421,19 +416,19 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
                 customdata=list(
                     zip(
                         team_rows[SHOT_COL_PLAYER],
-                        team_rows["_time"],
-                        team_rows[SHOT_COL_RESULT],
-                        team_rows["_xg"],
-                        team_rows["_xgot"],
+                        [team_name] * len(team_rows),
+                        team_rows["_time"].map(lambda v: format_metric_value(v, "Time")),
+                        team_rows["_xg"].map(lambda v: format_metric_value(v, "xG")),
+                        team_rows["_xgot"].map(lambda v: format_metric_value(v, "xGOT")),
                         team_rows["_speed"],
-                        team_rows["_speed"].map(lambda speed_uu: format_speed(speed_uu, unit="mph", precision=1)),
+                        team_rows["_speed"].map(lambda v: format_metric_value(v, "Speed")),
                     )
                 ),
                 hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "t=%{customdata[1]:.1f}s | %{customdata[2]}<br>"
-                    "xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>"
-                    "Speed %{customdata[6]}<extra></extra>"
+                    "Player: %{customdata[0]}<br>"
+                    "Team: %{customdata[1]}<br>"
+                    "Time: %{customdata[2]}<br>"
+                    "Metric: xG: %{customdata[3]}<extra></extra>"
                 ),
             )
         )
@@ -443,7 +438,7 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
     fig.add_shape(type="rect", x0=-GOAL_HALF_W, y0=0, x1=GOAL_HALF_W, y1=GOAL_HEIGHT, line=dict(color=frame_color, width=2))
     fig.add_shape(type="line", x0=0, y0=0, x1=0, y1=GOAL_HEIGHT, line=dict(color="rgba(255,255,255,0.2)", width=1, dash="dot"))
 
-    fig.update_xaxes(title="TargetX", range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], constrain="domain")
-    fig.update_yaxes(title="TargetZ", range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
+    fig.update_xaxes(title=title_case_label("target x"), range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], constrain="domain")
+    fig.update_yaxes(title=title_case_label("target z"), range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
     fig.update_layout(title="Goal Mouth", legend_title_text="Team")
     return apply_chart_theme(fig, tier="support")

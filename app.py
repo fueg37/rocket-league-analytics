@@ -28,6 +28,7 @@ from utils import (
 )
 
 from charts.theme import apply_chart_theme, semantic_color
+from charts.formatters import dataframe_formatter, format_metric_value, title_case_label
 from charts.factory import (
     comparison_dumbbell,
     goal_mouth_scatter,
@@ -70,6 +71,14 @@ def themed_figure(*args, tier="support", intent=None, variant="default", **kwarg
 def themed_px(factory, *args, tier="support", intent=None, variant="default", **kwargs):
     fig = factory(*args, **kwargs)
     return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
+
+
+def render_dataframe(data, **kwargs):
+    """Render styled dataframes with shared metric formatting parity."""
+    if isinstance(data, pd.DataFrame):
+        st.dataframe(dataframe_formatter(data), **kwargs)
+    else:
+        st.dataframe(data, **kwargs)
 
 
 SPEED_METRIC_RAW = "Avg Speed"
@@ -2147,11 +2156,11 @@ def render_scoreboard(df, shot_df=None, is_overtime=False):
     with col_blue:
         st.markdown("#### 🔵 Blue Team")
         blue_rows = stable_sort(apply_categorical_order(df[df['Team']=='Blue'][cols], 'Team', TEAM_ORDER), by=['Score', 'Name'], ascending=[False, True])
-        st.dataframe(blue_rows, use_container_width=True, hide_index=True)
+        render_dataframe(blue_rows, use_container_width=True, hide_index=True)
     with col_orange:
         st.markdown("#### 🟠 Orange Team")
         orange_rows = stable_sort(apply_categorical_order(df[df['Team']=='Orange'][cols], 'Team', TEAM_ORDER), by=['Score', 'Name'], ascending=[False, True])
-        st.dataframe(orange_rows, use_container_width=True, hide_index=True)
+        render_dataframe(orange_rows, use_container_width=True, hide_index=True)
     st.divider()
 
 def render_dashboard(df, shot_df, pass_df):
@@ -2351,7 +2360,7 @@ if app_mode == "🔍 Single Match Analysis":
                         _styler = _styler.map(_style_fn, subset=['Result', 'Goal (5s)'])
                     else:
                         _styler = _styler.applymap(_style_fn, subset=['Result', 'Goal (5s)'])
-                    st.dataframe(_styler, use_container_width=True)
+                    render_dataframe(_styler, use_container_width=True)
                 else: st.info("No kickoffs found for selected players.")
             else: st.info("No kickoff data found.")
 
@@ -2399,13 +2408,13 @@ if app_mode == "🔍 Single Match Analysis":
                 fig_overview.add_trace(go.Bar(
                     y=ov_labels, x=blue_fracs, orientation='h',
                     marker_color=TEAM_COLORS["Blue"]["primary"], showlegend=False,
-                    hovertemplate='%{y}: %{customdata}<extra>Blue</extra>',
+                    hovertemplate='Team: Blue<br>Metric: %{y}: %{customdata}<extra></extra>',
                     customdata=ov_blue,
                 ))
                 fig_overview.add_trace(go.Bar(
                     y=ov_labels, x=orange_fracs, orientation='h',
                     marker_color=TEAM_COLORS["Orange"]["primary"], showlegend=False,
-                    hovertemplate='%{y}: %{customdata}<extra>Orange</extra>',
+                    hovertemplate='Team: Orange<br>Metric: %{y}: %{customdata}<extra></extra>',
                     customdata=ov_orange,
                 ))
                 # Centered stat labels + value annotations at edges
@@ -2551,14 +2560,11 @@ if app_mode == "🔍 Single Match Analysis":
                                     name=f'{team} Shot',
                                     customdata=np.stack([
                                         t_shots[SHOT_COL_PLAYER],
-                                        pd.to_numeric(t_shots[SHOT_COL_FRAME], errors='coerce').fillna(0)/float(REPLAY_FPS),
-                                        t_shots[SHOT_COL_RESULT],
-                                        pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0),
-                                        pd.to_numeric(t_shots.get(COL_XGOT, 0), errors='coerce').fillna(0),
-                                        shot_speed,
-                                        shot_speed.map(lambda speed_uu: format_speed(speed_uu, unit="mph", precision=1)),
+                                        [team] * len(t_shots),
+                                        pd.to_numeric(t_shots[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
+                                        pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
                                     ], axis=-1),
-                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[6]}<extra></extra>",
+                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
                                 ))
                             if not t_goals.empty:
                                 goal_speed = pd.to_numeric(t_goals.get('Speed', 0), errors='coerce').fillna(0)
@@ -2568,14 +2574,11 @@ if app_mode == "🔍 Single Match Analysis":
                                     name=f'{team} Goal',
                                     customdata=np.stack([
                                         t_goals[SHOT_COL_PLAYER],
-                                        pd.to_numeric(t_goals[SHOT_COL_FRAME], errors='coerce').fillna(0)/float(REPLAY_FPS),
-                                        t_goals[SHOT_COL_RESULT],
-                                        pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0),
-                                        pd.to_numeric(t_goals.get(COL_XGOT, 0), errors='coerce').fillna(0),
-                                        goal_speed,
-                                        goal_speed.map(lambda speed_uu: format_speed(speed_uu, unit="mph", precision=1)),
+                                        [team] * len(t_goals),
+                                        pd.to_numeric(t_goals[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
+                                        pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
                                     ], axis=-1),
-                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[6]}<extra></extra>",
+                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
                                 ))
                         big_chances = filtered_shots[filtered_shots['BigChance'] == True]
                         if not big_chances.empty:
@@ -2662,7 +2665,7 @@ if app_mode == "🔍 Single Match Analysis":
                 col_a, col_b = st.columns([1, 2])
                 with col_a:
                     st.write("#### Playmaker Leaderboard")
-                    st.dataframe(pass_df.groupby('Sender')['xA'].sum().sort_values(ascending=False), use_container_width=True)
+                    render_dataframe(pass_df.groupby('Sender')['xA'].sum().sort_values(ascending=False), use_container_width=True)
                 with col_b:
                     fig = themed_figure()
                     fig.update_layout(get_field_layout("Pass Map"))
@@ -2743,7 +2746,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(fig_air, use_container_width=True)
                 aer_cols = ['Name', 'Team', 'Aerial Hits', 'Aerial %', 'Avg Aerial Height', 'Max Aerial Height', 'Time Airborne (s)']
                 aerial_ranked = stable_sort(aerial_df[aer_cols], by=['Aerial Hits', 'Name'], ascending=[False, True])
-                st.dataframe(aerial_ranked, use_container_width=True, hide_index=True)
+                render_dataframe(aerial_ranked, use_container_width=True, hide_index=True)
             st.divider()
 
             # --- SECTION 2: Recovery Time ---
@@ -2760,7 +2763,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(fig_fast, use_container_width=True)
                 rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
                 recovery_ranked = stable_sort(recovery_df[rec_cols], by=['Avg Recovery (s)', 'Name'], ascending=[True, True])
-                st.dataframe(recovery_ranked, use_container_width=True, hide_index=True)
+                render_dataframe(recovery_ranked, use_container_width=True, hide_index=True)
             st.divider()
 
             # --- SECTION 3: xA Sankey Flow ---
@@ -2821,7 +2824,7 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_pres.update_layout(title="Total Pressure Time (s)")
                     st.plotly_chart(fig_pres, use_container_width=True)
                 defense_ranked = stable_sort(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']], by=['Shadow %', 'Name'], ascending=[False, True])
-                st.dataframe(defense_ranked,
+                render_dataframe(defense_ranked,
                     use_container_width=True, hide_index=True)
                 st.caption("Shadow defense: time spent between ball and own goal while retreating in defensive half.")
             st.divider()
@@ -2844,7 +2847,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(fig_dist, use_container_width=True)
                 xga_cols = ['Name', 'Team', 'Shots Faced', 'On Target Faced', 'Goals Conceded (nearest)', 'Goals Prevented', 'xGA', 'Avg Dist to Shot', 'High xG Faced']
                 xga_ranked = stable_sort(xga_df[xga_cols], by=['xGA', 'Name'], ascending=[False, True])
-                st.dataframe(xga_ranked, use_container_width=True, hide_index=True)
+                render_dataframe(xga_ranked, use_container_width=True, hide_index=True)
                 st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
             st.divider()
 
@@ -2878,7 +2881,7 @@ if app_mode == "🔍 Single Match Analysis":
                         st.plotly_chart(fig_vaep_scatter, use_container_width=True)
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
                 vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
-                st.dataframe(vaep_ranked,
+                render_dataframe(vaep_ranked,
                     use_container_width=True, hide_index=True)
                 st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
             else:
@@ -2903,7 +2906,7 @@ if app_mode == "🔍 Single Match Analysis":
                     'Name', 'Team', 'SaveEvents', 'Actual_Saves', 'Total_ExpectedSaves',
                     'Total_SaveImpact', 'Avg_SaveDifficulty', 'HighDifficultySaves'
                 ]
-                st.dataframe(
+                render_dataframe(
                     stable_sort(ranked[xs_show_cols], by=['Total_SaveImpact', 'Name'], ascending=[False, True]),
                     use_container_width=True,
                     hide_index=True,
@@ -2916,7 +2919,7 @@ if app_mode == "🔍 Single Match Analysis":
                             'ExpectedSaveProb', 'ShotSpeed', 'ShotHeight', 'SaverDist',
                             'AttributionSource', 'AttributionConfidence'
                         ]
-                        st.dataframe(
+                        render_dataframe(
                             stable_sort(xs_events_df[event_cols], by=['SaveImpact', 'Saver'], ascending=[False, True]),
                             use_container_width=True,
                             hide_index=True,
@@ -3011,7 +3014,7 @@ if app_mode == "🔍 Single Match Analysis":
                         team_data = rotation_summary[rotation_summary['Team'] == team]
                         if not team_data.empty:
                             st.markdown(f"**{team} Team**")
-                            st.dataframe(team_data[['Name', 'Time_1st%', 'Time_2nd%', 'DoubleCommits', 'RotationBreaks']].reset_index(drop=True),
+                            render_dataframe(team_data[['Name', 'Time_1st%', 'Time_2nd%', 'DoubleCommits', 'RotationBreaks']].reset_index(drop=True),
                                 use_container_width=True, hide_index=True)
 
                 st.divider()
@@ -3804,7 +3807,7 @@ elif app_mode == "📈 Season Batch Processor":
                             arrow = "+" if row['Difference'] > 0 else ""
                             st.write(f"**{row['Stat']}**: {row['Win Avg']} vs {row['Loss Avg']} ({arrow}{row['Change %']:.0f}%)")
                     with st.expander("Full Win vs Loss Table"):
-                        st.dataframe(split_df.style.background_gradient(subset=['Change %'], cmap='RdYlGn'),
+                        render_dataframe(split_df.style.background_gradient(subset=['Change %'], cmap='RdYlGn'),
                             use_container_width=True, hide_index=True)
                 else:
                     st.info("Need both wins and losses to compare.")
@@ -3883,7 +3886,7 @@ elif app_mode == "📈 Season Batch Processor":
                         if row['Change %'] < 0:
                             st.write(f"**{row['Stat']}**: {row['Change %']:.0f}%")
                 with st.expander("Full Improvement Table"):
-                    st.dataframe(imp_df.style.background_gradient(subset=['Change %'], cmap='RdYlGn'),
+                    render_dataframe(imp_df.style.background_gradient(subset=['Change %'], cmap='RdYlGn'),
                         use_container_width=True, hide_index=True)
             else:
                 st.info("Need at least 10 games to track improvement.")
@@ -4135,7 +4138,7 @@ elif app_mode == "📈 Season Batch Processor":
                     elif col == 'Overtime' and row[col]:
                         styles[i] = 'color: #ffcc00; font-weight: bold'
                 return styles
-            st.dataframe(hero_df[available_cols].style.apply(style_log, axis=1), use_container_width=True)
+            render_dataframe(hero_df[available_cols].style.apply(style_log, axis=1), use_container_width=True)
         with t6:
             st.subheader("Session Analytics")
             if 'SessionID' in hero_df.columns:
@@ -4156,7 +4159,7 @@ elif app_mode == "📈 Season Batch Processor":
                         'Avg Luck %': avg_luck, 'OT Games': ot_count_s
                     })
                 summary_df = pd.DataFrame(session_summary)
-                st.dataframe(summary_df.style.background_gradient(subset=['Win Rate %'], cmap='RdYlGn', vmin=0, vmax=100), use_container_width=True, hide_index=True)
+                render_dataframe(summary_df.style.background_gradient(subset=['Win Rate %'], cmap='RdYlGn', vmin=0, vmax=100), use_container_width=True, hide_index=True)
                 # Session performance chart
                 fig_sess = session_composite_chart(summary_df)
                 st.plotly_chart(fig_sess, use_container_width=True)
@@ -4193,5 +4196,5 @@ elif app_mode == "📈 Season Batch Processor":
                 st.warning("Install `kaleido` for image export: `pip install kaleido`")
                 st.code("pip install kaleido", language="bash")
 
-            st.dataframe(hero_df.style.map(lambda x: 'color: green' if x else 'color: red', subset=['Won']), use_container_width=True)
+            render_dataframe(hero_df.style.map(lambda x: 'color: green' if x else 'color: red', subset=['Won']), use_container_width=True)
  
