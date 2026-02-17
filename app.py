@@ -32,6 +32,7 @@ from charts.formatters import dataframe_formatter, format_metric_value, title_ca
 from charts.factory import (
     chemistry_network_chart,
     chemistry_ranking_table,
+    coach_report_timeline_chart,
     comparison_dumbbell,
     goal_mouth_scatter,
     kickoff_kpi_indicator,
@@ -3442,6 +3443,10 @@ if app_mode == "🔍 Single Match Analysis":
             if coach_report_df is None or coach_report_df.empty:
                 st.info("No high-leverage decision windows were detected for this match.")
             else:
+                timeline_fig = coach_report_timeline_chart(win_prob_df, momentum_series, coach_report_df)
+                st.plotly_chart(timeline_fig, use_container_width=True)
+                st.caption("Timeline aligns win probability and momentum with missed-opportunity markers so you can scan context before reviewing clips.")
+
                 top_report = coach_report_df.head(5).copy()
                 top_report["ExpectedSwing"] = pd.to_numeric(top_report["ExpectedSwing"], errors="coerce").round(3)
                 top_report["MissedSwing"] = pd.to_numeric(top_report["MissedSwing"], errors="coerce").round(3)
