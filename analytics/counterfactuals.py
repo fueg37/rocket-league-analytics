@@ -85,6 +85,13 @@ ACTION_LIBRARY: dict[str, TacticalAction] = {
     ),
 }
 
+RANK_WEIGHT_ABS_SWING = 0.5
+RANK_WEIGHT_LEVERAGE = 0.3
+RANK_WEIGHT_CONFIDENCE = 0.2
+ACTIONABLE_SWING_EPSILON = 0.02
+ACTIONABLE_CONFIDENCE_FLOOR = 0.45
+DEDUP_FRAME_DISTANCE = int(1.5 * REPLAY_FPS)
+
 
 def derive_replay_priors(states: pd.DataFrame) -> ReplayPriors:
     if states is None or states.empty:
@@ -284,7 +291,66 @@ def build_coach_report(
     report = pd.DataFrame(rows)
     if report.empty:
         return report
-    return report.sort_values(["MissedSwing", "Confidence"], ascending=[False, False]).head(top_n).reset_index(drop=True)
+
+    report["AbsExpectedSwing"] = report["ExpectedSwing"].abs()
+    report["NormAbsExpectedSwing"] = _normalize_component(report["AbsExpectedSwing"])
+    report["NormLeverage"] = _normalize_component(report["Leverage"])
+    report["NormConfidence"] = _normalize_component(report["Confidence"])
+    report["RankScore"] = (
+        RANK_WEIGHT_ABS_SWING * report["NormAbsExpectedSwing"]
+        + RANK_WEIGHT_LEVERAGE * report["NormLeverage"]
+        + RANK_WEIGHT_CONFIDENCE * report["NormConfidence"]
+    )
+    report["ActionabilityFlag"] = (
+        (report["AbsExpectedSwing"] > ACTIONABLE_SWING_EPSILON)
+        & (report["Confidence"] > ACTIONABLE_CONFIDENCE_FLOOR)
+    )
+
+    ranked = _sort_ranked_report(report)
+    actionable = _dedupe_report_windows(ranked[ranked["ActionabilityFlag"]], frame_distance=DEDUP_FRAME_DISTANCE)
+    if len(actionable) >= top_n:
+        final = actionable.head(top_n)
+    else:
+        fallback_pool = ranked[~ranked.index.isin(actionable.index)]
+        combined = pd.concat([actionable, fallback_pool], axis=0)
+        final = _dedupe_report_windows(combined, frame_distance=DEDUP_FRAME_DISTANCE).head(top_n)
+    return final.reset_index(drop=True)
+
+
+def _normalize_component(values: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(values, errors="coerce").fillna(0.0)
+    max_value = float(numeric.max()) if not numeric.empty else 0.0
+    if max_value <= 0.0:
+        return pd.Series(0.0, index=numeric.index, dtype=float)
+    return (numeric / max_value).clip(0.0, 1.0)
+
+
+def _sort_ranked_report(report: pd.DataFrame) -> pd.DataFrame:
+    return report.sort_values(
+        ["RankScore", "AbsExpectedSwing", "Leverage", "Confidence", "Frame", "RecommendedAction", "Role"],
+        ascending=[False, False, False, False, True, True, True],
+    )
+
+
+def _dedupe_report_windows(report: pd.DataFrame, *, frame_distance: int) -> pd.DataFrame:
+    selected_indices: list[int] = []
+    selected_keys: list[tuple[str, str, int]] = []
+
+    for idx, row in report.iterrows():
+        frame = int(row["Frame"])
+        key = (str(row["RecommendedAction"]), str(row["Role"]), frame)
+        is_duplicate = any(
+            prior_action == key[0] and prior_role == key[1] and abs(prior_frame - key[2]) <= frame_distance
+            for prior_action, prior_role, prior_frame in selected_keys
+        )
+        if is_duplicate:
+            continue
+        selected_indices.append(int(idx))
+        selected_keys.append(key)
+
+    if not selected_indices:
+        return report.iloc[0:0]
+    return report.loc[selected_indices]
 
 
 def _nearest_state(states: pd.DataFrame, frame: int) -> pd.Series:
