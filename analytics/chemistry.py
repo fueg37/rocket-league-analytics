@@ -36,6 +36,16 @@ CONTEXT_LABELS = {
 
 CONTEXT_PRIORITY = list(CONTEXT_LABELS.keys())
 
+CONFIDENCE_RANK = {"low": 0, "medium": 1, "high": 2}
+
+LEGACY_ALIAS_MAP = {
+    "Partnership Index": "ChemistryScore_Shrunk",
+    "confidence_level": "Reliability",
+    "sample_count": "Samples",
+    "ci_low": "CI_Low",
+    "ci_high": "CI_High",
+}
+
 
 @dataclass(frozen=True)
 class ExplanationThresholds:
@@ -206,6 +216,37 @@ def _certainty_verb(tier: str) -> str:
     return "May be best used in"
 
 
+def _context_badge(label: str, kind: str) -> str:
+    if kind == "best":
+        return f"🟢 Best context: {label}"
+    return f"🟠 Risk context: {label}"
+
+
+def _passes_confidence_gate(row: pd.Series, minimum_tier: str = "medium") -> bool:
+    current = str(row.get("confidence_level", row.get("Reliability", "low"))).strip().lower()
+    return CONFIDENCE_RANK.get(current, 0) >= CONFIDENCE_RANK.get(minimum_tier.lower(), 1)
+
+
+def apply_chemistry_compatibility_aliases(df: pd.DataFrame) -> pd.DataFrame:
+    """Keep legacy chemistry naming available while Partnership Intelligence ships."""
+    if df.empty:
+        return df.copy()
+    out = df.copy()
+
+    for new_col, legacy_col in LEGACY_ALIAS_MAP.items():
+        if legacy_col not in out.columns and new_col in out.columns:
+            out[legacy_col] = out[new_col]
+        if new_col not in out.columns and legacy_col in out.columns:
+            out[new_col] = out[legacy_col]
+
+    if "ChemistryScore_Shrunk" not in out.columns and "Partnership Index" in out.columns:
+        out["ChemistryScore_Shrunk"] = out["Partnership Index"]
+    if "Partnership Index" not in out.columns and "ChemistryScore_Shrunk" in out.columns:
+        out["Partnership Index"] = out["ChemistryScore_Shrunk"]
+
+    return out
+
+
 def add_chemistry_explanations(df: pd.DataFrame, *, thresholds: ExplanationThresholds | None = None) -> pd.DataFrame:
     if df.empty:
         return df.copy()
@@ -213,15 +254,28 @@ def add_chemistry_explanations(df: pd.DataFrame, *, thresholds: ExplanationThres
     out = df.copy()
     primary_explanations = []
     context_explanations = []
+    best_context_badges = []
+    risk_context_badges = []
     for _, row in out.iterrows():
         tier = _classify_confidence_tier(row, t)
         primary = str(row.get("primary_driver_label", "Chemistry"))
-        best_context = str(row.get("best_context_label", "neutral contexts")).lower()
+        best_context_label = str(row.get("best_context_label", "neutral contexts"))
+        risk_context_label = str(row.get("risk_context_label", "neutral contexts"))
+        best_context = best_context_label.lower()
         driver_phrase = _driver_phrase(primary)
         primary_explanations.append(f"{_certainty_prefix(tier)} {driver_phrase}.")
-        context_explanations.append(f"{_certainty_verb(tier)} {best_context} for {primary.lower()}.")
+        if _passes_confidence_gate(row, minimum_tier="medium"):
+            context_explanations.append(f"{_certainty_verb(tier)} {best_context} for {primary.lower()}.")
+            best_context_badges.append(_context_badge(best_context_label, "best"))
+            risk_context_badges.append(_context_badge(risk_context_label, "risk"))
+        else:
+            context_explanations.append("Context usage signal is still stabilizing; collect more shared samples.")
+            best_context_badges.append("⚪ Context signal pending")
+            risk_context_badges.append("⚪ Context signal pending")
     out["primary_driver_explanation"] = primary_explanations
     out["context_usage_explanation"] = context_explanations
+    out["best_context_badge"] = best_context_badges
+    out["risk_context_badge"] = risk_context_badges
     return out
 
 
@@ -349,6 +403,7 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
     summary = _build_context_driver_labels(summary)
     summary = add_chemistry_explanations(summary)
 
+    summary = apply_chemistry_compatibility_aliases(summary)
     summary["PartnershipIndex"] = summary["Partnership Index"]
     summary["ConfidenceLevel"] = summary["confidence_level"]
     summary["SampleCount"] = summary["sample_count"]

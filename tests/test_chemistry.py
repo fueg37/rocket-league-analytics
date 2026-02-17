@@ -67,6 +67,13 @@ class ChemistryTests(unittest.TestCase):
             "risk_context_label",
             "primary_driver_explanation",
             "context_usage_explanation",
+            "best_context_badge",
+            "risk_context_badge",
+            "PartnershipIndex",
+            "ConfidenceLevel",
+            "SampleCount",
+            "CI_Low_Index",
+            "CI_High_Index",
         }
         self.assertTrue(required.issubset(set(out.columns)))
         self.assertTrue((out["CI_High"] >= out["CI_Low"]).all())
@@ -115,6 +122,8 @@ class ChemistryTests(unittest.TestCase):
             {
                 "primary_driver_label": "Pressure Release",
                 "best_context_label": "Trailing game states",
+                "risk_context_label": "Leading game states",
+                "confidence_level": "Low",
                 "sample_count": 2,
                 "ci_low": 40.0,
                 "ci_high": 80.0,
@@ -122,7 +131,36 @@ class ChemistryTests(unittest.TestCase):
         ])
         out = add_chemistry_explanations(df)
         self.assertIn("Shows signs", out.loc[0, "primary_driver_explanation"])
-        self.assertIn("May be", out.loc[0, "context_usage_explanation"])
+        self.assertIn("stabilizing", out.loc[0, "context_usage_explanation"])
+        self.assertEqual(out.loc[0, "best_context_badge"], "⚪ Context signal pending")
+        self.assertEqual(out.loc[0, "risk_context_badge"], "⚪ Context signal pending")
+
+
+    def test_legacy_aliases_remain_populated(self):
+        frames, events = self._streams()
+        out = build_pairwise_feature_matrix(frames, events)
+        self.assertTrue(pd.to_numeric(out["ChemistryScore_Shrunk"], errors="coerce").notna().all())
+        self.assertTrue(pd.to_numeric(out["Partnership Index"], errors="coerce").notna().all())
+        self.assertTrue((out["CI_Low_Index"] == out["ci_low"]).all())
+        self.assertTrue((out["CI_High_Index"] == out["ci_high"]).all())
+        self.assertTrue((out["SampleCount"] == out["sample_count"]).all())
+
+    def test_context_badges_present_when_confidence_gate_passes(self):
+        df = pd.DataFrame([
+            {
+                "primary_driver_label": "Chance Creation",
+                "best_context_label": "Trailing game states",
+                "risk_context_label": "Leading game states",
+                "confidence_level": "High",
+                "sample_count": 20,
+                "ci_low": 45.0,
+                "ci_high": 50.0,
+            }
+        ])
+        out = add_chemistry_explanations(df)
+        self.assertIn("Best used in", out.loc[0, "context_usage_explanation"])
+        self.assertEqual(out.loc[0, "best_context_badge"], "🟢 Best context: Trailing game states")
+        self.assertEqual(out.loc[0, "risk_context_badge"], "🟠 Risk context: Leading game states")
 
 
 if __name__ == "__main__":
