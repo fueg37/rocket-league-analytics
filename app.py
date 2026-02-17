@@ -70,6 +70,7 @@ from analytics.shot_quality import (
 from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_VERSION
 from analytics.possession_value import compute_action_value_deltas, encode_replay_states
 from analytics.aggregations.value_reports import build_player_value_reports
+from analytics.counterfactuals import build_coach_report
 
 logger = logging.getLogger(__name__)
 
@@ -1887,6 +1888,16 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
             team_goals = int(df[df['Team'] == team]['Goals'].sum())
             luck_val = calculate_luck_percentage(shot_df, team, team_goals)
             df.loc[df['Team'] == team, 'Luck'] = luck_val
+    replay_states = encode_replay_states("match", game_df, player_pos, pid_team)
+    coach_report_df = build_coach_report(
+        replay_states,
+        momentum_series,
+        win_prob_df,
+        rotation_timeline,
+        rotation_summary,
+        team="Blue",
+        top_n=5,
+    )
     return {
         "manager": manager, "game": game, "game_df": game_df, "proto": proto,
         "df_unfiltered": df, "shot_df": shot_df, "pass_df": pass_df,
@@ -1903,6 +1914,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "is_overtime": is_overtime, "temp_map": temp_map,
         "pid_team": pid_team, "player_team": player_team,
         "player_pos": player_pos,
+        "coach_report_df": coach_report_df,
         "all_players": sorted(list(temp_map.values())),
     }
 
@@ -2377,6 +2389,7 @@ if app_mode == "🔍 Single Match Analysis":
         situational_df = _m["situational_df"]
         win_prob_df = _m["win_prob_df"]
         wp_model_used = _m["wp_model_used"]
+        coach_report_df = _m.get("coach_report_df", pd.DataFrame())
         is_overtime = _m["is_overtime"]
         temp_map = _m["temp_map"]
         pid_team = _m["pid_team"]
@@ -2396,7 +2409,7 @@ if app_mode == "🔍 Single Match Analysis":
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
-        t2, t1, t3, t3b, t4, t5, t8, t9, t10, t7 = st.tabs(["🌊 Match Narrative", "🚀 Kickoffs", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "📸 Export"])
+        t2, t1, t3, t3b, t4, t5, t8, t9, t10, t11, t7 = st.tabs(["🌊 Match Narrative", "🚀 Kickoffs", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "🧑‍🏫 Coach Report", "📸 Export"])
             
         with t1:
             st.subheader("Kickoff Analysis")
@@ -3422,6 +3435,39 @@ if app_mode == "🔍 Single Match Analysis":
                 st.caption(f"Showing {window_sec}s window ({len(render_indices)} frames). Drag the time range above to focus on key moments. Rotate the 3D view by dragging, zoom with scroll.")
             except Exception as e:
                 st.error(f"Could not render tactical view: {e}")
+
+
+        with t11:
+            st.subheader("Coach Report")
+            if coach_report_df is None or coach_report_df.empty:
+                st.info("No high-leverage decision windows were detected for this match.")
+            else:
+                top_report = coach_report_df.head(5).copy()
+                top_report["ExpectedSwing"] = pd.to_numeric(top_report["ExpectedSwing"], errors="coerce").round(3)
+                top_report["MissedSwing"] = pd.to_numeric(top_report["MissedSwing"], errors="coerce").round(3)
+                top_report["Confidence"] = (pd.to_numeric(top_report["Confidence"], errors="coerce") * 100.0).round(1)
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric("Largest Missed Swing", f"{top_report['MissedSwing'].max():+.3f}")
+                with c2:
+                    st.metric("Avg Confidence", f"{top_report['Confidence'].mean():.1f}%")
+                with c3:
+                    st.metric("Windows Reviewed", f"{len(top_report)}")
+
+                st.markdown("#### Top 5 Missed Opportunities")
+                display_cols = [
+                    "Time",
+                    "Role",
+                    "RecommendedAction",
+                    "ExpectedSwing",
+                    "MissedSwing",
+                    "Confidence",
+                    "RecommendationText",
+                    "ClipKey",
+                ]
+                render_dataframe(top_report[display_cols], use_container_width=True, hide_index=True)
+                st.caption("ClipKey provides frame/window lookup IDs for downstream export tooling.")
 
         with t7:
             st.subheader("Composite Dashboard Export")
