@@ -81,6 +81,32 @@ def render_dataframe(data, **kwargs):
         st.dataframe(data, **kwargs)
 
 
+def render_section_pattern(
+    *,
+    title: str,
+    kpis: list[tuple[str, str, str | None]],
+    chart_fig=None,
+    narrative: str | None = None,
+    detail_df: pd.DataFrame | None = None,
+    detail_label: str = "Data details",
+    detail_kwargs: dict | None = None,
+):
+    """Reusable analytics section: KPI row, hero chart, and optional details expander."""
+    st.markdown(f"#### {title}")
+    if kpis:
+        kpi_cols = st.columns(min(max(len(kpis), 2), 4))
+        for idx, (label, value, delta) in enumerate(kpis[:4]):
+            with kpi_cols[idx]:
+                st.metric(label, value, delta=delta)
+    if chart_fig is not None:
+        st.plotly_chart(chart_fig, use_container_width=True)
+    if narrative:
+        st.caption(narrative)
+    if detail_df is not None:
+        with st.expander(detail_label):
+            render_dataframe(detail_df, **(detail_kwargs or {"use_container_width": True, "hide_index": True}))
+
+
 SPEED_METRIC_RAW = "Avg Speed"
 SPEED_METRIC_DISPLAY = "Avg Speed (mph)"
 
@@ -144,6 +170,13 @@ if "match_store" not in st.session_state:
     st.session_state.match_store = {}
     st.session_state.match_order = []
     st.session_state.active_match = None
+
+st.session_state.setdefault("shared_focus_players", [])
+st.session_state.setdefault("shared_match_team", "All")
+st.session_state.setdefault("shared_match_player", "All")
+st.session_state.setdefault("shared_time_window", (0.0, 30.0))
+st.session_state.setdefault("shared_hero", None)
+st.session_state.setdefault("shared_teammate", "None")
 
 # (Constants imported from constants.py)
 
@@ -2316,7 +2349,16 @@ if app_mode == "🔍 Single Match Analysis":
 
         all_players = _m["all_players"]
         default_focus = [p for p in ["Fueg", "Zelli197"] if p in all_players]
-        focus_players = st.sidebar.multiselect("🎯 Focus Analysis On:", all_players, default=default_focus)
+        if not st.session_state.shared_focus_players:
+            st.session_state.shared_focus_players = default_focus
+        st.session_state.shared_focus_players = [p for p in st.session_state.shared_focus_players if p in all_players]
+        focus_players = st.sidebar.multiselect(
+            "🎯 Focus Analysis On:",
+            all_players,
+            default=st.session_state.shared_focus_players,
+            key="shared_focus_players",
+            help="Shared player filter synced across related match tabs.",
+        )
 
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
@@ -2433,7 +2475,22 @@ if app_mode == "🔍 Single Match Analysis":
                     margin=dict(l=10, r=10, t=10, b=10),
                     bargap=0.25,
                 )
-                st.plotly_chart(fig_overview, use_container_width=True)
+                goal_margin = b_goals - o_goals
+                overview_narrative = (
+                    f"Blue {'leads' if goal_margin >= 0 else 'trails'} by {abs(goal_margin)} goals, "
+                    f"with shot volume {b_shots}-{o_shots}."
+                )
+                render_section_pattern(
+                    title="Team Tug-of-War Overview",
+                    kpis=[
+                        ("Blue Goals", str(b_goals), None),
+                        ("Orange Goals", str(o_goals), None),
+                        ("Blue xG", f"{blue_df['xG'].sum():.2f}", None),
+                        ("Orange xG", f"{orange_df['xG'].sum():.2f}", None),
+                    ],
+                    chart_fig=fig_overview,
+                    narrative=overview_narrative,
+                )
             st.divider()
 
             # --- A. WIN PROBABILITY CHART ---
@@ -2450,7 +2507,16 @@ if app_mode == "🔍 Single Match Analysis":
                         events=goal_events,
                         tier="detail",
                     )
-                    st.plotly_chart(fig_prob, use_container_width=True)
+                    blue_last = float(win_prob_df['BlueWinProb'].iloc[-1] * 100) if 'BlueWinProb' in win_prob_df.columns else 0.0
+                    render_section_pattern(
+                        title="Win Probability",
+                        kpis=[
+                            ("Final Blue Win %", f"{blue_last:.1f}%", None),
+                            ("Goal Events", str(len(goal_events)), None),
+                        ],
+                        chart_fig=fig_prob,
+                        narrative="The win-probability line highlights control swings; abrupt steps usually align with goals.",
+                    )
             except Exception as e: st.error(f"Could not calculate Win Probability: {e}")
             st.divider()
 
@@ -2493,6 +2559,7 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_xg.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT")
                 fig_xg.update_layout(title="Cumulative xG Over Time", xaxis=dict(title="Time (s)", showgrid=False), yaxis=dict(title="Cumulative xG", showgrid=True, gridcolor='rgba(255,255,255,0.1)'), height=280, margin=dict(l=20, r=20, t=40, b=20))
                 st.plotly_chart(fig_xg, use_container_width=True)
+                st.caption("Cumulative xG separates shot volume from finish quality and marks where real goals outpaced chance quality.")
             st.divider()
 
             # --- B. MOMENTUM CHART ---
@@ -2517,6 +2584,7 @@ if app_mode == "🔍 Single Match Analysis":
 
                 fig.update_layout(yaxis=dict(title="Pressure", range=[-105, 105], showgrid=False, zeroline=True, zerolinecolor='rgba(255,255,255,0.2)'), xaxis=dict(title="Match Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=20, b=20), showlegend=False)
                 st.plotly_chart(fig, use_container_width=True)
+                st.caption("Positive pressure favors Blue and negative pressure favors Orange, with goal markers showing decisive momentum turns.")
 
         shot_schema_ok, shot_schema_missing = (True, [])
         if not shot_df.empty:
@@ -2529,10 +2597,12 @@ if app_mode == "🔍 Single Match Analysis":
                 else:
                     filt1, filt2, filt3 = st.columns([1, 1, 1])
                     with filt1:
-                        map_team = st.selectbox("Team Filter", ["All", "Blue", "Orange"], key="shot_map_team")
+                        map_team = st.selectbox("Team Filter", ["All", "Blue", "Orange"], key="shared_match_team")
                     with filt2:
                         player_opts = ["All"] + sorted(shot_df[SHOT_COL_PLAYER].dropna().unique().tolist())
-                        map_player = st.selectbox("Player Filter", player_opts, key="shot_map_player")
+                        if st.session_state.shared_match_player not in player_opts:
+                            st.session_state.shared_match_player = "All"
+                        map_player = st.selectbox("Player Filter", player_opts, key="shared_match_player")
                     with filt3:
                         map_on_target = st.toggle("On-target only", value=True, key="shot_map_on_target")
 
@@ -2728,25 +2798,31 @@ if app_mode == "🔍 Single Match Analysis":
             st.subheader("Advanced Analytics")
 
             # --- SECTION 1: Aerial Stats ---
-            st.markdown("#### Aerial Stats")
             if not aerial_df.empty:
-                ac1, ac2 = st.columns(2)
-                with ac1:
-                    fig_aer = player_rank_lollipop(aerial_df, 'Aerial Hits')
-                    fig_aer.update_layout(title="Aerial Hits")
-                    st.plotly_chart(fig_aer, use_container_width=True)
-                with ac2:
-                    fig_air = themed_figure()
-                    for _, row in aerial_df.iterrows():
-                        color = TEAM_COLORS["Blue"]["primary"] if row['Team'] == 'Blue' else TEAM_COLORS["Orange"]["primary"]
-                        fig_air.add_trace(go.Bar(x=[row['Name']], y=[row['Time Airborne (s)']],
-                            name=row['Name'], marker_color=color, showlegend=False))
-                    fig_air.update_layout(title="Time Airborne (s)",
-                        )
-                    st.plotly_chart(fig_air, use_container_width=True)
+                fig_aer = player_rank_lollipop(aerial_df, 'Aerial Hits')
+                fig_aer.update_layout(title="Aerial Hits")
                 aer_cols = ['Name', 'Team', 'Aerial Hits', 'Aerial %', 'Avg Aerial Height', 'Max Aerial Height', 'Time Airborne (s)']
                 aerial_ranked = stable_sort(aerial_df[aer_cols], by=['Aerial Hits', 'Name'], ascending=[False, True])
-                render_dataframe(aerial_ranked, use_container_width=True, hide_index=True)
+                render_section_pattern(
+                    title="Aerial Stats",
+                    kpis=[
+                        ("Top Aerial Hits", str(int(aerial_df['Aerial Hits'].max())), None),
+                        ("Match Avg Aerial %", f"{aerial_df['Aerial %'].mean():.1f}%", None),
+                        ("Peak Aerial Height", f"{aerial_df['Max Aerial Height'].max():.0f}", None),
+                    ],
+                    chart_fig=fig_aer,
+                    narrative="Aerial hit counts reveal who consistently challenges above the play.",
+                    detail_df=aerial_ranked,
+                )
+
+                fig_air = themed_figure()
+                for _, row in aerial_df.iterrows():
+                    color = TEAM_COLORS["Blue"]["primary"] if row['Team'] == 'Blue' else TEAM_COLORS["Orange"]["primary"]
+                    fig_air.add_trace(go.Bar(x=[row['Name']], y=[row['Time Airborne (s)']],
+                        name=row['Name'], marker_color=color, showlegend=False))
+                fig_air.update_layout(title="Time Airborne (s)")
+                st.plotly_chart(fig_air, use_container_width=True)
+                st.caption("Airborne time complements hit count by showing sustained aerial presence, not just touches.")
             st.divider()
 
             # --- SECTION 2: Recovery Time ---
@@ -2757,13 +2833,15 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_rec = player_rank_lollipop(recovery_df, 'Avg Recovery (s)')
                     fig_rec.update_layout(title="Avg Time to Supersonic After Hit")
                     st.plotly_chart(fig_rec, use_container_width=True)
+                    st.caption("Lower recovery time indicates faster reset into threatening speed.")
                 with rc2:
                     fig_fast = player_rank_lollipop(recovery_df, 'Recovery < 1s %')
                     fig_fast.update_layout(title="Fast Recovery Rate (< 1s)")
                     st.plotly_chart(fig_fast, use_container_width=True)
                 rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
                 recovery_ranked = stable_sort(recovery_df[rec_cols], by=['Avg Recovery (s)', 'Name'], ascending=[True, True])
-                render_dataframe(recovery_ranked, use_container_width=True, hide_index=True)
+                with st.expander("Data details"):
+                    render_dataframe(recovery_ranked, use_container_width=True, hide_index=True)
             st.divider()
 
             # --- SECTION 3: xA Sankey Flow ---
@@ -2805,6 +2883,7 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_sankey.update_layout(title="Pass Flow Network",
                         height=400)
                     st.plotly_chart(fig_sankey, use_container_width=True)
+                    st.caption("Thicker links indicate repeat passing lanes that generated team xA.")
                 else:
                     st.info("Not enough passing connections to build Sankey diagram.")
             else:
@@ -2819,13 +2898,15 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_shadow = player_rank_lollipop(defense_df, 'Shadow %')
                     fig_shadow.update_layout(title="Shadow Defense Time %")
                     st.plotly_chart(fig_shadow, use_container_width=True)
+                    st.caption("Higher shadow-defense share suggests more disciplined back-post coverage.")
                 with dc2:
                     fig_pres = player_rank_lollipop(defense_df, 'Pressure Time (s)')
                     fig_pres.update_layout(title="Total Pressure Time (s)")
                     st.plotly_chart(fig_pres, use_container_width=True)
                 defense_ranked = stable_sort(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']], by=['Shadow %', 'Name'], ascending=[False, True])
-                render_dataframe(defense_ranked,
-                    use_container_width=True, hide_index=True)
+                with st.expander("Data details"):
+                    render_dataframe(defense_ranked,
+                        use_container_width=True, hide_index=True)
                 st.caption("Shadow defense: time spent between ball and own goal while retreating in defensive half.")
             st.divider()
 
@@ -2839,6 +2920,7 @@ if app_mode == "🔍 Single Match Analysis":
                         color_discrete_map=TEAM_COLOR_MAP)
                     fig_xga.update_layout()
                     st.plotly_chart(fig_xga, use_container_width=True)
+                    st.caption("Higher xGA identifies defenders exposed to higher-quality opponent chances.")
                 with xc2:
                     fig_dist = themed_px(px.bar, xga_df, x='Name', y='Avg Dist to Shot', color='Team',
                         title="Avg Distance to Shot When Nearest Defender",
@@ -2847,7 +2929,8 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(fig_dist, use_container_width=True)
                 xga_cols = ['Name', 'Team', 'Shots Faced', 'On Target Faced', 'Goals Conceded (nearest)', 'Goals Prevented', 'xGA', 'Avg Dist to Shot', 'High xG Faced']
                 xga_ranked = stable_sort(xga_df[xga_cols], by=['xGA', 'Name'], ascending=[False, True])
-                render_dataframe(xga_ranked, use_container_width=True, hide_index=True)
+                with st.expander("Data details"):
+                    render_dataframe(xga_ranked, use_container_width=True, hide_index=True)
                 st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
             st.divider()
 
@@ -2862,6 +2945,7 @@ if app_mode == "🔍 Single Match Analysis":
                         color_discrete_map=TEAM_COLOR_MAP)
                     fig_vaep_bar.update_layout()
                     st.plotly_chart(fig_vaep_bar, use_container_width=True)
+                    st.caption("Total VAEP summarizes each player's net impact on scoring threat.")
                 with vc2:
                     if not vaep_df.empty:
                         fig_vaep_scatter = themed_figure()
@@ -2881,8 +2965,9 @@ if app_mode == "🔍 Single Match Analysis":
                         st.plotly_chart(fig_vaep_scatter, use_container_width=True)
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
                 vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
-                render_dataframe(vaep_ranked,
-                    use_container_width=True, hide_index=True)
+                with st.expander("Data details"):
+                    render_dataframe(vaep_ranked,
+                        use_container_width=True, hide_index=True)
                 st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
             else:
                 st.info("No VAEP data available.")
@@ -2897,6 +2982,7 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_impact = player_rank_lollipop(ranked, 'Total_SaveImpact')
                     fig_impact.update_layout(title="Total Save Impact (Actual - Expected)")
                     st.plotly_chart(fig_impact, use_container_width=True)
+                    st.caption("Positive save impact means a player saved more than baseline expectation.")
                 with xs2:
                     fig_difficulty = player_rank_lollipop(ranked, 'Avg_SaveDifficulty')
                     fig_difficulty.update_layout(title="Avg Save Difficulty Index (SDI)")
@@ -2906,14 +2992,15 @@ if app_mode == "🔍 Single Match Analysis":
                     'Name', 'Team', 'SaveEvents', 'Actual_Saves', 'Total_ExpectedSaves',
                     'Total_SaveImpact', 'Avg_SaveDifficulty', 'HighDifficultySaves'
                 ]
-                render_dataframe(
-                    stable_sort(ranked[xs_show_cols], by=['Total_SaveImpact', 'Name'], ascending=[False, True]),
-                    use_container_width=True,
-                    hide_index=True,
-                )
+                with st.expander("Data details"):
+                    render_dataframe(
+                        stable_sort(ranked[xs_show_cols], by=['Total_SaveImpact', 'Name'], ascending=[False, True]),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
 
                 if not xs_events_df.empty:
-                    with st.expander("Individual Save Events"):
+                    with st.expander("Data details: Individual Save Events"):
                         event_cols = [
                             'Saver', 'Shooter', 'Time', 'SaveImpact', 'SaveDifficultyIndex',
                             'ExpectedSaveProb', 'ShotSpeed', 'ShotHeight', 'SaverDist',
@@ -3116,7 +3203,7 @@ if app_mode == "🔍 Single Match Analysis":
                     time_range = st.slider(
                         "Time range (seconds)", 0.0, round(match_duration, 1),
                         (0.0, min(30.0, round(match_duration, 1))),
-                        step=0.5, key="tac_range_3d",
+                        step=0.5, key="shared_time_window",
                         help="Narrow the window to reduce frame count and improve performance")
                 with range_col2:
                     if goal_times:
@@ -3528,14 +3615,19 @@ elif app_mode == "📈 Season Batch Processor":
         st.write(f"📚 **Career Database:** {len(season['MatchID'].unique())} Matches Loaded")
         players = sorted(season['Name'].unique())
         ix = 0
-        if "Fueg" in players: ix = players.index("Fueg")
+        if "Fueg" in players:
+            ix = players.index("Fueg")
+        if st.session_state.shared_hero not in players:
+            st.session_state.shared_hero = players[ix] if players else None
+
         col_sel1, col_sel2 = st.columns(2)
-        with col_sel1: hero = st.selectbox("Select Yourself:", players, index=ix)
+        with col_sel1:
+            hero = st.selectbox("Select Yourself:", players, index=players.index(st.session_state.shared_hero), key="shared_hero")
         with col_sel2:
             mate_opts = ["None"] + [p for p in players if p != hero]
-            mate_ix = 0
-            if "Zelli197" in mate_opts: mate_ix = mate_opts.index("Zelli197")
-            teammate = st.selectbox("Compare With (Optional):", mate_opts, index=mate_ix)
+            if st.session_state.shared_teammate not in mate_opts:
+                st.session_state.shared_teammate = "None"
+            teammate = st.selectbox("Compare With (Optional):", mate_opts, index=mate_opts.index(st.session_state.shared_teammate), key="shared_teammate")
 
         hero_df = season[season['Name'] == hero].reset_index(drop=True)
         hero_df['GameNum'] = hero_df.index + 1
@@ -3924,12 +4016,6 @@ elif app_mode == "📈 Season Batch Processor":
                 _g2h = int(hero_df['Goals_Second_Half'].sum())
                 _glm = int(hero_df['Goals_Last_Min'].sum())
                 _total_g = _g1h + _g2h
-                c1, c2, c3, c4 = st.columns(4)
-                c1.metric("First Half Goals", _g1h, help="Goals in the first 2:30")
-                c2.metric("Second Half Goals", _g2h, help="Goals in the last 2:30")
-                c3.metric("Last Minute Goals", _glm, help="Goals in final 60 seconds")
-                c4.metric("Clutch Goal Rate", f"{round(_glm / max(_total_g, 1) * 100, 1)}%", help="% of goals in last 60s")
-
                 # Period distribution pie chart
                 fig_period = themed_figure(data=[go.Pie(
                     labels=['First Half', 'Second Half (excl. last min)', 'Last Minute'],
@@ -3940,7 +4026,22 @@ elif app_mode == "📈 Season Batch Processor":
                 )])
                 fig_period.update_layout(title="Goal Distribution by Period", height=350,
                     margin=dict(t=40, b=20, l=20, r=20))
-                st.plotly_chart(fig_period, use_container_width=True)
+                period_details = pd.DataFrame({
+                    'Period': ['First Half', 'Second Half', 'Last Minute'],
+                    'Goals': [_g1h, _g2h, _glm],
+                })
+                render_section_pattern(
+                    title="When Do You Score?",
+                    kpis=[
+                        ("First Half Goals", str(_g1h), None),
+                        ("Second Half Goals", str(_g2h), None),
+                        ("Last Minute Goals", str(_glm), None),
+                        ("Clutch Goal Rate", f"{round(_glm / max(_total_g, 1) * 100, 1)}%", None),
+                    ],
+                    chart_fig=fig_period,
+                    narrative="This split shows whether your scoring tends to peak early, late, or in clutch time.",
+                    detail_df=period_details,
+                )
 
                 # Rolling clutch rate
                 if len(hero_df) >= 5:
@@ -3994,6 +4095,7 @@ elif app_mode == "📈 Season Batch Processor":
                 fig_gs.update_layout(title="Goals by Game State", yaxis_title="Goals",
                     height=300, margin=dict(t=40, b=20))
                 st.plotly_chart(fig_gs, use_container_width=True)
+                st.caption("Game-state goals indicate whether you are front-running, chasing, or balanced.")
 
                 # Strategy insight
                 if _g_state_total > 0:
@@ -4069,6 +4171,7 @@ elif app_mode == "📈 Season Batch Processor":
                         xaxis_title="Game #", yaxis_title="Rate (%)", height=300,
                         margin=dict(t=40, b=20))
                     st.plotly_chart(fig_cb, use_container_width=True)
+                    st.caption("When comeback trend exceeds blown-lead trend, late-game decisions are improving.")
 
             st.divider()
 
@@ -4121,6 +4224,7 @@ elif app_mode == "📈 Season Batch Processor":
                     fig_sv.update_layout(title="Save Distribution by Timing", height=300,
                         margin=dict(t=40, b=20, l=20, r=20))
                     st.plotly_chart(fig_sv, use_container_width=True)
+                    st.caption("Late-save share estimates how often your defensive impact comes in high-pressure moments.")
 
         with t5:
 
