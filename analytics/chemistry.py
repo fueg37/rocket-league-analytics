@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import Iterable, Sequence
 
-import numpy as np
 import pandas as pd
 
+from analytics.partnership_contracts import apply_partnership_contract
 from analytics.stats_uncertainty import bootstrap_mean_interval, deterministic_seed, reliability_from_sample_size
 
 CHEMISTRY_COMPONENT_COLUMNS = [
@@ -141,7 +141,34 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
 
     granular = pd.DataFrame(rows)
     if granular.empty:
-        return pd.DataFrame(columns=["Team", "Player1", "Player2", "Samples", *CHEMISTRY_COMPONENT_COLUMNS, "ChemistryScore", "ChemistryScore_Shrunk", "CI_Low", "CI_High", "Reliability"])
+        return pd.DataFrame(columns=[
+            "Team",
+            "Player1",
+            "Player2",
+            "Samples",
+            *CHEMISTRY_COMPONENT_COLUMNS,
+            "ChemistryScore",
+            "ChemistryScore_Shrunk",
+            "CI_Low",
+            "CI_High",
+            "Reliability",
+            "Partnership Index",
+            "Value Lift",
+            "Rotation Fit",
+            "Handoff Quality",
+            "Pressure Escape",
+            "confidence_level",
+            "ci_low",
+            "ci_high",
+            "sample_count",
+            "expected_xgd_lift_per_match",
+            "win_rate_lift_points",
+            "PartnershipIndex",
+            "ConfidenceLevel",
+            "SampleCount",
+            "CI_Low_Index",
+            "CI_High_Index",
+        ])
 
     granular["ChemistryScore"] = granular[CHEMISTRY_COMPONENT_COLUMNS].mean(axis=1)
     global_means = {col: float(pd.to_numeric(granular[col], errors="coerce").fillna(0).mean()) for col in (CHEMISTRY_COMPONENT_COLUMNS + ["ChemistryScore"])}
@@ -170,7 +197,16 @@ def build_pairwise_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFra
     summary["CI_High"] = [c[1] for c in cis]
     summary["Reliability"] = summary["Samples"].map(lambda n: reliability_from_sample_size(int(n)))
     summary["ChemistryScore_Shrunk"] = summary["ChemistryScore_Shrunk"].astype(float)
-    return summary.sort_values("ChemistryScore_Shrunk", ascending=False).reset_index(drop=True)
+
+    summary = apply_partnership_contract(summary)
+    # Migration aliases: retain legacy chemistry fields while emitting the new contract.
+    summary["PartnershipIndex"] = summary["Partnership Index"]
+    summary["ConfidenceLevel"] = summary["confidence_level"]
+    summary["SampleCount"] = summary["sample_count"]
+    summary["CI_Low_Index"] = summary["ci_low"]
+    summary["CI_High_Index"] = summary["ci_high"]
+
+    return summary.sort_values("Partnership Index", ascending=False).reset_index(drop=True)
 
 
 def build_trio_feature_matrix(frames_df: pd.DataFrame, events_df: pd.DataFrame, *, config: ChemistryShrinkageConfig | None = None) -> pd.DataFrame:

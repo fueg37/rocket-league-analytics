@@ -31,9 +31,37 @@ class ChemistryTests(unittest.TestCase):
         frames, events = self._streams()
         out = build_pairwise_feature_matrix(frames, events)
         self.assertFalse(out.empty)
-        required = {"ChemistryScore", "ChemistryScore_Shrunk", "CI_Low", "CI_High", "Reliability", "ExpectedValueGain_Shrunk"}
+        required = {
+            "ChemistryScore",
+            "ChemistryScore_Shrunk",
+            "CI_Low",
+            "CI_High",
+            "Reliability",
+            "ExpectedValueGain_Shrunk",
+            "Partnership Index",
+            "Value Lift",
+            "Rotation Fit",
+            "Handoff Quality",
+            "Pressure Escape",
+            "confidence_level",
+            "ci_low",
+            "ci_high",
+            "sample_count",
+            "expected_xgd_lift_per_match",
+            "win_rate_lift_points",
+        }
         self.assertTrue(required.issubset(set(out.columns)))
         self.assertTrue((out["CI_High"] >= out["CI_Low"]).all())
+
+
+    def test_contract_scaling_bounds_and_confidence_labels(self):
+        frames, events = self._streams()
+        out = build_pairwise_feature_matrix(frames, events)
+        self.assertTrue(((out["Partnership Index"] >= 0) & (out["Partnership Index"] <= 100)).all())
+        for col in ["Value Lift", "Rotation Fit", "Handoff Quality", "Pressure Escape"]:
+            self.assertTrue(((out[col] >= 0) & (out[col] <= 100)).all())
+        self.assertTrue(set(out["confidence_level"].unique()).issubset({"Low", "Medium", "High"}))
+        self.assertTrue((out["ci_high"] >= out["ci_low"]).all())
 
     def test_trio_builds(self):
         frames, events = self._streams()
