@@ -191,40 +191,77 @@ def score_candidate_actions(
     value_model: TransitionValueEstimator | None,
     win_prob_df: pd.DataFrame | None,
     reference_time: float,
+    replay_priors: ReplayPriors | None = None,
+    rollout_count: int = 25,
+    random_seed: int | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, float | str]] = []
     base = pd.Series(snapshot).copy()
     team_key = "Blue" if team == "Blue" else "Orange"
     pressure_col = f"Pressure{team_key}"
     poss_col = f"{team_key}PossessionBelief"
+    priors = replay_priors or derive_replay_priors(pd.DataFrame([dict(snapshot)]))
+    rng = np.random.default_rng(random_seed)
+    rollout_count = max(1, int(rollout_count))
 
     baseline_value = predict_state_value(base, model=value_model).get("10s", 0.0)
     wp_baseline = _local_wp(win_prob_df, reference_time)
 
     for action in actions:
-        post = base.copy()
-        post["BallPosY"] = float(post.get("BallPosY", 0.0)) + action.attack_bias * FIELD_HALF_Y * 0.2 * (1 if team == "Blue" else -1)
-        post["BallPosX"] = float(np.clip(post.get("BallPosX", 0.0), -FIELD_HALF_X, FIELD_HALF_X))
-        post[pressure_col] = float(np.clip(float(post.get(pressure_col, 0.0)) + action.pressure_delta, 0.0, 1.0))
-        post[poss_col] = float(np.clip(float(post.get(poss_col, 0.5)) + action.possession_delta, 0.0, 1.0))
+        swings: list[float] = []
+        source_counts = {"possession_value_graph": 0, "win_probability": 0}
+        for _ in range(rollout_count):
+            post = base.copy()
+            position_sigma = float(
+                np.clip(priors.speed_p95 * action.constraint.duration_s * 0.03, 25.0, FIELD_HALF_Y * 0.08)
+            )
+            pressure_sigma = float(np.clip(0.02 + priors.accel_p95 / 14000.0, 0.015, 0.12))
+            possession_sigma = float(np.clip(0.015 + priors.boost_usage_p95 / 700.0, 0.01, 0.1))
 
-        model_value = predict_state_value(post, model=value_model).get("10s", baseline_value)
-        model_swing = (model_value - baseline_value) * (1 if team == "Blue" else -1)
+            attack_sign = 1 if team == "Blue" else -1
+            y_delta = action.attack_bias * FIELD_HALF_Y * 0.2 * attack_sign + rng.normal(0.0, position_sigma)
+            x_delta = rng.normal(0.0, position_sigma * 0.35)
+            pressure_delta = action.pressure_delta + rng.normal(0.0, pressure_sigma)
+            possession_delta = action.possession_delta + rng.normal(0.0, possession_sigma)
 
-        wp_future = _local_wp(win_prob_df, reference_time + action.constraint.duration_s)
-        wp_swing = (wp_future - wp_baseline) * 0.01
-        if not np.isfinite(model_swing):
-            expected_swing = wp_swing
-            source = "win_probability"
-        else:
-            expected_swing = 0.75 * model_swing + 0.25 * wp_swing
+            post["BallPosY"] = float(np.clip(float(post.get("BallPosY", 0.0)) + y_delta, -FIELD_HALF_Y, FIELD_HALF_Y))
+            post["BallPosX"] = float(np.clip(float(post.get("BallPosX", 0.0)) + x_delta, -FIELD_HALF_X, FIELD_HALF_X))
+            post[pressure_col] = float(np.clip(float(post.get(pressure_col, 0.0)) + pressure_delta, 0.0, 1.0))
+            post[poss_col] = float(np.clip(float(post.get(poss_col, 0.5)) + possession_delta, 0.0, 1.0))
+
+            model_value = predict_state_value(post, model=value_model).get("10s", baseline_value)
+            model_swing = (model_value - baseline_value) * (1 if team == "Blue" else -1)
+
+            wp_future = _local_wp(win_prob_df, reference_time + action.constraint.duration_s)
+            wp_swing = (wp_future - wp_baseline) * 0.01
+            if not np.isfinite(model_swing):
+                swings.append(float(wp_swing))
+                source_counts["win_probability"] += 1
+            else:
+                swings.append(float(0.75 * model_swing + 0.25 * wp_swing))
+                source_counts["possession_value_graph"] += 1
+
+        swings_arr = np.asarray(swings, dtype=float)
+        expected_mean = float(np.mean(swings_arr))
+        p10 = float(np.percentile(swings_arr, 10))
+        p90 = float(np.percentile(swings_arr, 90))
+        interval_width = float(max(0.0, p90 - p10))
+        confidence = float(np.clip(1.0 - (interval_width / 0.2), 0.0, 1.0))
+        if source_counts["possession_value_graph"] and source_counts["win_probability"]:
+            source = "possession_value_graph+win_probability"
+        elif source_counts["possession_value_graph"]:
             source = "possession_value_graph"
+        else:
+            source = "win_probability"
 
-        confidence = float(np.clip(0.55 + 0.2 * post.get(pressure_col, 0.0) + 0.25 * min(1.0, action.constraint.max_speed_uu_per_sec / SUPERSONIC_SPEED_UU_PER_SEC), 0.0, 1.0))
         rows.append(
             {
                 "Action": action.name,
-                "ExpectedSwing": float(expected_swing),
+                "ExpectedSwing": expected_mean,
+                "ExpectedSwingMean": expected_mean,
+                "ExpectedSwingP10": p10,
+                "ExpectedSwingP90": p90,
+                "ExpectedSwingIntervalWidth": interval_width,
                 "Confidence": confidence,
                 "RoleTargets": ", ".join(action.role_targets),
                 "ModelSource": source,
@@ -264,6 +301,7 @@ def build_coach_report(
             value_model=None,
             win_prob_df=win_prob_df,
             reference_time=float(m.Time),
+            replay_priors=priors,
         )
         if scored.empty:
             continue

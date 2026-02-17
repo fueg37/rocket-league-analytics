@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 
 from analytics import counterfactuals
@@ -71,9 +72,58 @@ def test_action_library_filters_and_scores():
     assert {a.name for a in actions}.issubset(ACTION_LIBRARY.keys())
 
     win_prob_df = pd.DataFrame({"Time": [1.0, 2.0, 3.0], "WinProb": [50.0, 51.0, 53.0]})
-    scored = score_candidate_actions(snapshot, actions, team="Blue", value_model=None, win_prob_df=win_prob_df, reference_time=1.0)
+    scored = score_candidate_actions(
+        snapshot,
+        actions,
+        team="Blue",
+        value_model=None,
+        win_prob_df=win_prob_df,
+        reference_time=1.0,
+        rollout_count=12,
+        random_seed=11,
+    )
     assert not scored.empty
-    assert {"ExpectedSwing", "Confidence", "RoleTargets"}.issubset(scored.columns)
+    assert {
+        "ExpectedSwing",
+        "ExpectedSwingMean",
+        "ExpectedSwingP10",
+        "ExpectedSwingP90",
+        "ExpectedSwingIntervalWidth",
+        "Confidence",
+        "RoleTargets",
+    }.issubset(scored.columns)
+
+
+def test_score_candidate_actions_interval_ordering_and_seed_determinism():
+    snapshot = _sample_states().iloc[0]
+    actions = [ACTION_LIBRARY["challenge_now"], ACTION_LIBRARY["third_man_hold"]]
+    win_prob_df = pd.DataFrame({"Time": [1.0, 2.0, 3.0], "WinProb": [50.0, 51.5, 52.0]})
+
+    scored_a = score_candidate_actions(
+        snapshot,
+        actions,
+        team="Blue",
+        value_model=None,
+        win_prob_df=win_prob_df,
+        reference_time=1.0,
+        rollout_count=20,
+        random_seed=7,
+    )
+    scored_b = score_candidate_actions(
+        snapshot,
+        actions,
+        team="Blue",
+        value_model=None,
+        win_prob_df=win_prob_df,
+        reference_time=1.0,
+        rollout_count=20,
+        random_seed=7,
+    )
+
+    assert ((scored_a["ExpectedSwingP10"] <= scored_a["ExpectedSwingMean"]) | np.isclose(scored_a["ExpectedSwingP10"], scored_a["ExpectedSwingMean"], atol=1e-12)).all()
+    assert ((scored_a["ExpectedSwingMean"] <= scored_a["ExpectedSwingP90"]) | np.isclose(scored_a["ExpectedSwingMean"], scored_a["ExpectedSwingP90"], atol=1e-12)).all()
+    assert (scored_a["ExpectedSwingIntervalWidth"] >= 0.0).all()
+    pd.testing.assert_frame_equal(scored_a, scored_b)
 
 
 def test_extract_moments_and_build_report():
