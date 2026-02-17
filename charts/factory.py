@@ -94,6 +94,7 @@ def kickoff_kpi_indicator(win_rate: float, title: str, tier: str = "detail"):
 def spatial_outcome_scatter(df, x_col: str, y_col: str, outcome_col: str, label_col: str | None = None, title: str = "", tier: str = "support", intent: str = "outcome", variant: str = "neutral"):
     """Build a spatial scatter split by outcomes using semantic outcome colors."""
     fig = go.Figure()
+    outcome_symbols = {"Win": "circle", "Loss": "x", "Neutral": "diamond"}
     for outcome in ["Win", "Loss", "Neutral"]:
         subset = df[df[outcome_col] == outcome]
         if subset.empty:
@@ -101,6 +102,7 @@ def spatial_outcome_scatter(df, x_col: str, y_col: str, outcome_col: str, label_
         marker = dict(
             size=12,
             color=semantic_color("outcome", outcome.lower()),
+            symbol=outcome_symbols.get(outcome, "circle"),
             opacity=0.85,
             line=dict(width=1, color="white"),
         )
@@ -127,7 +129,9 @@ def rolling_trend_with_wl_markers(hero_df, hero_display_df, metric: str, hero: s
         x=hero_df["GameNum"],
         y=hero_display_df[metric],
         name=hero,
+        mode="lines+markers" if show_wl_markers else "lines",
         line=dict(color=semantic_color("dual_series", "primary"), width=2, dash="dot" if show_wl_markers else "solid"),
+        marker=dict(size=6, symbol="circle-open", line=dict(width=1.2, color=semantic_color("dual_series", "primary"))),
         opacity=0.4 if show_wl_markers else 1.0,
     ))
 
@@ -137,22 +141,30 @@ def rolling_trend_with_wl_markers(hero_df, hero_display_df, metric: str, hero: s
             x=hero_df["GameNum"],
             y=rolling,
             name=f"{hero} ({rolling_window}g avg)",
-            line=dict(color=semantic_color("dual_series", "primary"), width=3),
+            line=dict(color=semantic_color("dual_series", "primary"), width=3, dash="solid"),
         ))
 
     if show_wl_markers and "Won" in hero_df.columns:
         wins_display = hero_display_df[hero_df["Won"] == True]
         losses_display = hero_display_df[hero_df["Won"] == False]
         if not wins_display.empty:
-            fig.add_trace(go.Scatter(x=wins_display["GameNum"], y=wins_display[metric], mode="markers", marker=dict(size=8, color=semantic_color("outcome", "win"), symbol="circle"), name="Win"))
+            fig.add_trace(go.Scatter(x=wins_display["GameNum"], y=wins_display[metric], mode="markers", marker=dict(size=8, color=semantic_color("outcome", "win"), symbol="triangle-up", line=dict(width=1, color="white")), name="Win"))
         if not losses_display.empty:
-            fig.add_trace(go.Scatter(x=losses_display["GameNum"], y=losses_display[metric], mode="markers", marker=dict(size=8, color=semantic_color("outcome", "loss"), symbol="x"), name="Loss"))
+            fig.add_trace(go.Scatter(x=losses_display["GameNum"], y=losses_display[metric], mode="markers", marker=dict(size=9, color=semantic_color("outcome", "loss"), symbol="triangle-down", line=dict(width=1, color="white")), name="Loss"))
 
     if teammate_df is not None and teammate_name:
-        fig.add_trace(go.Scatter(x=teammate_df["GameNum"], y=teammate_df[metric], name=teammate_name, line=dict(color=semantic_color("dual_series", "secondary"), width=2, dash="dot")))
+        fig.add_trace(go.Scatter(
+            x=teammate_df["GameNum"],
+            y=teammate_df[metric],
+            name=teammate_name,
+            mode="lines+markers" if show_wl_markers else "lines",
+            line=dict(color=semantic_color("dual_series", "secondary"), width=2, dash="dash"),
+            marker=dict(size=6, symbol="square-open", line=dict(width=1.2, color=semantic_color("dual_series", "secondary"))),
+            opacity=0.45 if show_wl_markers else 1.0,
+        ))
         if len(teammate_df) >= rolling_window:
             mate_rolling = teammate_df[metric].rolling(window=rolling_window, min_periods=1).mean()
-            fig.add_trace(go.Scatter(x=teammate_df["GameNum"], y=mate_rolling, name=f"{teammate_name} ({rolling_window}g avg)", line=dict(color=semantic_color("dual_series", "secondary"), width=3)))
+            fig.add_trace(go.Scatter(x=teammate_df["GameNum"], y=mate_rolling, name=f"{teammate_name} ({rolling_window}g avg)", line=dict(color=semantic_color("dual_series", "secondary"), width=3, dash="longdash")))
 
     fig.update_layout(title=f"{metric} over Time", yaxis_title=metric)
     return apply_chart_theme(fig, tier="support", intent="dual_series", variant="primary")
