@@ -5,8 +5,20 @@ from __future__ import annotations
 import pandas as pd
 import plotly.graph_objects as go
 
-from constants import TEAM_COLORS
+from constants import GOAL_HALF_W, GOAL_HEIGHT, REPLAY_FPS, TEAM_COLORS
 from charts.theme import apply_chart_theme
+from analytics.shot_quality import (
+    COL_ON_TARGET,
+    COL_TARGET_X,
+    COL_TARGET_Z,
+    COL_SHOT_Z,
+    COL_XG,
+    COL_XGOT,
+    SHOT_COL_FRAME,
+    SHOT_COL_PLAYER,
+    SHOT_COL_RESULT,
+    SHOT_COL_TEAM,
+)
 
 _TEAM_ACCENT = {
     "Blue": TEAM_COLORS["Blue"]["primary"],
@@ -210,4 +222,123 @@ def comparison_dumbbell(
         font=dict(size=11),
     )
 
+    return apply_chart_theme(fig, tier="support")
+
+
+def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_only=True):
+    """Render a goal-mouth scatter using post-shot target coordinates.
+
+    Args:
+        df: Shot dataframe that includes TargetX/TargetZ and shot metadata.
+        team: Optional team filter ("Blue"/"Orange").
+        player: Optional player-name filter.
+        include_xgot: Scale marker size by xGOT values.
+        on_target_only: Keep only shots marked as on-target.
+    """
+    fig = go.Figure()
+
+    required_cols = {COL_TARGET_X, COL_TARGET_Z, SHOT_COL_PLAYER, SHOT_COL_RESULT, SHOT_COL_TEAM}
+    missing = sorted(c for c in required_cols if c not in df.columns)
+    if missing:
+        fig.update_layout(title="Goal Mouth (missing data)")
+        fig.add_annotation(
+            x=0.5,
+            y=0.5,
+            xref="paper",
+            yref="paper",
+            text=f"Missing columns: {', '.join(missing)}",
+            showarrow=False,
+            font=dict(size=11, color="#D7DEE9"),
+        )
+        return apply_chart_theme(fig, tier="support")
+
+    shots = df.copy()
+    if team:
+        shots = shots[shots[SHOT_COL_TEAM] == team]
+    if player:
+        shots = shots[shots[SHOT_COL_PLAYER] == player]
+    if on_target_only and COL_ON_TARGET in shots.columns:
+        shots = shots[(shots[COL_ON_TARGET] == True) | (shots[SHOT_COL_RESULT] == "Goal")]
+
+    # Preserve goals even when target reconstruction failed by backfilling
+    # a neutral in-frame estimate so every goal remains inspectable.
+    goal_mask = shots[SHOT_COL_RESULT] == "Goal"
+    missing_x = goal_mask & shots[COL_TARGET_X].isna()
+    missing_z = goal_mask & shots[COL_TARGET_Z].isna()
+    if missing_x.any():
+        shots.loc[missing_x, COL_TARGET_X] = 0.0
+    if missing_z.any():
+        if COL_SHOT_Z in shots.columns:
+            shots.loc[missing_z, COL_TARGET_Z] = pd.to_numeric(shots.loc[missing_z, COL_SHOT_Z], errors="coerce").fillna(GOAL_HEIGHT * 0.35)
+        else:
+            shots.loc[missing_z, COL_TARGET_Z] = GOAL_HEIGHT * 0.35
+
+    shots[COL_TARGET_X] = pd.to_numeric(shots[COL_TARGET_X], errors="coerce")
+    shots[COL_TARGET_Z] = pd.to_numeric(shots[COL_TARGET_Z], errors="coerce").clip(lower=0, upper=GOAL_HEIGHT)
+    shots = shots.dropna(subset=[COL_TARGET_X, COL_TARGET_Z])
+    if shots.empty:
+        fig.update_layout(title="Goal Mouth")
+        fig.add_annotation(
+            x=0.5, y=0.5, xref="paper", yref="paper", text="No target data", showarrow=False,
+            font=dict(size=12, color="#D7DEE9"),
+        )
+        return apply_chart_theme(fig, tier="support")
+
+    result_symbol = {"Goal": "star", "Shot": "circle", "Save": "x", "Post": "diamond"}
+    default_symbol = "circle-open"
+
+    shots = shots.copy()
+    if SHOT_COL_FRAME in shots.columns:
+        shots["_time"] = pd.to_numeric(shots[SHOT_COL_FRAME], errors="coerce").fillna(0) / float(REPLAY_FPS)
+    else:
+        shots["_time"] = 0
+    shots["_xg"] = pd.to_numeric(shots.get(COL_XG, 0), errors="coerce").fillna(0)
+    shots["_xgot"] = pd.to_numeric(shots.get(COL_XGOT, 0), errors="coerce").fillna(0)
+    speed_col = "Speed" if "Speed" in shots.columns else None
+    shots["_speed"] = pd.to_numeric(shots[speed_col], errors="coerce").fillna(0) if speed_col else 0
+
+    marker_size = (shots["_xgot"].clip(lower=0) * 28 + 10).clip(8, 30) if include_xgot else 12
+
+    for team_name, team_rows in shots.groupby(SHOT_COL_TEAM):
+        team_color = TEAM_COLORS.get(team_name, {}).get("primary", "#9aa4b2")
+        fig.add_trace(
+            go.Scatter(
+                x=team_rows[COL_TARGET_X],
+                y=team_rows[COL_TARGET_Z],
+                mode="markers",
+                name=team_name,
+                marker=dict(
+                    size=marker_size.loc[team_rows.index] if include_xgot else marker_size,
+                    color=team_color,
+                    symbol=[result_symbol.get(r, default_symbol) for r in team_rows[SHOT_COL_RESULT]],
+                    line=dict(width=1, color="white"),
+                    opacity=0.92,
+                ),
+                customdata=list(
+                    zip(
+                        team_rows[SHOT_COL_PLAYER],
+                        team_rows["_time"],
+                        team_rows[SHOT_COL_RESULT],
+                        team_rows["_xg"],
+                        team_rows["_xgot"],
+                        team_rows["_speed"],
+                    )
+                ),
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "t=%{customdata[1]:.1f}s | %{customdata[2]}<br>"
+                    "xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>"
+                    "Speed %{customdata[5]:.0f} uu/s<extra></extra>"
+                ),
+            )
+        )
+
+    # Goal frame boundaries.
+    frame_color = "rgba(255,255,255,0.7)"
+    fig.add_shape(type="rect", x0=-GOAL_HALF_W, y0=0, x1=GOAL_HALF_W, y1=GOAL_HEIGHT, line=dict(color=frame_color, width=2))
+    fig.add_shape(type="line", x0=0, y0=0, x1=0, y1=GOAL_HEIGHT, line=dict(color="rgba(255,255,255,0.2)", width=1, dash="dot"))
+
+    fig.update_xaxes(title="TargetX", range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], constrain="domain")
+    fig.update_yaxes(title="TargetZ", range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
+    fig.update_layout(title="Goal Mouth", legend_title_text="Team")
     return apply_chart_theme(fig, tier="support")
