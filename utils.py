@@ -6,6 +6,7 @@ import math
 from numbers import Real
 
 import numpy as np
+import pandas as pd
 
 from constants import (
     MAX_BALL_SPEED_UU_PER_SEC,
@@ -109,6 +110,31 @@ def normalize_speed_uu_per_sec(value: float) -> float:
     if speed > plausible_max and (speed / 10.0) <= plausible_max:
         return speed / 10.0
     return speed
+
+
+def apply_categorical_order(df: pd.DataFrame, column: str, order_list: list[str]) -> pd.DataFrame:
+    """Return a copy with *column* encoded as an ordered categorical.
+
+    Unknown values are preserved as category values after canonical entries,
+    so downstream sorting remains deterministic while still showing new labels.
+    """
+    ordered_df = df.copy()
+    if column not in ordered_df.columns:
+        return ordered_df
+
+    series = ordered_df[column]
+    non_null = series.dropna().astype(str)
+    extras = [value for value in non_null.unique().tolist() if value not in order_list]
+    categories = list(order_list) + sorted(extras)
+    ordered_df[column] = pd.Categorical(series, categories=categories, ordered=True)
+    return ordered_df
+
+
+def stable_sort(df: pd.DataFrame, by: list[str], ascending: list[bool] | None = None) -> pd.DataFrame:
+    """Stable mergesort helper for deterministic table/chart ordering."""
+    if ascending is None:
+        ascending = [True] * len(by)
+    return df.sort_values(by=by, ascending=ascending, kind="mergesort")
 
 
 def format_speed(value, unit=SPEED_DISPLAY_UNIT_DEFAULT, precision=1, na="N/A") -> str:

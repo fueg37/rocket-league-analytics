@@ -4,10 +4,15 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from constants import GOAL_HALF_W, GOAL_HEIGHT, REPLAY_FPS, TEAM_COLORS
-from charts.theme import apply_chart_theme
-from utils import format_speed
+from charts.theme import apply_chart_theme, semantic_color
+from charts.formatters import (
+    format_metric_series,
+    format_metric_value,
+    title_case_label,
+)
 from analytics.shot_quality import (
     COL_ON_TARGET,
     COL_TARGET_X,
@@ -32,13 +37,198 @@ _STEM_COLOR = {
 }
 
 
-def _format_values(series: pd.Series) -> list[str]:
-    values = pd.to_numeric(series, errors="coerce").fillna(0)
-    if (values % 1 == 0).all():
-        return [f"{v:,.0f}" for v in values]
-    if values.abs().max() < 10:
-        return [f"{v:,.2f}" for v in values]
-    return [f"{v:,.1f}" for v in values]
+def kickoff_kpi_indicator(win_rate: float, title: str, tier: str = "detail"):
+    """Build a kickoff KPI with progress/bullet encoding and benchmark markers."""
+    if win_rate >= 50:
+        bar_color = semantic_color("threshold", "positive")
+    elif win_rate < 30:
+        bar_color = semantic_color("threshold", "negative")
+    else:
+        bar_color = semantic_color("threshold", "neutral")
+
+    benchmark_traces = [
+        (45, "Baseline", "dot", "rgba(255,255,255,0.95)"),
+        (50, "Break-even", "dash", "rgba(255,255,255,0.8)"),
+        (55, "Elite", "dot", "rgba(255,255,255,0.95)"),
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=[float(win_rate)],
+            y=[title],
+            orientation="h",
+            marker=dict(color=bar_color),
+            text=[f"{win_rate:.1f}%"],
+            textposition="inside",
+            insidetextanchor="middle",
+            hovertemplate="Kickoff Win Rate: %{x:.1f}%<extra></extra>",
+            name="Win Rate",
+            showlegend=False,
+        )
+    )
+
+    for x_pos, label, dash, color in benchmark_traces:
+        fig.add_shape(
+            type="line",
+            x0=x_pos,
+            x1=x_pos,
+            y0=-0.45,
+            y1=0.45,
+            line=dict(color=color, width=2, dash=dash),
+        )
+        fig.add_annotation(
+            x=x_pos,
+            y=0.62,
+            text=label,
+            showarrow=False,
+            font=dict(size=10, color=color),
+        )
+
+    fig.update_xaxes(range=[0, 100], ticksuffix="%", title="Win Rate")
+    fig.update_yaxes(showticklabels=False)
+    fig.update_layout(height=260, barmode="overlay", margin=dict(l=20, r=20, t=60, b=30), title=title)
+    return apply_chart_theme(fig, tier=tier, intent="threshold", variant="neutral")
+
+
+def spatial_outcome_scatter(df, x_col: str, y_col: str, outcome_col: str, label_col: str | None = None, title: str = "", tier: str = "support", intent: str = "outcome", variant: str = "neutral"):
+    """Build a spatial scatter split by outcomes using semantic outcome colors."""
+    fig = go.Figure()
+    outcome_symbols = {"Win": "circle", "Loss": "x", "Neutral": "diamond"}
+    for outcome in ["Win", "Loss", "Neutral"]:
+        subset = df[df[outcome_col] == outcome]
+        if subset.empty:
+            continue
+        marker = dict(
+            size=12,
+            color=semantic_color("outcome", outcome.lower()),
+            symbol=outcome_symbols.get(outcome, "circle"),
+            opacity=0.85,
+            line=dict(width=1, color="white"),
+        )
+        trace = go.Scatter(
+            x=subset[x_col],
+            y=subset[y_col],
+            mode="markers",
+            marker=marker,
+            name=outcome,
+            hovertemplate=("%{text}<br>Result: " + outcome + "<extra></extra>") if label_col else ("Result: " + outcome + "<extra></extra>"),
+        )
+        if label_col:
+            trace.text = subset[label_col]
+        fig.add_trace(trace)
+
+    fig.update_layout(title=title)
+    return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
+
+
+def rolling_trend_with_wl_markers(hero_df, hero_display_df, metric: str, hero: str, rolling_window: int, show_wl_markers: bool = True, teammate_df=None, teammate_name: str | None = None):
+    """Build rolling trend chart with semantic dual-series and W/L marker colors."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=hero_df["GameNum"],
+        y=hero_display_df[metric],
+        name=hero,
+        mode="lines+markers" if show_wl_markers else "lines",
+        line=dict(color=semantic_color("dual_series", "primary"), width=2, dash="dot" if show_wl_markers else "solid"),
+        marker=dict(size=6, symbol="circle-open", line=dict(width=1.2, color=semantic_color("dual_series", "primary"))),
+        opacity=0.4 if show_wl_markers else 1.0,
+    ))
+
+    if len(hero_df) >= rolling_window:
+        rolling = hero_display_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+        fig.add_trace(go.Scatter(
+            x=hero_df["GameNum"],
+            y=rolling,
+            name=f"{hero} ({rolling_window}g avg)",
+            line=dict(color=semantic_color("dual_series", "primary"), width=3, dash="solid"),
+        ))
+
+    if show_wl_markers and "Won" in hero_df.columns:
+        wins_display = hero_display_df[hero_df["Won"] == True]
+        losses_display = hero_display_df[hero_df["Won"] == False]
+        if not wins_display.empty:
+            fig.add_trace(go.Scatter(x=wins_display["GameNum"], y=wins_display[metric], mode="markers", marker=dict(size=8, color=semantic_color("outcome", "win"), symbol="triangle-up", line=dict(width=1, color="white")), name="Win"))
+        if not losses_display.empty:
+            fig.add_trace(go.Scatter(x=losses_display["GameNum"], y=losses_display[metric], mode="markers", marker=dict(size=9, color=semantic_color("outcome", "loss"), symbol="triangle-down", line=dict(width=1, color="white")), name="Loss"))
+
+    if teammate_df is not None and teammate_name:
+        fig.add_trace(go.Scatter(
+            x=teammate_df["GameNum"],
+            y=teammate_df[metric],
+            name=teammate_name,
+            mode="lines+markers" if show_wl_markers else "lines",
+            line=dict(color=semantic_color("dual_series", "secondary"), width=2, dash="dash"),
+            marker=dict(size=6, symbol="square-open", line=dict(width=1.2, color=semantic_color("dual_series", "secondary"))),
+            opacity=0.45 if show_wl_markers else 1.0,
+        ))
+        if len(teammate_df) >= rolling_window:
+            mate_rolling = teammate_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+            fig.add_trace(go.Scatter(x=teammate_df["GameNum"], y=mate_rolling, name=f"{teammate_name} ({rolling_window}g avg)", line=dict(color=semantic_color("dual_series", "secondary"), width=3, dash="longdash")))
+
+    fig.update_layout(title=f"{metric} over Time", yaxis_title=metric)
+    return apply_chart_theme(fig, tier="support", intent="dual_series", variant="primary")
+
+
+def session_composite_chart(summary_df):
+    """Build synchronized session subplots for win-rate and rating with sample-size context."""
+    ordered = summary_df.sort_values(["Session"], ascending=[True], kind="mergesort").reset_index(drop=True)
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=[0.55, 0.45],
+        subplot_titles=("Win Rate %", "Avg Rating"),
+    )
+
+    hover_base = (
+        "Session %{x}<br>"
+        "Games per Session: %{customdata[0]}<br>"
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["Session"],
+            y=ordered["Win Rate %"],
+            name="Win Rate %",
+            marker_color=semantic_color("outcome", "win"),
+            text=ordered["Games per Session"].map(lambda v: f"n={int(v)}"),
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["Games per Session"]],
+            hovertemplate=hover_base + "Win Rate %: %{y:.1f}%<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=ordered["Session"],
+            y=ordered["Avg Rating"],
+            name="Avg Rating",
+            mode="lines+markers",
+            line=dict(color=semantic_color("dual_series", "secondary"), width=3),
+            marker=dict(size=8),
+            customdata=ordered[["Games per Session"]],
+            hovertemplate=hover_base + "Avg Rating: %{y:.2f}<extra></extra>",
+        ),
+        row=2,
+        col=1,
+    )
+
+    fig.update_layout(
+        title="Session Performance Overview",
+        legend=dict(x=0.01, y=1.02, orientation="h"),
+        bargap=0.25,
+    )
+    fig.update_xaxes(title="Session", type="category", categoryorder="array", categoryarray=ordered["Session"].tolist(), row=2, col=1)
+    fig.update_yaxes(title="Win Rate %", range=[0, 100], row=1, col=1)
+    fig.update_yaxes(title="Avg Rating", rangemode="tozero", row=2, col=1)
+
+    return apply_chart_theme(fig, tier="hero", intent="dual_series", variant="primary")
 
 
 def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
@@ -49,15 +239,15 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
     cols = [name_col, team_col, metric_col]
     rank_df = df[cols].copy()
     rank_df[metric_col] = pd.to_numeric(rank_df[metric_col], errors="coerce").fillna(0)
-    rank_df = rank_df.sort_values(metric_col, ascending=False).reset_index(drop=True)
+    rank_df = rank_df.sort_values([metric_col, name_col], ascending=[False, True], kind='mergesort').reset_index(drop=True)
 
     fig = go.Figure()
-    labels = _format_values(rank_df[metric_col])
+    labels = format_metric_series(rank_df[metric_col], metric_col, include_unit=False)
 
     for i, row in rank_df.iterrows():
         team = row[team_col]
         stem_color = _STEM_COLOR.get(team, "rgba(165, 171, 184, 0.35)")
-        accent = _TEAM_ACCENT.get(team, "#9aa4b2")
+        accent = _TEAM_ACCENT.get(team, semantic_color("threshold", "neutral"))
         val = float(row[metric_col])
 
         fig.add_shape(
@@ -77,7 +267,7 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
                 text=[labels[i]],
                 textposition="middle right",
                 textfont=dict(color=accent, size=11),
-                hovertemplate=f"<b>{row[name_col]}</b><br>{metric_col}: %{{x}}<extra>{team}</extra>",
+                hovertemplate=f"Player: {row[name_col]}<br>Team: {team}<br>Metric: {title_case_label(metric_col)}: {format_metric_value(row[metric_col], metric_col)}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -89,8 +279,8 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
         autorange="reversed",
         title=None,
     )
-    fig.update_xaxes(title=metric_col, rangemode="tozero")
-    fig.update_layout(title=metric_col)
+    fig.update_xaxes(title=title_case_label(metric_col), rangemode="tozero")
+    fig.update_layout(title=title_case_label(metric_col))
 
     return apply_chart_theme(fig, tier="support")
 
@@ -123,8 +313,8 @@ def comparison_dumbbell(
     else:
         comp_df = comp_df.reset_index(drop=True)
 
-    left_color = "#8C9AAD"   # muted slate
-    right_color = "#00CC96"  # positive endpoint accent
+    left_color = semantic_color("dual_series", "comparison_left")
+    right_color = semantic_color("dual_series", "comparison_right")
     connector_color = "rgba(165, 171, 184, 0.45)"
 
     fig = go.Figure()
@@ -156,10 +346,10 @@ def comparison_dumbbell(
                 y=[i],
                 mode="markers+text",
                 marker=dict(size=11, color="white", line=dict(color=left_color, width=2.5)),
-                text=[_format_values(pd.Series([left_val]))[0]],
+                text=[format_metric_value(left_val, left_label, include_unit=False)],
                 textposition="middle left",
                 textfont=dict(size=10, color=left_color),
-                hovertemplate=f"<b>{row[entity_col]}</b><br>{left_label}: %{{x}}<extra></extra>",
+                hovertemplate=f"Player: {row[entity_col]}<br>Metric: {title_case_label(left_label)}: {format_metric_value(left_val, left_label)}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -169,10 +359,10 @@ def comparison_dumbbell(
                 y=[i],
                 mode="markers+text",
                 marker=dict(size=11, color="white", line=dict(color=right_color, width=2.5)),
-                text=[_format_values(pd.Series([right_val]))[0]],
+                text=[format_metric_value(right_val, right_label, include_unit=False)],
                 textposition="middle right",
                 textfont=dict(size=10, color=right_color),
-                hovertemplate=f"<b>{row[entity_col]}</b><br>{right_label}: %{{x}}<extra></extra>",
+                hovertemplate=f"Player: {row[entity_col]}<br>Metric: {title_case_label(right_label)}: {format_metric_value(right_val, right_label)}<extra></extra>",
                 showlegend=False,
             )
         )
@@ -183,7 +373,7 @@ def comparison_dumbbell(
             y=i,
             text=delta_text,
             showarrow=False,
-            font=dict(size=10, color="#D7DEE9"),
+            font=dict(size=10, color=semantic_color("threshold", "neutral")),
             yshift=-16,
             align="center",
         )
@@ -195,10 +385,10 @@ def comparison_dumbbell(
         autorange="reversed",
         title=None,
     )
-    fig.update_xaxes(title=f"{left_label} vs {right_label}", zeroline=False)
+    fig.update_xaxes(title=f"{title_case_label(left_label)} vs {title_case_label(right_label)}", zeroline=False)
     fig.update_layout(
         margin=dict(l=10, r=10, t=45, b=10),
-        title=f"{left_label} vs {right_label} (Δ = {right_label} − {left_label})",
+        title=f"{title_case_label(left_label)} vs {title_case_label(right_label)} (Δ = {title_case_label(right_label)} − {title_case_label(left_label)})",
     )
 
     # Legend-style endpoint labels in-chart for quick semantic mapping.
@@ -207,7 +397,7 @@ def comparison_dumbbell(
         yref="paper",
         x=0.0,
         y=1.08,
-        text=f"<span style='color:{left_color}'>●</span> {left_label}",
+        text=f"<span style='color:{left_color}'>●</span> {title_case_label(left_label)}",
         showarrow=False,
         xanchor="left",
         font=dict(size=11),
@@ -217,7 +407,7 @@ def comparison_dumbbell(
         yref="paper",
         x=0.18,
         y=1.08,
-        text=f"<span style='color:{right_color}'>●</span> {right_label}",
+        text=f"<span style='color:{right_color}'>●</span> {title_case_label(right_label)}",
         showarrow=False,
         xanchor="left",
         font=dict(size=11),
@@ -249,7 +439,7 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
             yref="paper",
             text=f"Missing columns: {', '.join(missing)}",
             showarrow=False,
-            font=dict(size=11, color="#D7DEE9"),
+            font=dict(size=11, color=semantic_color("threshold", "neutral")),
         )
         return apply_chart_theme(fig, tier="support")
 
@@ -281,7 +471,7 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
         fig.update_layout(title="Goal Mouth")
         fig.add_annotation(
             x=0.5, y=0.5, xref="paper", yref="paper", text="No target data", showarrow=False,
-            font=dict(size=12, color="#D7DEE9"),
+            font=dict(size=12, color=semantic_color("threshold", "neutral")),
         )
         return apply_chart_theme(fig, tier="support")
 
@@ -301,7 +491,7 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
     marker_size = (shots["_xgot"].clip(lower=0) * 28 + 10).clip(8, 30) if include_xgot else 12
 
     for team_name, team_rows in shots.groupby(SHOT_COL_TEAM):
-        team_color = TEAM_COLORS.get(team_name, {}).get("primary", "#9aa4b2")
+        team_color = TEAM_COLORS.get(team_name, {}).get("primary", semantic_color("threshold", "neutral"))
         fig.add_trace(
             go.Scatter(
                 x=team_rows[COL_TARGET_X],
@@ -318,19 +508,19 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
                 customdata=list(
                     zip(
                         team_rows[SHOT_COL_PLAYER],
-                        team_rows["_time"],
-                        team_rows[SHOT_COL_RESULT],
-                        team_rows["_xg"],
-                        team_rows["_xgot"],
+                        [team_name] * len(team_rows),
+                        team_rows["_time"].map(lambda v: format_metric_value(v, "Time")),
+                        team_rows["_xg"].map(lambda v: format_metric_value(v, "xG")),
+                        team_rows["_xgot"].map(lambda v: format_metric_value(v, "xGOT")),
                         team_rows["_speed"],
-                        team_rows["_speed"].map(lambda speed_uu: format_speed(speed_uu, unit="mph", precision=1)),
+                        team_rows["_speed"].map(lambda v: format_metric_value(v, "Speed")),
                     )
                 ),
                 hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "t=%{customdata[1]:.1f}s | %{customdata[2]}<br>"
-                    "xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>"
-                    "Speed %{customdata[6]}<extra></extra>"
+                    "Player: %{customdata[0]}<br>"
+                    "Team: %{customdata[1]}<br>"
+                    "Time: %{customdata[2]}<br>"
+                    "Metric: xG: %{customdata[3]}<extra></extra>"
                 ),
             )
         )
@@ -340,7 +530,7 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
     fig.add_shape(type="rect", x0=-GOAL_HALF_W, y0=0, x1=GOAL_HALF_W, y1=GOAL_HEIGHT, line=dict(color=frame_color, width=2))
     fig.add_shape(type="line", x0=0, y0=0, x1=0, y1=GOAL_HEIGHT, line=dict(color="rgba(255,255,255,0.2)", width=1, dash="dot"))
 
-    fig.update_xaxes(title="TargetX", range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], constrain="domain")
-    fig.update_yaxes(title="TargetZ", range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
+    fig.update_xaxes(title=title_case_label("target x"), range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], constrain="domain")
+    fig.update_yaxes(title=title_case_label("target z"), range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
     fig.update_layout(title="Goal Mouth", legend_title_text="Team")
     return apply_chart_theme(fig, tier="support")
