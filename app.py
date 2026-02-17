@@ -155,6 +155,12 @@ def with_dashboard_speed_display(df: pd.DataFrame) -> pd.DataFrame:
         )
     return display_df
 
+
+def prepare_partnership_intelligence_tables(season_df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """App data-prep path for Partnership Intelligence pair/trio tables."""
+    return build_season_chemistry_tables(season_df)
+
+
 # --- 1. SETUP & IMPORTS ---
 try:
     import carball
@@ -3709,7 +3715,7 @@ elif app_mode == "📈 Season Batch Processor":
         hero_df = detect_sessions(hero_df, session_gap)
         hero_display_df = with_dashboard_speed_display(hero_df)
 
-        pair_chemistry_df, trio_chemistry_df = build_season_chemistry_tables(season)
+        pair_chemistry_df, trio_chemistry_df = prepare_partnership_intelligence_tables(season)
 
         # Summary metrics
         ot_count = int(hero_df['Overtime'].sum()) if 'Overtime' in hero_df.columns else 0
@@ -3959,7 +3965,7 @@ elif app_mode == "📈 Season Batch Processor":
             st.markdown("#### Best Partner Profile")
             hero_pairs = pair_chemistry_df[(pair_chemistry_df['Player1'] == hero) | (pair_chemistry_df['Player2'] == hero)] if not pair_chemistry_df.empty else pd.DataFrame()
             if hero_pairs.empty:
-                st.info("No chemistry pair data available yet for this player.")
+                st.info("No Partnership Intelligence pair data available yet for this player.")
             else:
                 best_pair = hero_pairs.sort_values('Partnership Index' if 'Partnership Index' in hero_pairs.columns else 'ChemistryScore_Shrunk', ascending=False).iloc[0]
                 partner = best_pair['Player2'] if best_pair['Player1'] == hero else best_pair['Player1']
@@ -3990,10 +3996,10 @@ elif app_mode == "📈 Season Batch Processor":
             chem_col1, chem_col2 = st.columns([1, 2])
             with chem_col1:
                 min_samples = st.slider("Minimum pair samples", 1, 25, 4, 1, key="chem_min_samples")
-                top_n = st.slider("Top chemistry pairs", 5, 50, 20, 1, key="chem_top_n")
+                top_n = st.slider("Top partnership pairs", 5, 50, 20, 1, key="chem_top_n")
             rank_df = chemistry_ranking_table(pair_chemistry_df[pair_chemistry_df['Samples'] >= min_samples] if not pair_chemistry_df.empty else pair_chemistry_df, top_n=top_n)
             if rank_df.empty:
-                st.info("No qualifying chemistry pairs for selected sample filter.")
+                st.info("No qualifying partnership pairs for selected sample filter.")
             else:
                 render_dataframe(rank_df, use_container_width=True, hide_index=True)
                 st.caption("What this means: Partnership Index measures how much a duo improves team outcomes beyond each player’s solo baseline, adjusted for sample size and uncertainty.")
@@ -4021,13 +4027,13 @@ elif app_mode == "📈 Season Batch Processor":
             st.markdown("#### Top Trios")
             with st.expander("Top Trios"):
                 if trio_chemistry_df.empty:
-                    st.info("No trio chemistry data available.")
+                    st.info("No trio Partnership Intelligence data available.")
                 else:
                     tri = trio_chemistry_df.copy().head(top_n)
                     tri['Trio'] = tri['Player1'].astype(str) + ' + ' + tri['Player2'].astype(str) + ' + ' + tri['Player3'].astype(str)
-                    tri['Chemistry'] = tri['ChemistryScore_Shrunk'].map(lambda v: f"{float(v):.3f}")
+                    tri['Partnership Intelligence'] = tri['ChemistryScore_Shrunk'].map(lambda v: f"{float(v):.3f}")
                     tri['CI'] = tri.apply(lambda r: f"[{float(r['CI_Low']):.3f}, {float(r['CI_High']):.3f}]", axis=1)
-                    render_dataframe(tri[['Team', 'Trio', 'Chemistry', 'CI', 'Samples', 'Reliability']], use_container_width=True, hide_index=True)
+                    render_dataframe(tri[['Team', 'Trio', 'Partnership Intelligence', 'CI', 'Samples', 'Reliability']], use_container_width=True, hide_index=True)
 
         with t8:
             st.subheader("Career Insights")
