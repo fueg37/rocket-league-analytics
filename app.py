@@ -16,13 +16,15 @@ from constants import (
     MAX_STORED_MATCHES, FIELD_HALF_X, FIELD_HALF_Y, WALL_HEIGHT,
     GOAL_HALF_W, GOAL_DEPTH, GOAL_HEIGHT, CENTER_CIRCLE_R,
     AXIS_PAD_X, AXIS_PAD_Y, TEAM_COLORS, TEAM_COLOR_MAP,
-    SUPERSONIC_SPEED_UU_PER_SEC,
+    SUPERSONIC_SPEED_UU_PER_SEC, KICKOFF_SPAWN_ORDER, GAME_STATE_ORDER,
+    ZONE_ORDER, TEAM_ORDER,
 )
 from utils import (
     build_pid_team_map, build_pid_name_map, build_player_team_map,
     get_team_players, build_player_positions,
     frame_to_seconds, seconds_to_frame, fmt_time, format_speed,
     normalize_speed_uu_per_sec, uu_per_sec_to_mph,
+    apply_categorical_order, stable_sort,
 )
 
 from charts.theme import apply_chart_theme, semantic_color
@@ -2028,15 +2030,18 @@ def build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=Non
 def build_export_zones(df, focus_players):
     """Positional zone comparison for export (dumbbell when exactly two players)."""
     players_to_show = focus_players if focus_players else df['Name'].tolist()[:2]
-    zones = [
-        ('Def', 'Pos_Def'),
-        ('Mid', 'Pos_Mid'),
-        ('Off', 'Pos_Off'),
-        ('Wall', 'Wall_Time'),
+    base_zone_columns = {
+        'Def': 'Pos_Def',
+        'Mid': 'Pos_Mid',
+        'Off': 'Pos_Off',
+        'Wall': 'Wall_Time',
+    }
+    zones = [(zone, base_zone_columns[zone]) for zone in ZONE_ORDER]
+    zones.extend([
         ('Corner', 'Corner_Time'),
         ('On Wall', 'On_Wall_Time'),
         ('Carry', 'Carry_Time'),
-    ]
+    ])
 
     if len(players_to_show) >= 2:
         left_name, right_name = players_to_show[:2]
@@ -2141,10 +2146,12 @@ def render_scoreboard(df, shot_df=None, is_overtime=False):
     col_blue, col_orange = st.columns(2)
     with col_blue:
         st.markdown("#### 🔵 Blue Team")
-        st.dataframe(df[df['Team']=='Blue'][cols].sort_values(by='Score', ascending=False), use_container_width=True, hide_index=True)
+        blue_rows = stable_sort(apply_categorical_order(df[df['Team']=='Blue'][cols], 'Team', TEAM_ORDER), by=['Score', 'Name'], ascending=[False, True])
+        st.dataframe(blue_rows, use_container_width=True, hide_index=True)
     with col_orange:
         st.markdown("#### 🟠 Orange Team")
-        st.dataframe(df[df['Team']=='Orange'][cols].sort_values(by='Score', ascending=False), use_container_width=True, hide_index=True)
+        orange_rows = stable_sort(apply_categorical_order(df[df['Team']=='Orange'][cols], 'Team', TEAM_ORDER), by=['Score', 'Name'], ascending=[False, True])
+        st.dataframe(orange_rows, use_container_width=True, hide_index=True)
     st.divider()
 
 def render_dashboard(df, shot_df, pass_df):
@@ -2337,7 +2344,9 @@ if app_mode == "🔍 Single Match Analysis":
                     st.markdown("#### Kickoff Log")
                     disp_cols = ['Player', 'Spawn', 'Time to Hit', 'Boost', 'Result', 'Goal (5s)']
                     _style_fn = lambda x: 'color: green' if x == 'Win' or x == True else ('color: red' if x == 'Loss' else 'color: gray')
-                    _styler = disp_kickoff[disp_cols].style
+                    kickoff_log = apply_categorical_order(disp_kickoff[disp_cols], 'Spawn', KICKOFF_SPAWN_ORDER)
+                    kickoff_log = stable_sort(kickoff_log, by=['Spawn', 'Player', 'Time to Hit'], ascending=[True, True, True])
+                    _styler = kickoff_log.style
                     if hasattr(_styler, 'map'):
                         _styler = _styler.map(_style_fn, subset=['Result', 'Goal (5s)'])
                     else:
@@ -2733,7 +2742,8 @@ if app_mode == "🔍 Single Match Analysis":
                         )
                     st.plotly_chart(fig_air, use_container_width=True)
                 aer_cols = ['Name', 'Team', 'Aerial Hits', 'Aerial %', 'Avg Aerial Height', 'Max Aerial Height', 'Time Airborne (s)']
-                st.dataframe(aerial_df[aer_cols].sort_values('Aerial Hits', ascending=False), use_container_width=True, hide_index=True)
+                aerial_ranked = stable_sort(aerial_df[aer_cols], by=['Aerial Hits', 'Name'], ascending=[False, True])
+                st.dataframe(aerial_ranked, use_container_width=True, hide_index=True)
             st.divider()
 
             # --- SECTION 2: Recovery Time ---
@@ -2749,7 +2759,8 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_fast.update_layout(title="Fast Recovery Rate (< 1s)")
                     st.plotly_chart(fig_fast, use_container_width=True)
                 rec_cols = ['Name', 'Team', 'Avg Recovery (s)', 'Fast Recoveries', 'Total Hits', 'Recovery < 1s %']
-                st.dataframe(recovery_df[rec_cols].sort_values('Avg Recovery (s)'), use_container_width=True, hide_index=True)
+                recovery_ranked = stable_sort(recovery_df[rec_cols], by=['Avg Recovery (s)', 'Name'], ascending=[True, True])
+                st.dataframe(recovery_ranked, use_container_width=True, hide_index=True)
             st.divider()
 
             # --- SECTION 3: xA Sankey Flow ---
@@ -2809,7 +2820,8 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_pres = player_rank_lollipop(defense_df, 'Pressure Time (s)')
                     fig_pres.update_layout(title="Total Pressure Time (s)")
                     st.plotly_chart(fig_pres, use_container_width=True)
-                st.dataframe(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']].sort_values('Shadow %', ascending=False),
+                defense_ranked = stable_sort(defense_df[['Name', 'Team', 'Shadow %', 'Pressure Time (s)']], by=['Shadow %', 'Name'], ascending=[False, True])
+                st.dataframe(defense_ranked,
                     use_container_width=True, hide_index=True)
                 st.caption("Shadow defense: time spent between ball and own goal while retreating in defensive half.")
             st.divider()
@@ -2831,7 +2843,8 @@ if app_mode == "🔍 Single Match Analysis":
                     fig_dist.update_layout()
                     st.plotly_chart(fig_dist, use_container_width=True)
                 xga_cols = ['Name', 'Team', 'Shots Faced', 'On Target Faced', 'Goals Conceded (nearest)', 'Goals Prevented', 'xGA', 'Avg Dist to Shot', 'High xG Faced']
-                st.dataframe(xga_df[xga_cols].sort_values('xGA', ascending=False), use_container_width=True, hide_index=True)
+                xga_ranked = stable_sort(xga_df[xga_cols], by=['xGA', 'Name'], ascending=[False, True])
+                st.dataframe(xga_ranked, use_container_width=True, hide_index=True)
                 st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
             st.divider()
 
@@ -2864,7 +2877,8 @@ if app_mode == "🔍 Single Match Analysis":
                             height=350)
                         st.plotly_chart(fig_vaep_scatter, use_container_width=True)
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
-                st.dataframe(vaep_summary[vaep_show_cols].sort_values('Total_VAEP', ascending=False),
+                vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
+                st.dataframe(vaep_ranked,
                     use_container_width=True, hide_index=True)
                 st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
             else:
@@ -2890,7 +2904,7 @@ if app_mode == "🔍 Single Match Analysis":
                     'Total_SaveImpact', 'Avg_SaveDifficulty', 'HighDifficultySaves'
                 ]
                 st.dataframe(
-                    ranked[xs_show_cols].sort_values('Total_SaveImpact', ascending=False),
+                    stable_sort(ranked[xs_show_cols], by=['Total_SaveImpact', 'Name'], ascending=[False, True]),
                     use_container_width=True,
                     hide_index=True,
                 )
@@ -2903,7 +2917,7 @@ if app_mode == "🔍 Single Match Analysis":
                             'AttributionSource', 'AttributionConfidence'
                         ]
                         st.dataframe(
-                            xs_events_df[event_cols].sort_values('SaveImpact', ascending=False),
+                            stable_sort(xs_events_df[event_cols], by=['SaveImpact', 'Saver'], ascending=[False, True]),
                             use_container_width=True,
                             hide_index=True,
                         )
@@ -3654,6 +3668,8 @@ elif app_mode == "📈 Season Batch Processor":
                     st.plotly_chart(fig, use_container_width=True)
                 with c_b:
                     spawn_grp = hero_k.groupby('Spawn')['Result'].apply(lambda x: (x=='Win').mean()*100).reset_index(name='WinRate')
+                    spawn_grp = apply_categorical_order(spawn_grp, 'Spawn', KICKOFF_SPAWN_ORDER)
+                    spawn_grp = stable_sort(spawn_grp, by=['Spawn'], ascending=[True])
                     fig = themed_px(px.bar, spawn_grp, x='Spawn', y='WinRate', title="Win Rate by Spawn Location", color_discrete_sequence=['#636efa'])
                     st.plotly_chart(fig, use_container_width=True)
 
@@ -3696,7 +3712,10 @@ elif app_mode == "📈 Season Batch Processor":
                             hero_df['Carry_Time'].mean() if 'Carry_Time' in hero_df else 0
                         ]
                     }
-                    fig_zones = themed_px(px.bar, zone_data, x='Zone', y='Time %', title=f"{hero} Granular Zones (Avg %)", color='Zone', color_discrete_sequence=['#636efa', '#EF553B', '#AB63FA', '#00CC96'])
+                    zone_df = pd.DataFrame(zone_data)
+                    zone_df = apply_categorical_order(zone_df, 'Zone', ['Wall Play', 'Corner Time', 'On Wall', 'Ball Carry'])
+                    zone_df = stable_sort(zone_df, by=['Zone'], ascending=[True])
+                    fig_zones = themed_px(px.bar, zone_df, x='Zone', y='Time %', title=f"{hero} Granular Zones (Avg %)", color='Zone', color_discrete_sequence=['#636efa', '#EF553B', '#AB63FA', '#00CC96'])
                     fig_zones.update_layout(showlegend=False)
                     st.plotly_chart(fig_zones, use_container_width=True)
                 # Comparison with teammate
@@ -3715,6 +3734,8 @@ elif app_mode == "📈 Season Batch Processor":
                             mate_df_ps['Carry_Time'].mean() if 'Carry_Time' in mate_df_ps else 0
                         ]
                     })
+                    comp_zones = apply_categorical_order(comp_zones, 'Zone', ['Wall', 'Corner', 'On Wall', 'Carry'])
+                    comp_zones = stable_sort(comp_zones, by=['Zone', 'Player'], ascending=[True, True])
                     comp_dumbbell = comp_zones.pivot(index='Zone', columns='Player', values='Time %').reset_index()
                     if hero in comp_dumbbell.columns and teammate in comp_dumbbell.columns:
                         fig_comp = comparison_dumbbell(
@@ -3953,11 +3974,18 @@ elif app_mode == "📈 Season Batch Processor":
                     help=f"{round(_g_tied / max(_g_state_total, 1) * 100, 1)}% of all goals")
 
                 # Game state bar chart
+                gs_df = pd.DataFrame({
+                    'State': ['Leading', 'Trailing', 'Tied'],
+                    'Goals': [_g_lead, _g_trail, _g_tied],
+                    'Color': ['#00CC96', '#EF553B', '#636EFA'],
+                })
+                gs_df = apply_categorical_order(gs_df, 'State', GAME_STATE_ORDER)
+                gs_df = stable_sort(gs_df, by=['State'], ascending=[True])
                 fig_gs = themed_figure(data=[go.Bar(
-                    x=['Leading', 'Trailing', 'Tied'],
-                    y=[_g_lead, _g_trail, _g_tied],
-                    marker_color=['#00CC96', '#EF553B', '#636EFA'],
-                    text=[_g_lead, _g_trail, _g_tied],
+                    x=gs_df['State'],
+                    y=gs_df['Goals'],
+                    marker_color=gs_df['Color'],
+                    text=gs_df['Goals'],
                     textposition='auto'
                 )])
                 fig_gs.update_layout(title="Goals by Game State", yaxis_title="Goals",
