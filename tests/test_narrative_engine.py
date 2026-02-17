@@ -37,15 +37,27 @@ def _sample_inputs():
 
 
 def test_generate_narrative_report_requires_evidence_per_claim():
-    report = generate_narrative_report(**_sample_inputs(), tone="balanced", verbosity="standard", role_target="coaching_review")
+    report = generate_narrative_report(**_sample_inputs(), tone="balanced", verbosity="standard", role_target="coaching_review", players_per_team=3)
     assert report.claims
     assert all(claim.evidence for claim in report.claims)
 
 
 def test_generate_narrative_report_export_formats():
-    report = generate_narrative_report(**_sample_inputs(), tone="coach", verbosity="deep", role_target="team_scrim")
+    report = generate_narrative_report(**_sample_inputs(), tone="coach", verbosity="deep", role_target="team_scrim", players_per_team=2)
     md = report.to_markdown()
     js = report.to_json()
     assert "# Narrative Studio Report" in md
     assert "coaching_review" not in js
     assert '"role_target": "team_scrim"' in js
+
+
+def test_coaching_language_adapts_to_2v2_depth_model():
+    report_2s = generate_narrative_report(**_sample_inputs(), tone="coach", verbosity="standard", role_target="coaching_review", players_per_team=2)
+    defensive_claims = [c for c in report_2s.claims if c.phase == "defensive_zone"]
+    assert defensive_claims
+    assert "second-player support depth" in defensive_claims[0].text
+    assert "third-man depth" not in defensive_claims[0].text
+
+    rec_text = " ".join(report_2s.recommendations)
+    assert "second-player support depth" in rec_text
+    assert "third-man depth" not in rec_text

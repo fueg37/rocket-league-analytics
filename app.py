@@ -2720,6 +2720,12 @@ if app_mode == "🔍 Single Match Analysis":
                         key="ns_role_target",
                     )
 
+                players_per_team = None
+                if not df.empty and {"Team", "Name"}.issubset(df.columns):
+                    team_sizes = df.groupby("Team")["Name"].nunique()
+                    if not team_sizes.empty:
+                        players_per_team = int(team_sizes.max())
+
                 narrative_report = generate_narrative_report(
                     momentum_series=momentum_series,
                     possession_value_df=vaep_df,
@@ -2731,6 +2737,7 @@ if app_mode == "🔍 Single Match Analysis":
                     tone=ns_tone,
                     verbosity=ns_verbosity,
                     role_target=ns_role,
+                    players_per_team=players_per_team,
                 )
                 if narrative_report.claims:
                     for claim in narrative_report.claims:

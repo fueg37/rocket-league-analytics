@@ -112,7 +112,7 @@ _TEMPLATES: dict[NarrativeTone, dict[NarrativePhase, str]] = {
         "kickoff": "Kickoff process returned {kickoff_win_rate:.1f}% wins ({kickoff_samples} samples); review first-touch consistency.",
         "transition": "Transition value settled at {transition_swing:+.3f} VAEP; spacing decisions drove the delta.",
         "offensive_zone": "Offense created {offensive_xg:.2f} xG on {offensive_shots} attempts; prioritize shot quality over volume.",
-        "defensive_zone": "Defense delivered {save_impact:+.2f} save impact with rotation OS {rotation_os:.1f}; align third-man depth.",
+        "defensive_zone": "Defense delivered {save_impact:+.2f} save impact with rotation OS {rotation_os:.1f}; {defensive_depth_label}.",
         "clutch_minute": "Clutch profile: {clutch_goals} goals, {clutch_saves} saves in the final minute states.",
     },
 }
@@ -190,7 +190,7 @@ def _evidence_for_phase(
     return evidence
 
 
-def _recommendations_for_role(role_target: RoleTarget) -> list[str]:
+def _recommendations_for_role(role_target: RoleTarget, players_per_team: int | None = None) -> list[str]:
     if role_target == "solo_queue":
         return [
             "Favor low-commit transition options when momentum confidence is moderate or lower.",
@@ -201,9 +201,10 @@ def _recommendations_for_role(role_target: RoleTarget) -> list[str]:
             "Run scripted transition drills around the lowest-evidence rotation OS moments.",
             "Audit offensive-zone shot selection against xG-rich evidence clips.",
         ]
+    support_depth_callout = "Align third-man depth." if (players_per_team or 3) >= 3 else "Align second-player support depth."
     return [
         "Prioritize VOD clips where confidence is low but outcome impact is high.",
-        "Track defensive-zone claims against save model evidence for player feedback loops.",
+        f"Track defensive-zone claims against save model evidence for player feedback loops. {support_depth_callout}",
     ]
 
 
@@ -219,6 +220,7 @@ def generate_narrative_report(
     tone: NarrativeTone = "balanced",
     verbosity: VerbosityLevel = "standard",
     role_target: RoleTarget = "coaching_review",
+    players_per_team: int | None = None,
 ) -> NarrativeReport:
     metrics = _signal_metrics(
         momentum_series,
@@ -229,6 +231,7 @@ def generate_narrative_report(
         situational_df,
         kickoff_df,
     )
+    defensive_depth_label = "align third-man depth" if (players_per_team or 3) >= 3 else "align second-player support depth"
     phases: list[NarrativePhase] = ["kickoff", "transition", "offensive_zone", "defensive_zone", "clutch_minute"]
     if verbosity == "brief":
         phases = ["transition", "offensive_zone", "clutch_minute"]
@@ -248,7 +251,7 @@ def generate_narrative_report(
             continue
         confidence = min(0.95, 0.35 + 0.1 * len(evidence) + 0.4 * metrics.get("momentum_consistency", 0.3))
         template = _TEMPLATES[tone][phase]
-        text = template.format(**metrics)
+        text = template.format(**metrics, defensive_depth_label=defensive_depth_label)
         if verbosity == "deep":
             text = f"{text} Evidence-backed phase summary built from canonical model outputs."
         claims.append(
@@ -269,5 +272,5 @@ def generate_narrative_report(
         verbosity=verbosity,
         role_target=role_target,
         claims=claims,
-        recommendations=_recommendations_for_role(role_target),
+        recommendations=_recommendations_for_role(role_target, players_per_team=players_per_team),
     )
