@@ -21,7 +21,7 @@ from constants import (
 from utils import (
     build_pid_team_map, build_pid_name_map, build_player_team_map,
     get_team_players, build_player_positions,
-    frame_to_seconds, seconds_to_frame, fmt_time, format_speed,
+    frame_to_seconds, seconds_to_frame, fmt_time, format_speed, uu_per_sec_to_mph,
 )
 
 from charts.theme import apply_chart_theme
@@ -59,6 +59,21 @@ def themed_figure(*args, tier="support", intent=None, **kwargs):
 def themed_px(factory, *args, tier="support", intent=None, **kwargs):
     fig = factory(*args, **kwargs)
     return apply_chart_theme(fig, tier=tier, intent=intent)
+
+
+SPEED_METRIC_RAW = "Avg Speed"
+SPEED_METRIC_DISPLAY = "Avg Speed (mph)"
+
+
+def with_dashboard_speed_display(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a display-oriented copy with mph speed column for dashboard UI only."""
+    display_df = df.copy()
+    if SPEED_METRIC_RAW in display_df.columns:
+        raw_speed = pd.to_numeric(display_df[SPEED_METRIC_RAW], errors='coerce')
+        display_df[SPEED_METRIC_DISPLAY] = raw_speed.map(
+            lambda speed_uu: uu_per_sec_to_mph(speed_uu) if pd.notna(speed_uu) else np.nan
+        )
+    return display_df
 
 # --- 1. SETUP & IMPORTS ---
 try:
@@ -3487,6 +3502,7 @@ elif app_mode == "📈 Season Batch Processor":
             return df
 
         hero_df = detect_sessions(hero_df, session_gap)
+        hero_display_df = with_dashboard_speed_display(hero_df)
 
         # Summary metrics
         ot_count = int(hero_df['Overtime'].sum()) if 'Overtime' in hero_df.columns else 0
@@ -3533,7 +3549,7 @@ elif app_mode == "📈 Season Batch Processor":
         t1, t2, t3, t4, t8, t9, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "💡 Insights", "📊 Situational", "📊 Log", "🗓️ Sessions", "📸 Export"])
         with t1:
             st.subheader("Performance Trends")
-            metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'Avg Speed', 'Luck', 'Carry_Time',
+            metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', SPEED_METRIC_DISPLAY, 'Luck', 'Carry_Time',
                 'Aerial Hits', 'Aerial %', 'Time Airborne (s)', 'Avg Recovery (s)', 'Recovery < 1s %', 'Shadow %', 'xGA',
                 'Total_VAEP', 'Avg_VAEP', 'Time_1st%', 'Time_2nd%', 'DoubleCommits',
                 'Total_SaveImpact', 'Avg_SaveImpact', 'Total_SaveDifficulty', 'Avg_SaveDifficulty', 'HighDifficultySaves',
@@ -3545,39 +3561,40 @@ elif app_mode == "📈 Season Batch Processor":
             with t_opt2:
                 show_wl_markers = st.checkbox("Color by Win/Loss", value=True, key="wl_markers")
             fig = themed_figure()
-            fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_df[metric], name=hero,
+            fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_display_df[metric], name=hero,
                 line=dict(color='#007bff', width=2, dash='dot' if show_wl_markers else 'solid'),
                 opacity=0.4 if show_wl_markers else 1.0))
             # Rolling average
             if len(hero_df) >= rolling_window:
-                rolling = hero_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+                rolling = hero_display_df[metric].rolling(window=rolling_window, min_periods=1).mean()
                 fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=rolling, name=f'{hero} ({rolling_window}g avg)',
                     line=dict(color='#007bff', width=3)))
             # Win/Loss colored markers
             if show_wl_markers and 'Won' in hero_df.columns:
-                wins = hero_df[hero_df['Won'] == True]
-                losses = hero_df[hero_df['Won'] == False]
-                if not wins.empty:
-                    fig.add_trace(go.Scatter(x=wins['GameNum'], y=wins[metric], mode='markers',
+                wins_display = hero_display_df[hero_df['Won'] == True]
+                losses_display = hero_display_df[hero_df['Won'] == False]
+                if not wins_display.empty:
+                    fig.add_trace(go.Scatter(x=wins_display['GameNum'], y=wins_display[metric], mode='markers',
                         marker=dict(size=8, color='#00cc96', symbol='circle'), name='Win'))
-                if not losses.empty:
-                    fig.add_trace(go.Scatter(x=losses['GameNum'], y=losses[metric], mode='markers',
+                if not losses_display.empty:
+                    fig.add_trace(go.Scatter(x=losses_display['GameNum'], y=losses_display[metric], mode='markers',
                         marker=dict(size=8, color='#EF553B', symbol='x'), name='Loss'))
             if teammate != "None":
                 mate_df = season[season['Name'] == teammate].reset_index(drop=True)
                 mate_df['GameNum'] = mate_df.index + 1
-                if metric in mate_df.columns:
-                    fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_df[metric], name=teammate, line=dict(color='#ff9900', width=2, dash='dot')))
-                    if len(mate_df) >= rolling_window:
-                        mate_rolling = mate_df[metric].rolling(window=rolling_window, min_periods=1).mean()
+                mate_display_df = with_dashboard_speed_display(mate_df)
+                if metric in mate_display_df.columns:
+                    fig.add_trace(go.Scatter(x=mate_display_df['GameNum'], y=mate_display_df[metric], name=teammate, line=dict(color='#ff9900', width=2, dash='dot')))
+                    if len(mate_display_df) >= rolling_window:
+                        mate_rolling = mate_display_df[metric].rolling(window=rolling_window, min_periods=1).mean()
                         fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_rolling, name=f'{teammate} ({rolling_window}g avg)',
                             line=dict(color='#ff9900', width=3)))
             # Mark OT games
             if 'Overtime' in hero_df.columns:
-                ot_games = hero_df[hero_df['Overtime'] == True]
-                if not ot_games.empty:
-                    fig.add_trace(go.Scatter(x=ot_games['GameNum'], y=ot_games[metric], mode='markers', marker=dict(size=12, color='#ffcc00', symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
-            fig.update_layout(title=f"{metric} over Time", )
+                ot_games_display = hero_display_df[hero_df['Overtime'] == True]
+                if not ot_games_display.empty:
+                    fig.add_trace(go.Scatter(x=ot_games_display['GameNum'], y=ot_games_display[metric], mode='markers', marker=dict(size=12, color='#ffcc00', symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
+            fig.update_layout(title=f"{metric} over Time", yaxis_title=metric)
             st.plotly_chart(fig, use_container_width=True)
         with t2:
             st.subheader("Season Kickoff Meta")
@@ -3670,17 +3687,18 @@ elif app_mode == "📈 Season Batch Processor":
                         st.plotly_chart(fig_comp, use_container_width=True)
         with t4:
             st.subheader("Player Comparison Radar")
-            categories = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', 'Avg Speed', 'Aerial %', 'Total_VAEP']
+            categories = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', SPEED_METRIC_DISPLAY, 'Aerial %', 'Total_VAEP']
             # Normalize each category to 0-100 scale across all players for fair comparison
-            all_avgs = season.groupby('Name')[categories].mean()
+            season_display = with_dashboard_speed_display(season)
+            all_avgs = season_display.groupby('Name')[categories].mean()
             cat_max = all_avgs.max()
             cat_max = cat_max.replace(0, 1)  # avoid division by zero
-            hero_avg = hero_df[categories].mean()
+            hero_avg = hero_display_df[categories].mean()
             hero_norm = (hero_avg / cat_max * 100).fillna(0)
             fig = themed_figure()
             fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
             if teammate != "None":
-                mate_df = season[season['Name'] == teammate]
+                mate_df = season_display[season_display['Name'] == teammate]
                 mate_avg = mate_df[categories].mean()
                 mate_norm = (mate_avg / cat_max * 100).fillna(0)
                 fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
@@ -3688,16 +3706,16 @@ elif app_mode == "📈 Season Batch Processor":
             st.plotly_chart(fig, use_container_width=True)
         with t8:
             st.subheader("Career Insights")
-            _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'xA', 'Avg Speed',
+            _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'xA', SPEED_METRIC_DISPLAY,
                 'Aerial Hits', 'Aerial %', 'Avg Recovery (s)', 'Shadow %', 'xGA',
                 'Total_VAEP', 'Avg_VAEP', 'Total_SaveImpact', 'Avg_SaveDifficulty', 'Time_1st%', 'DoubleCommits', 'Possession', 'Carry_Time']
-            _available_insight = [s for s in _insight_stats if s in hero_df.columns and hero_df[s].notna().any()]
+            _available_insight = [s for s in _insight_stats if s in hero_display_df.columns and hero_display_df[s].notna().any()]
 
             # --- 1. Win vs Loss Stat Splits ---
             st.markdown("#### Win vs Loss Comparison")
             if 'Won' in hero_df.columns and len(hero_df) >= 5:
-                win_df = hero_df[hero_df['Won'] == True]
-                loss_df = hero_df[hero_df['Won'] == False]
+                win_df = hero_display_df[hero_df['Won'] == True]
+                loss_df = hero_display_df[hero_df['Won'] == False]
                 if not win_df.empty and not loss_df.empty:
                     split_data = []
                     for s in _available_insight:
@@ -3738,7 +3756,7 @@ elif app_mode == "📈 Season Batch Processor":
                 won_numeric = hero_df['Won'].astype(float)
                 for s in _available_insight:
                     try:
-                        corr = hero_df[s].corr(won_numeric)
+                        corr = hero_display_df[s].corr(won_numeric)
                         if not np.isnan(corr):
                             correlations.append({'Stat': s, 'Correlation': round(corr, 3)})
                     except:
@@ -3760,14 +3778,14 @@ elif app_mode == "📈 Season Batch Processor":
 
             # --- 3. Personal Bests ---
             st.markdown("#### Personal Bests")
-            pb_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'Total_VAEP', 'Total_SaveImpact', 'Avg Speed']
-            pb_avail = [s for s in pb_stats if s in hero_df.columns]
+            pb_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'Total_VAEP', 'Total_SaveImpact', SPEED_METRIC_DISPLAY]
+            pb_avail = [s for s in pb_stats if s in hero_display_df.columns]
             pb_cols = st.columns(min(len(pb_avail), 4))
             for i, s in enumerate(pb_avail):
                 col = pb_cols[i % len(pb_cols)]
-                best_val = hero_df[s].max()
-                best_game = hero_df[hero_df[s] == best_val]['GameNum'].iloc[0] if not hero_df[hero_df[s] == best_val].empty else "?"
-                recent_val = hero_df[s].iloc[-1] if len(hero_df) > 0 else 0
+                best_val = hero_display_df[s].max()
+                best_game = hero_display_df[hero_display_df[s] == best_val]['GameNum'].iloc[0] if not hero_display_df[hero_display_df[s] == best_val].empty else "?"
+                recent_val = hero_display_df[s].iloc[-1] if len(hero_display_df) > 0 else 0
                 is_pb = recent_val >= best_val and len(hero_df) > 1
                 pb_icon = " (NEW!)" if is_pb else ""
                 col.metric(f"Best {s}", f"{best_val:.2f}{pb_icon}", delta=f"Game #{best_game}")
@@ -3777,8 +3795,8 @@ elif app_mode == "📈 Season Batch Processor":
             st.markdown("#### Improvement Tracker")
             if len(hero_df) >= 10:
                 split_point = len(hero_df) // 2
-                first_half = hero_df.iloc[:split_point]
-                second_half = hero_df.iloc[split_point:]
+                first_half = hero_display_df.iloc[:split_point]
+                second_half = hero_display_df.iloc[split_point:]
                 improvements = []
                 for s in _available_insight:
                     fh_avg = first_half[s].mean()
