@@ -128,7 +128,6 @@ def build_win_probability_chart(
     states = _assign_states(probs)
     states = _debounce_states(states, min_run=3)
 
-    model_label = (model_meta or {}).get("label", "Heuristic")
     subtitle = (model_meta or {}).get("subtitle", "")
 
     blue_color = TEAM_COLORS["Blue"]["primary"]
@@ -177,12 +176,10 @@ def build_win_probability_chart(
         )
     )
 
-    customdata = np.column_stack([score_diff, np.full_like(probs, model_label, dtype=object), probs_raw])
+    customdata = np.column_stack([score_diff])
     hovertemplate = (
         "<b>t=%{x:.0f}s</b><br>Blue Win: %{y:.1f}%"
-        "<br>Raw model output: %{customdata[2]:.1f}%"
-        "<br>Score Diff (Blue-Orange): %{customdata[0]:.0f}"
-        "<br>Model: %{customdata[1]}<extra></extra>"
+        "<br>Score Diff (Blue-Orange): %{customdata[0]:.0f}<extra></extra>"
     )
 
     for name, color in (
@@ -252,7 +249,7 @@ def build_win_probability_chart(
                 marker=dict(size=8, symbol="diamond", color=color, line=dict(color="white", width=1)),
                 name=evt.get("label", "Goal"),
                 showlegend=False,
-                hovertemplate=f"{evt.get('hover', 'Goal')}<br>t={x:.1f}s<extra></extra>",
+                hovertemplate=f"{evt.get('label', 'Goal')}<br>t={x:.1f}s<extra></extra>",
             )
         )
 

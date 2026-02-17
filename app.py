@@ -1988,8 +1988,7 @@ def build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=Non
     max_frame = game_df.index.max() if game_df is not None and not game_df.empty else None
     goal_events = extract_goal_events(proto, pid_team, pid_name_map=pid_name_map or {}, max_frame=max_frame)
     model_meta = {
-        "label": "Logistic Regression (career-trained)" if wp_model_used else "Heuristic fallback",
-        "subtitle": "Model: Trained logistic regression on career data" if wp_model_used else "Model: Hand-tuned heuristic (confidence unavailable)",
+        "subtitle": "In-game win probability trend",
     }
     fig = build_win_probability_chart(
         win_prob_df=win_prob_df,
@@ -2406,12 +2405,7 @@ if app_mode == "🔍 Single Match Analysis":
                 if not win_prob_df.empty:
                     goal_events = extract_goal_events(proto, pid_team, pid_name_map=temp_map, max_frame=game_df.index.max())
                     model_meta = {
-                        "label": "Logistic Regression (career-trained)" if wp_model_used else "Heuristic fallback",
-                        "subtitle": (
-                            "Model: Trained logistic regression on career data."
-                            if wp_model_used else
-                            "Model: Hand-tuned heuristic (confidence unavailable). Process 15+ replays in Season mode to train a data-driven model."
-                        ),
+                        "subtitle": "In-game win probability trend",
                     }
                     fig_prob = build_win_probability_chart(
                         win_prob_df=win_prob_df,
