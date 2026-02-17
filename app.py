@@ -32,6 +32,7 @@ from charts.formatters import dataframe_formatter, format_metric_value, title_ca
 from charts.factory import (
     chemistry_network_chart,
     chemistry_ranking_table,
+    coach_report_timeline_chart,
     comparison_dumbbell,
     goal_mouth_scatter,
     kickoff_kpi_indicator,
@@ -39,6 +40,9 @@ from charts.factory import (
     rolling_trend_with_wl_markers,
     session_composite_chart,
     spatial_outcome_scatter,
+    value_timeline_chart,
+    action_type_value_decomposition_chart,
+    teammate_synergy_matrix,
 )
 from analytics.chemistry import build_season_chemistry_tables
 from analytics.partnership_recommendations import build_pair_recommendations
@@ -65,6 +69,9 @@ from analytics.shot_quality import (
     validate_shot_metric_columns,
 )
 from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_VERSION
+from analytics.possession_value import compute_action_value_deltas, encode_replay_states
+from analytics.aggregations.value_reports import build_player_value_reports
+from analytics.counterfactuals import build_coach_report
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +134,252 @@ def render_chart_signal_summary(label: str, direction: str, value: float | int |
     st.caption(f"{prefix} signal: {label}{value_txt}.")
 
 
+
+
+
+def _fmt_signed(value: float, *, precision: int = 3, scale: float = 1.0, suffix: str = "") -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return "—"
+    return f"{float(numeric) * scale:+.{precision}f}{suffix}"
+
+
+def _fmt_plain(value: float, *, precision: int = 3, scale: float = 1.0, suffix: str = "") -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return "—"
+    return f"{float(numeric) * scale:.{precision}f}{suffix}"
+
+
+def _role_metric_labels(role: str) -> dict[str, str]:
+    role_key = str(role or "").lower()
+    pressure_label = "Defensive Pressure Control" if "third" in role_key else "Challenge Pressure"
+    field_label = "Defensive-to-Offensive Field Tilt" if "third" in role_key else "Attacking Field Tilt"
+    return {
+        "PossessionBelief": "Likely Team Possession",
+        "Pressure": pressure_label,
+        "FieldPositionProxy": field_label,
+        "ProjectedValue": "Projected Possession Value (10s)",
+    }
+
+
+def _build_opportunity_comparison_grid(row: pd.Series) -> pd.DataFrame:
+    labels = _role_metric_labels(row.get("Role", ""))
+    rows = [
+        {
+            "Signal": labels["PossessionBelief"],
+            "Baseline": _fmt_plain(row.get("BaselinePossessionBelief"), precision=1, scale=100, suffix="%"),
+            "Recommended": _fmt_plain(row.get("RecommendedPossessionBelief"), precision=1, scale=100, suffix="%"),
+            "Delta": _fmt_signed(row.get("DeltaPossessionBelief"), precision=1, scale=100, suffix=" pts"),
+        },
+        {
+            "Signal": labels["Pressure"],
+            "Baseline": _fmt_plain(row.get("BaselinePressure"), precision=1, scale=100, suffix="%"),
+            "Recommended": _fmt_plain(row.get("RecommendedPressure"), precision=1, scale=100, suffix="%"),
+            "Delta": _fmt_signed(row.get("DeltaPressure"), precision=1, scale=100, suffix=" pts"),
+        },
+        {
+            "Signal": labels["FieldPositionProxy"],
+            "Baseline": _fmt_plain(row.get("BaselineFieldPositionProxy"), precision=2),
+            "Recommended": _fmt_plain(row.get("RecommendedFieldPositionProxy"), precision=2),
+            "Delta": _fmt_signed(row.get("DeltaFieldPositionProxy"), precision=2),
+        },
+        {
+            "Signal": labels["ProjectedValue"],
+            "Baseline": _fmt_plain(row.get("BaselineProjectedValue"), precision=3),
+            "Recommended": _fmt_plain(row.get("RecommendedProjectedValue"), precision=3),
+            "Delta": _fmt_signed(row.get("DeltaProjectedValue"), precision=3),
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
+def _build_coach_role_impact_chart(report_df: pd.DataFrame) -> go.Figure:
+    """Summarize cumulative missed swing by contextual role."""
+    role_df = report_df.copy()
+    role_df["MissedSwing"] = pd.to_numeric(role_df["MissedSwing"], errors="coerce")
+    role_df = role_df.dropna(subset=["Role", "MissedSwing"])
+
+    role_summary = (
+        role_df.groupby("Role", as_index=False)
+        .agg(TotalMissedSwing=("MissedSwing", "sum"), OpportunityCount=("Role", "size"))
+        .sort_values("TotalMissedSwing", ascending=False)
+    )
+    role_summary["RoleLabel"] = role_summary["Role"].map(lambda value: title_case_label(str(value)))
+
+    fig = themed_px(
+        px.bar,
+        role_summary,
+        x="TotalMissedSwing",
+        y="RoleLabel",
+        orientation="h",
+        text="TotalMissedSwing",
+        custom_data=["OpportunityCount"],
+        tier="support",
+        intent="outcome",
+        variant="negative",
+    )
+    fig.update_traces(
+        marker_color=semantic_color("outcome", "negative"),
+        texttemplate="%{x:+.3f}",
+        hovertemplate="Role: %{y}<br>Total missed swing: %{x:+.3f}<br>Windows: %{customdata[0]}<extra></extra>",
+    )
+    fig.update_layout(
+        title="Role Impact (Missed Swing)",
+        xaxis_title="Cumulative Missed Swing",
+        yaxis_title="",
+        showlegend=False,
+    )
+    return fig
+
+
+def _build_coach_action_mix_chart(report_df: pd.DataFrame) -> go.Figure:
+    """Show recommended-action mix weighted by absolute missed swing."""
+    action_df = report_df.copy()
+    action_df["MissedSwing"] = pd.to_numeric(action_df["MissedSwing"], errors="coerce")
+    action_df = action_df.dropna(subset=["RecommendedAction", "MissedSwing"])
+    action_df["Weight"] = action_df["MissedSwing"].abs()
+
+    action_summary = (
+        action_df.groupby("RecommendedAction", as_index=False)
+        .agg(
+            WeightedSwing=("Weight", "sum"),
+            AvgMissedSwing=("MissedSwing", "mean"),
+            OpportunityCount=("RecommendedAction", "size"),
+        )
+        .sort_values("WeightedSwing", ascending=False)
+    )
+    action_summary["ActionLabel"] = action_summary["RecommendedAction"].map(
+        lambda value: title_case_label(str(value).replace("_", " "))
+    )
+
+    fig = themed_px(
+        px.bar,
+        action_summary,
+        x="ActionLabel",
+        y="WeightedSwing",
+        text="WeightedSwing",
+        custom_data=["OpportunityCount", "AvgMissedSwing"],
+        tier="support",
+        intent="threshold",
+        variant="emphasis",
+    )
+    fig.update_traces(
+        marker_color=semantic_color("threshold", "emphasis"),
+        texttemplate="%{y:.3f}",
+        hovertemplate=(
+            "Action: %{x}<br>Weighted swing: %{y:.3f}<br>Windows: %{customdata[0]}"
+            "<br>Avg missed swing: %{customdata[1]:+.3f}<extra></extra>"
+        ),
+    )
+    fig.update_layout(
+        title="Recommended Action Mix (Weighted by Swing)",
+        xaxis_title="Recommended Corrective Action",
+        yaxis_title="Weighted Swing (|MissedSwing|)",
+        showlegend=False,
+    )
+    return fig
+
+
+def _parse_clip_window(clip_key: str, fallback_frame: int) -> tuple[int, int, int]:
+    frame = int(fallback_frame)
+    start_frame = max(0, frame - int(2.5 * REPLAY_FPS))
+    end_frame = frame + int(2.5 * REPLAY_FPS)
+    if not clip_key:
+        return frame, start_frame, end_frame
+
+    try:
+        parts = dict(part.split(":", 1) for part in str(clip_key).split("|") if ":" in part)
+        frame = int(parts.get("frame", frame))
+        if "window" in parts and "-" in parts["window"]:
+            w_start, w_end = parts["window"].split("-", 1)
+            start_frame = int(w_start)
+            end_frame = int(w_end)
+    except Exception:
+        pass
+    return frame, max(0, start_frame), max(start_frame, end_frame)
+
+
+def _build_coach_snapshot_figure(game_df, proto, *, frame: int, clip_key: str, role_hint: str = "") -> go.Figure:
+    fig = themed_figure()
+    fig.update_layout(get_field_layout(f"Coach Snapshot • Frame {frame}"))
+    fig.update_layout(height=420, margin=dict(l=0, r=0, t=40, b=0), showlegend=False)
+
+    ball_xy = np.array([0.0, 0.0], dtype=float)
+    if "ball" in game_df and not game_df["ball"].empty:
+        ball_df = game_df["ball"]
+        ball_idx = min(np.searchsorted(ball_df.index.values, frame), len(ball_df) - 1)
+        ball_row = ball_df.iloc[ball_idx]
+        ball_xy = np.array([
+            float(pd.to_numeric(ball_row.get("pos_x", 0.0), errors="coerce") or 0.0),
+            float(pd.to_numeric(ball_row.get("pos_y", 0.0), errors="coerce") or 0.0),
+        ])
+        fig.add_trace(go.Scatter(
+            x=[ball_xy[0]], y=[ball_xy[1]], mode="markers+text",
+            marker=dict(size=16, color="white", symbol="circle", line=dict(width=2, color="black")),
+            text=["Ball"], textposition="top center", textfont=dict(color="white", size=10),
+            hovertemplate="<b>Ball</b><br>x: %{x:.0f}<br>y: %{y:.0f}<extra></extra>",
+        ))
+
+    player_rows = []
+    for p in proto.players:
+        if p.name not in game_df:
+            continue
+        pdf = game_df[p.name]
+        if pdf.empty or "pos_x" not in pdf.columns or "pos_y" not in pdf.columns:
+            continue
+        p_idx = min(np.searchsorted(pdf.index.values, frame), len(pdf) - 1)
+        prow = pdf.iloc[p_idx]
+        px = float(pd.to_numeric(prow.get("pos_x", np.nan), errors="coerce"))
+        py = float(pd.to_numeric(prow.get("pos_y", np.nan), errors="coerce"))
+        if not np.isfinite(px) or not np.isfinite(py):
+            continue
+        boost = float(pd.to_numeric(prow.get("boost", np.nan), errors="coerce"))
+        team = "Orange" if p.is_orange else "Blue"
+        dist_to_ball = float(np.hypot(px - ball_xy[0], py - ball_xy[1]))
+        player_rows.append(
+            {
+                "Player": p.name,
+                "Team": team,
+                "X": px,
+                "Y": py,
+                "Boost": boost if np.isfinite(boost) else np.nan,
+                "DistToBall": dist_to_ball,
+            }
+        )
+
+    player_df = pd.DataFrame(player_rows)
+    if not player_df.empty:
+        role_labels = {1: "1st", 2: "2nd", 3: "3rd"}
+        player_df = player_df.sort_values(["Team", "DistToBall"]).copy()
+        player_df["RoleRank"] = player_df.groupby("Team").cumcount() + 1
+        player_df["RoleAnnotation"] = player_df["RoleRank"].map(role_labels).fillna("Rot")
+
+        for team in ("Blue", "Orange"):
+            tdf = player_df[player_df["Team"] == team]
+            if tdf.empty:
+                continue
+            fig.add_trace(go.Scatter(
+                x=tdf["X"], y=tdf["Y"], mode="markers+text",
+                marker=dict(size=12, color=TEAM_COLORS[team]["solid"], symbol="diamond", line=dict(width=1, color="white")),
+                text=[f"{row.Player} ({row.RoleAnnotation})" for row in tdf.itertuples()],
+                textposition="top center", textfont=dict(color="white", size=9),
+                hovertemplate=(
+                    "<b>%{text}</b><br>Team: " + team + "<br>x: %{x:.0f}<br>y: %{y:.0f}" +
+                    "<extra></extra>"
+                ),
+            ))
+
+        if role_hint:
+            fig.add_annotation(
+                xref="paper", yref="paper", x=0.01, y=0.02,
+                text=f"Role context: {title_case_label(str(role_hint))}",
+                showarrow=False, align="left",
+                font=dict(size=10, color="rgba(255,255,255,0.85)"),
+                bgcolor="rgba(0,0,0,0.3)",
+            )
+
+    return fig
 
 
 def apply_dark_export_legibility(fig: go.Figure):
@@ -1430,46 +1683,19 @@ def estimate_scoring_threat(ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz, t
     return max(0.0, min(threat, 0.99))
 
 def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
-    """Calculate VAEP for each touch. Returns (vaep_df, vaep_summary)."""
-    max_frame = game_df.index.max()
+    """Calculate action value from canonical transition-value model.
 
+    Backward-compatible aliases retained: VAEP, Total_VAEP, Avg_VAEP.
+    """
     ball_df = game_df['ball'] if 'ball' in game_df else None
-    if ball_df is None:
+    if ball_df is None or ball_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Pre-compute arrays for fast lookup
-    ball_frames = ball_df.index.values
-    ball_x = ball_df['pos_x'].values
-    ball_y = ball_df['pos_y'].values
-    ball_z = ball_df['pos_z'].values if 'pos_z' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vx = ball_df['vel_x'].values if 'vel_x' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vy = ball_df['vel_y'].values if 'vel_y' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vz = ball_df['vel_z'].values if 'vel_z' in ball_df.columns else np.zeros(len(ball_df))
+    match_id = str(getattr(getattr(proto, "game_metadata", None), "id", "match"))
+    states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
 
-    def _ball_at(frame):
-        bi = min(np.searchsorted(ball_frames, frame), len(ball_x) - 1)
-        if bi < 0:
-            return None
-        return ball_x[bi], ball_y[bi], ball_z[bi], ball_vx[bi], ball_vy[bi], ball_vz[bi]
-
-    def _nearest_dists(frame, team):
-        bs = _ball_at(frame)
-        if bs is None:
-            return 5000.0, 5000.0
-        bx, by = bs[0], bs[1]
-        own_min, opp_min = 10000.0, 10000.0
-        for pname, pd_info in player_pos.items():
-            pi = min(np.searchsorted(pd_info['frames'], frame), len(pd_info['x']) - 1)
-            if pi < 0:
-                continue
-            dist = np.sqrt((pd_info['x'][pi] - bx)**2 + (pd_info['y'][pi] - by)**2)
-            if pd_info['team'] == team:
-                own_min = min(own_min, dist)
-            else:
-                opp_min = min(opp_min, dist)
-        return own_min, opp_min
-
-    touches = []
+    events = []
+    max_frame = int(game_df.index.max()) if len(game_df.index) else 0
     for hit in proto.game_stats.hits:
         if not hit.player_id:
             continue
@@ -1478,36 +1704,49 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
         name = pid_name.get(pid)
         if not team or not name:
             continue
-        frame = hit.frame_number
-        f_before = max(0, frame - 1)
-        f_after = min(max_frame, frame + 5)
-        sb = _ball_at(f_before)
-        sa = _ball_at(f_after)
-        if sb is None or sa is None:
-            continue
-        own_b, opp_b = _nearest_dists(f_before, team)
-        own_a, opp_a = _nearest_dists(f_after, team)
-        threat_before = estimate_scoring_threat(sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], team, own_b, opp_b)
-        threat_after = estimate_scoring_threat(sa[0], sa[1], sa[2], sa[3], sa[4], sa[5], team, own_a, opp_a)
-        vaep = round(threat_after - threat_before, 4)
-        touches.append({'Player': name, 'Team': team, 'Frame': frame,
-                        'Time': round(frame / REPLAY_FPS, 1), 'VAEP': vaep,
-                        'BallX': sa[0], 'BallY': sa[1]})
+        frame = int(hit.frame_number)
+        events.append(
+            {
+                'MatchID': match_id,
+                'Frame': frame,
+                'PostFrame': min(max_frame, frame + 5),
+                'Player': name,
+                'Team': team,
+                'EventType': 'touch',
+                'Time': round(frame / REPLAY_FPS, 1),
+            }
+        )
 
-    vaep_df = pd.DataFrame(touches)
-    summary = []
-    for p in proto.players:
-        name = p.name
-        team = "Orange" if p.is_orange else "Blue"
-        pt = vaep_df[vaep_df['Player'] == name] if not vaep_df.empty else pd.DataFrame()
-        summary.append({
-            'Name': name, 'Team': team,
-            'Total_VAEP': round(pt['VAEP'].sum(), 3) if not pt.empty else 0,
-            'Avg_VAEP': round(pt['VAEP'].mean(), 4) if not pt.empty else 0,
-            'Positive_Actions': int((pt['VAEP'] > 0).sum()) if not pt.empty else 0,
-            'Negative_Actions': int((pt['VAEP'] < 0).sum()) if not pt.empty else 0
-        })
-    return vaep_df, pd.DataFrame(summary)
+    event_df = pd.DataFrame(events)
+    valued_events = compute_action_value_deltas(event_df, states)
+    if valued_events.empty:
+        return valued_events, pd.DataFrame()
+
+    ball_lookup = ball_df[['pos_x', 'pos_y']].rename(columns={'pos_x': 'BallX', 'pos_y': 'BallY'}).copy()
+    ball_lookup['Frame'] = ball_lookup.index.astype(int)
+    valued_events = valued_events.merge(ball_lookup[['Frame', 'BallX', 'BallY']], on='Frame', how='left')
+
+    vaep_df = valued_events[[
+        'Player', 'Team', 'Frame', 'Time', 'EventType', 'VAEP', 'ValueDelta_3s', 'ValueDelta_10s', 'BallX', 'BallY',
+    ]].copy()
+
+    summary = (
+        vaep_df.groupby(['Player', 'Team'], as_index=False)
+        .agg(
+            Total_VAEP=('VAEP', 'sum'),
+            Avg_VAEP=('VAEP', 'mean'),
+            Positive_Actions=('VAEP', lambda s: int((s > 0).sum())),
+            Negative_Actions=('VAEP', lambda s: int((s < 0).sum())),
+            Total_Value_10s=('ValueDelta_10s', 'sum'),
+        )
+        .rename(columns={'Player': 'Name'})
+    )
+
+    for col, digits in [('Total_VAEP', 3), ('Avg_VAEP', 4), ('Total_Value_10s', 3)]:
+        summary[col] = summary[col].round(digits)
+
+    return vaep_df, summary
+
 
 # --- 9g. MATH: ROTATION ANALYSIS ---
 def calculate_rotation_analysis(game_df, proto, player_pos, sample_step=5):
@@ -1876,6 +2115,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     defense_df = calculate_defensive_pressure(game_df, proto)
     xga_df = calculate_xg_against(proto, game_df, temp_map, shot_df)
     vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df)
+    value_reports_df = build_player_value_reports(vaep_df)
     rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(game_df, proto, player_pos)
     xs_events_df, xs_summary = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df)
     situational_df = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df)
@@ -1895,6 +2135,16 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
             team_goals = int(df[df['Team'] == team]['Goals'].sum())
             luck_val = calculate_luck_percentage(shot_df, team, team_goals)
             df.loc[df['Team'] == team, 'Luck'] = luck_val
+    replay_states = encode_replay_states("match", game_df, player_pos, pid_team)
+    coach_report_df = build_coach_report(
+        replay_states,
+        momentum_series,
+        win_prob_df,
+        rotation_timeline,
+        rotation_summary,
+        team="Blue",
+        top_n=5,
+    )
     return {
         "manager": manager, "game": game, "game_df": game_df, "proto": proto,
         "df_unfiltered": df, "shot_df": shot_df, "pass_df": pass_df,
@@ -1902,6 +2152,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "aerial_df": aerial_df, "recovery_df": recovery_df,
         "defense_df": defense_df, "xga_df": xga_df,
         "vaep_df": vaep_df, "vaep_summary": vaep_summary,
+        "value_reports_df": value_reports_df,
         "rotation_timeline": rotation_timeline, "rotation_summary": rotation_summary,
         "double_commits_df": double_commits_df,
         "xs_events_df": xs_events_df, "xs_summary": xs_summary,
@@ -1910,6 +2161,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "is_overtime": is_overtime, "temp_map": temp_map,
         "pid_team": pid_team, "player_team": player_team,
         "player_pos": player_pos,
+        "coach_report_df": coach_report_df,
         "all_players": sorted(list(temp_map.values())),
     }
 
@@ -2375,6 +2627,7 @@ if app_mode == "🔍 Single Match Analysis":
         xga_df = _m["xga_df"]
         vaep_df = _m["vaep_df"]
         vaep_summary = _m["vaep_summary"]
+        value_reports_df = _m.get("value_reports_df", pd.DataFrame())
         rotation_timeline = _m["rotation_timeline"]
         rotation_summary = _m["rotation_summary"]
         double_commits_df = _m["double_commits_df"]
@@ -2383,6 +2636,7 @@ if app_mode == "🔍 Single Match Analysis":
         situational_df = _m["situational_df"]
         win_prob_df = _m["win_prob_df"]
         wp_model_used = _m["wp_model_used"]
+        coach_report_df = _m.get("coach_report_df", pd.DataFrame())
         is_overtime = _m["is_overtime"]
         temp_map = _m["temp_map"]
         pid_team = _m["pid_team"]
@@ -2402,7 +2656,7 @@ if app_mode == "🔍 Single Match Analysis":
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
-        t2, t1, t3, t3b, t4, t5, t8, t9, t10, t7 = st.tabs(["🌊 Match Narrative", "🚀 Kickoffs", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "📸 Export"])
+        t2, t1, t3, t3b, t4, t5, t8, t9, t10, t11, t7 = st.tabs(["🌊 Match Narrative", "🚀 Kickoffs", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "🧑‍🏫 Coach Report", "📸 Export"])
             
         with t1:
             st.subheader("Kickoff Analysis")
@@ -2985,32 +3239,31 @@ if app_mode == "🔍 Single Match Analysis":
                         x='Name', y='Total_VAEP', color='Team',
                         title="Total VAEP per Player",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_vaep_bar.update_layout()
                     st.plotly_chart(fig_vaep_bar, use_container_width=True)
                     st.caption("Total VAEP summarizes each player's net impact on scoring threat.")
                 with vc2:
-                    if not vaep_df.empty:
-                        fig_vaep_scatter = themed_figure()
-                        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                            t_data = vaep_df[vaep_df['Team'] == team]
-                            if not t_data.empty:
-                                colors_arr = ['#00cc96' if v > 0 else '#EF553B' for v in t_data['VAEP']]
-                                fig_vaep_scatter.add_trace(go.Scatter(
-                                    x=t_data['Time'], y=t_data['VAEP'], mode='markers',
-                                    marker=dict(size=5, color=colors_arr, opacity=0.6),
-                                    name=team, text=t_data['Player'],
-                                    hovertemplate="<b>%{text}</b><br>Time: %{x}s<br>VAEP: %{y:.3f}<extra></extra>"))
-                        fig_vaep_scatter.add_hline(y=0, line_dash="dot", line_color="gray")
-                        fig_vaep_scatter.update_layout(title="Touch VAEP Timeline (green=positive, red=negative)",
-                            xaxis_title="Time (s)", yaxis_title="VAEP",
-                            height=350)
-                        st.plotly_chart(fig_vaep_scatter, use_container_width=True)
+                    st.plotly_chart(value_timeline_chart(vaep_df), use_container_width=True)
+
+                vd1, vd2 = st.columns(2)
+                with vd1:
+                    event_source = vaep_df.copy()
+                    event_source['EventType'] = event_source.get('EventType', 'touch')
+                    st.plotly_chart(action_type_value_decomposition_chart(event_source), use_container_width=True)
+                with vd2:
+                    synergy_input = vaep_df[['Player', 'VAEP']].copy() if not vaep_df.empty else pd.DataFrame(columns=['Player', 'VAEP'])
+                    if not synergy_input.empty:
+                        synergy_input['Player1'] = synergy_input['Player']
+                        synergy_input['Player2'] = synergy_input['Player']
+                    st.plotly_chart(teammate_synergy_matrix(synergy_input), use_container_width=True)
+
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
                 vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
                 with st.expander("Data details"):
-                    render_dataframe(vaep_ranked,
-                        use_container_width=True, hide_index=True)
-                st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
+                    render_dataframe(vaep_ranked, use_container_width=True, hide_index=True)
+                if not value_reports_df.empty:
+                    with st.expander("Data details: Season-style Value Profile"):
+                        render_dataframe(value_reports_df, use_container_width=True, hide_index=True)
+                st.caption("VAEP now uses transition-value deltas from canonical possession states.")
             else:
                 st.info("No VAEP data available.")
             st.divider()
@@ -3429,6 +3682,150 @@ if app_mode == "🔍 Single Match Analysis":
                 st.caption(f"Showing {window_sec}s window ({len(render_indices)} frames). Drag the time range above to focus on key moments. Rotate the 3D view by dragging, zoom with scroll.")
             except Exception as e:
                 st.error(f"Could not render tactical view: {e}")
+
+
+        with t11:
+            st.subheader("Coach Report")
+            if coach_report_df is None or coach_report_df.empty:
+                st.info("No high-leverage decision windows were detected for this match.")
+            else:
+                timeline_report_df = coach_report_df.copy()
+                for uncertainty_col in [
+                    "ExpectedSwingMean",
+                    "ExpectedSwingP10",
+                    "ExpectedSwingP90",
+                    "ExpectedSwingIntervalWidth",
+                ]:
+                    if uncertainty_col not in timeline_report_df.columns:
+                        timeline_report_df[uncertainty_col] = np.nan
+                timeline_fig = coach_report_timeline_chart(win_prob_df, momentum_series, timeline_report_df)
+                st.plotly_chart(timeline_fig, use_container_width=True)
+                st.caption("Timeline aligns win probability and momentum with missed-opportunity markers so you can scan context before reviewing clips.")
+
+                role_impact_fig = _build_coach_role_impact_chart(coach_report_df)
+                action_mix_fig = _build_coach_action_mix_chart(coach_report_df)
+                chart_col_1, chart_col_2 = st.columns(2)
+                with chart_col_1:
+                    st.plotly_chart(role_impact_fig, use_container_width=True)
+                with chart_col_2:
+                    st.plotly_chart(action_mix_fig, use_container_width=True)
+
+                role_context = (
+                    coach_report_df.assign(MissedSwing=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce"))
+                    .dropna(subset=["Role", "MissedSwing"])
+                    .groupby("Role", as_index=False)
+                    .agg(TotalMissedSwing=("MissedSwing", "sum"), OpportunityCount=("Role", "size"))
+                    .sort_values("TotalMissedSwing", ascending=False)
+                    .head(1)
+                )
+                action_context = (
+                    coach_report_df.assign(
+                        MissedSwing=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce"),
+                        SwingWeight=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce").abs(),
+                    )
+                    .dropna(subset=["RecommendedAction", "SwingWeight"])
+                    .groupby("RecommendedAction", as_index=False)
+                    .agg(WeightedSwing=("SwingWeight", "sum"), OpportunityCount=("RecommendedAction", "size"))
+                    .sort_values("WeightedSwing", ascending=False)
+                    .head(1)
+                )
+
+                insight_col_1, insight_col_2 = st.columns(2)
+                with insight_col_1:
+                    if not role_context.empty:
+                        top_role = role_context.iloc[0]
+                        st.info(
+                            f"**Top costly role context:** {title_case_label(str(top_role['Role']))} "
+                            f"accounts for {top_role['TotalMissedSwing']:+.3f} cumulative swing "
+                            f"across {int(top_role['OpportunityCount'])} key windows."
+                        )
+                with insight_col_2:
+                    if not action_context.empty:
+                        top_action = action_context.iloc[0]
+                        st.info(
+                            f"**Top corrective action signal:** {title_case_label(str(top_action['RecommendedAction']).replace('_', ' '))} "
+                            f"shows the largest weighted impact ({top_action['WeightedSwing']:.3f}) "
+                            f"across {int(top_action['OpportunityCount'])} opportunities."
+                        )
+
+                top_report = coach_report_df.head(5).copy()
+                top_report["ExpectedSwing"] = pd.to_numeric(top_report["ExpectedSwing"], errors="coerce").round(3)
+                top_report["MissedSwing"] = pd.to_numeric(top_report["MissedSwing"], errors="coerce").round(3)
+                top_report["Confidence"] = (pd.to_numeric(top_report["Confidence"], errors="coerce") * 100.0).round(1)
+
+                c1, c2, c3 = st.columns(3)
+                with c1:
+                    st.metric("Largest Missed Swing", f"{top_report['MissedSwing'].max():+.3f}")
+                with c2:
+                    st.metric("Avg Confidence", f"{top_report['Confidence'].mean():.1f}%")
+                with c3:
+                    st.metric("Windows Reviewed", f"{len(top_report)}")
+
+                st.markdown("#### Top 5 Missed Opportunities")
+                display_cols = [
+                    "Time",
+                    "Role",
+                    "RecommendedAction",
+                    "ExpectedSwing",
+                    "MissedSwing",
+                    "Confidence",
+                    "RecommendationText",
+                    "ClipKey",
+                ]
+                render_dataframe(top_report[display_cols], use_container_width=True, hide_index=True)
+                st.caption("ClipKey provides frame/window lookup IDs for downstream export tooling.")
+
+                detail_labels = {
+                    idx: (
+                        f"{fmt_time(row['Time'])} • {title_case_label(str(row['Role']))} • "
+                        f"{title_case_label(str(row['RecommendedAction']).replace('_', ' '))}"
+                    )
+                    for idx, row in top_report.iterrows()
+                }
+                selected_row_idx = st.selectbox(
+                    "Inspect projected state shift",
+                    options=list(detail_labels.keys()),
+                    format_func=lambda idx: detail_labels[idx],
+                    key="coach_report_detail_select",
+                )
+                detail_row = top_report.loc[selected_row_idx]
+                with st.expander("Baseline vs recommended state", expanded=True):
+                    detail_grid = _build_opportunity_comparison_grid(detail_row)
+                    render_dataframe(detail_grid, use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"Role-aware view for {detail_row['Role']}: {detail_row['RecommendationText']}"
+                    )
+
+                st.markdown("#### Tactical Snapshot (selected opportunity)")
+                selected_frame, window_start, window_end = _parse_clip_window(
+                    str(detail_row.get("ClipKey", "")),
+                    int(pd.to_numeric(detail_row.get("Frame", 0), errors="coerce") or 0),
+                )
+                snapshot_col, meta_col = st.columns([3, 2])
+                with snapshot_col:
+                    snapshot_fig = _build_coach_snapshot_figure(
+                        game_df,
+                        proto,
+                        frame=selected_frame,
+                        clip_key=str(detail_row.get("ClipKey", "")),
+                        role_hint=str(detail_row.get("Role", "")),
+                    )
+                    st.plotly_chart(snapshot_fig, use_container_width=True)
+                with meta_col:
+                    st.caption("Export-ready lookup metadata")
+                    st.code(
+                        "\n".join([
+                            f"ClipKey: {detail_row.get('ClipKey', '—')}",
+                            f"Frame: {selected_frame}",
+                            f"WindowStartFrame: {window_start}",
+                            f"WindowEndFrame: {window_end}",
+                            f"WindowSeconds: {window_start / REPLAY_FPS:.2f}-{window_end / REPLAY_FPS:.2f}",
+                        ]),
+                        language="text",
+                    )
+                    st.caption(
+                        "Snapshot is static and scoped to selected row only to keep initial Coach Report load fast."
+                    )
 
         with t7:
             st.subheader("Composite Dashboard Export")
