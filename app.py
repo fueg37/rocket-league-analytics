@@ -39,6 +39,9 @@ from charts.factory import (
     rolling_trend_with_wl_markers,
     session_composite_chart,
     spatial_outcome_scatter,
+    value_timeline_chart,
+    action_type_value_decomposition_chart,
+    teammate_synergy_matrix,
 )
 from analytics.chemistry import build_season_chemistry_tables
 from analytics.partnership_recommendations import build_pair_recommendations
@@ -65,6 +68,8 @@ from analytics.shot_quality import (
     validate_shot_metric_columns,
 )
 from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_VERSION
+from analytics.possession_value import compute_action_value_deltas, encode_replay_states
+from analytics.aggregations.value_reports import build_player_value_reports
 
 logger = logging.getLogger(__name__)
 
@@ -1430,46 +1435,19 @@ def estimate_scoring_threat(ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz, t
     return max(0.0, min(threat, 0.99))
 
 def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
-    """Calculate VAEP for each touch. Returns (vaep_df, vaep_summary)."""
-    max_frame = game_df.index.max()
+    """Calculate action value from canonical transition-value model.
 
+    Backward-compatible aliases retained: VAEP, Total_VAEP, Avg_VAEP.
+    """
     ball_df = game_df['ball'] if 'ball' in game_df else None
-    if ball_df is None:
+    if ball_df is None or ball_df.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # Pre-compute arrays for fast lookup
-    ball_frames = ball_df.index.values
-    ball_x = ball_df['pos_x'].values
-    ball_y = ball_df['pos_y'].values
-    ball_z = ball_df['pos_z'].values if 'pos_z' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vx = ball_df['vel_x'].values if 'vel_x' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vy = ball_df['vel_y'].values if 'vel_y' in ball_df.columns else np.zeros(len(ball_df))
-    ball_vz = ball_df['vel_z'].values if 'vel_z' in ball_df.columns else np.zeros(len(ball_df))
+    match_id = str(getattr(getattr(proto, "game_metadata", None), "id", "match"))
+    states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
 
-    def _ball_at(frame):
-        bi = min(np.searchsorted(ball_frames, frame), len(ball_x) - 1)
-        if bi < 0:
-            return None
-        return ball_x[bi], ball_y[bi], ball_z[bi], ball_vx[bi], ball_vy[bi], ball_vz[bi]
-
-    def _nearest_dists(frame, team):
-        bs = _ball_at(frame)
-        if bs is None:
-            return 5000.0, 5000.0
-        bx, by = bs[0], bs[1]
-        own_min, opp_min = 10000.0, 10000.0
-        for pname, pd_info in player_pos.items():
-            pi = min(np.searchsorted(pd_info['frames'], frame), len(pd_info['x']) - 1)
-            if pi < 0:
-                continue
-            dist = np.sqrt((pd_info['x'][pi] - bx)**2 + (pd_info['y'][pi] - by)**2)
-            if pd_info['team'] == team:
-                own_min = min(own_min, dist)
-            else:
-                opp_min = min(opp_min, dist)
-        return own_min, opp_min
-
-    touches = []
+    events = []
+    max_frame = int(game_df.index.max()) if len(game_df.index) else 0
     for hit in proto.game_stats.hits:
         if not hit.player_id:
             continue
@@ -1478,36 +1456,49 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
         name = pid_name.get(pid)
         if not team or not name:
             continue
-        frame = hit.frame_number
-        f_before = max(0, frame - 1)
-        f_after = min(max_frame, frame + 5)
-        sb = _ball_at(f_before)
-        sa = _ball_at(f_after)
-        if sb is None or sa is None:
-            continue
-        own_b, opp_b = _nearest_dists(f_before, team)
-        own_a, opp_a = _nearest_dists(f_after, team)
-        threat_before = estimate_scoring_threat(sb[0], sb[1], sb[2], sb[3], sb[4], sb[5], team, own_b, opp_b)
-        threat_after = estimate_scoring_threat(sa[0], sa[1], sa[2], sa[3], sa[4], sa[5], team, own_a, opp_a)
-        vaep = round(threat_after - threat_before, 4)
-        touches.append({'Player': name, 'Team': team, 'Frame': frame,
-                        'Time': round(frame / REPLAY_FPS, 1), 'VAEP': vaep,
-                        'BallX': sa[0], 'BallY': sa[1]})
+        frame = int(hit.frame_number)
+        events.append(
+            {
+                'MatchID': match_id,
+                'Frame': frame,
+                'PostFrame': min(max_frame, frame + 5),
+                'Player': name,
+                'Team': team,
+                'EventType': 'touch',
+                'Time': round(frame / REPLAY_FPS, 1),
+            }
+        )
 
-    vaep_df = pd.DataFrame(touches)
-    summary = []
-    for p in proto.players:
-        name = p.name
-        team = "Orange" if p.is_orange else "Blue"
-        pt = vaep_df[vaep_df['Player'] == name] if not vaep_df.empty else pd.DataFrame()
-        summary.append({
-            'Name': name, 'Team': team,
-            'Total_VAEP': round(pt['VAEP'].sum(), 3) if not pt.empty else 0,
-            'Avg_VAEP': round(pt['VAEP'].mean(), 4) if not pt.empty else 0,
-            'Positive_Actions': int((pt['VAEP'] > 0).sum()) if not pt.empty else 0,
-            'Negative_Actions': int((pt['VAEP'] < 0).sum()) if not pt.empty else 0
-        })
-    return vaep_df, pd.DataFrame(summary)
+    event_df = pd.DataFrame(events)
+    valued_events = compute_action_value_deltas(event_df, states)
+    if valued_events.empty:
+        return valued_events, pd.DataFrame()
+
+    ball_lookup = ball_df[['pos_x', 'pos_y']].rename(columns={'pos_x': 'BallX', 'pos_y': 'BallY'}).copy()
+    ball_lookup['Frame'] = ball_lookup.index.astype(int)
+    valued_events = valued_events.merge(ball_lookup[['Frame', 'BallX', 'BallY']], on='Frame', how='left')
+
+    vaep_df = valued_events[[
+        'Player', 'Team', 'Frame', 'Time', 'EventType', 'VAEP', 'ValueDelta_3s', 'ValueDelta_10s', 'BallX', 'BallY',
+    ]].copy()
+
+    summary = (
+        vaep_df.groupby(['Player', 'Team'], as_index=False)
+        .agg(
+            Total_VAEP=('VAEP', 'sum'),
+            Avg_VAEP=('VAEP', 'mean'),
+            Positive_Actions=('VAEP', lambda s: int((s > 0).sum())),
+            Negative_Actions=('VAEP', lambda s: int((s < 0).sum())),
+            Total_Value_10s=('ValueDelta_10s', 'sum'),
+        )
+        .rename(columns={'Player': 'Name'})
+    )
+
+    for col, digits in [('Total_VAEP', 3), ('Avg_VAEP', 4), ('Total_Value_10s', 3)]:
+        summary[col] = summary[col].round(digits)
+
+    return vaep_df, summary
+
 
 # --- 9g. MATH: ROTATION ANALYSIS ---
 def calculate_rotation_analysis(game_df, proto, player_pos, sample_step=5):
@@ -1876,6 +1867,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     defense_df = calculate_defensive_pressure(game_df, proto)
     xga_df = calculate_xg_against(proto, game_df, temp_map, shot_df)
     vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df)
+    value_reports_df = build_player_value_reports(vaep_df)
     rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(game_df, proto, player_pos)
     xs_events_df, xs_summary = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df)
     situational_df = calculate_situational_stats(game_df, proto, pid_team, temp_map, player_team, shot_df)
@@ -1902,6 +1894,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "aerial_df": aerial_df, "recovery_df": recovery_df,
         "defense_df": defense_df, "xga_df": xga_df,
         "vaep_df": vaep_df, "vaep_summary": vaep_summary,
+        "value_reports_df": value_reports_df,
         "rotation_timeline": rotation_timeline, "rotation_summary": rotation_summary,
         "double_commits_df": double_commits_df,
         "xs_events_df": xs_events_df, "xs_summary": xs_summary,
@@ -2375,6 +2368,7 @@ if app_mode == "🔍 Single Match Analysis":
         xga_df = _m["xga_df"]
         vaep_df = _m["vaep_df"]
         vaep_summary = _m["vaep_summary"]
+        value_reports_df = _m.get("value_reports_df", pd.DataFrame())
         rotation_timeline = _m["rotation_timeline"]
         rotation_summary = _m["rotation_summary"]
         double_commits_df = _m["double_commits_df"]
@@ -2985,32 +2979,31 @@ if app_mode == "🔍 Single Match Analysis":
                         x='Name', y='Total_VAEP', color='Team',
                         title="Total VAEP per Player",
                         color_discrete_map=TEAM_COLOR_MAP)
-                    fig_vaep_bar.update_layout()
                     st.plotly_chart(fig_vaep_bar, use_container_width=True)
                     st.caption("Total VAEP summarizes each player's net impact on scoring threat.")
                 with vc2:
-                    if not vaep_df.empty:
-                        fig_vaep_scatter = themed_figure()
-                        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                            t_data = vaep_df[vaep_df['Team'] == team]
-                            if not t_data.empty:
-                                colors_arr = ['#00cc96' if v > 0 else '#EF553B' for v in t_data['VAEP']]
-                                fig_vaep_scatter.add_trace(go.Scatter(
-                                    x=t_data['Time'], y=t_data['VAEP'], mode='markers',
-                                    marker=dict(size=5, color=colors_arr, opacity=0.6),
-                                    name=team, text=t_data['Player'],
-                                    hovertemplate="<b>%{text}</b><br>Time: %{x}s<br>VAEP: %{y:.3f}<extra></extra>"))
-                        fig_vaep_scatter.add_hline(y=0, line_dash="dot", line_color="gray")
-                        fig_vaep_scatter.update_layout(title="Touch VAEP Timeline (green=positive, red=negative)",
-                            xaxis_title="Time (s)", yaxis_title="VAEP",
-                            height=350)
-                        st.plotly_chart(fig_vaep_scatter, use_container_width=True)
+                    st.plotly_chart(value_timeline_chart(vaep_df), use_container_width=True)
+
+                vd1, vd2 = st.columns(2)
+                with vd1:
+                    event_source = vaep_df.copy()
+                    event_source['EventType'] = event_source.get('EventType', 'touch')
+                    st.plotly_chart(action_type_value_decomposition_chart(event_source), use_container_width=True)
+                with vd2:
+                    synergy_input = vaep_df[['Player', 'VAEP']].copy() if not vaep_df.empty else pd.DataFrame(columns=['Player', 'VAEP'])
+                    if not synergy_input.empty:
+                        synergy_input['Player1'] = synergy_input['Player']
+                        synergy_input['Player2'] = synergy_input['Player']
+                    st.plotly_chart(teammate_synergy_matrix(synergy_input), use_container_width=True)
+
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
                 vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
                 with st.expander("Data details"):
-                    render_dataframe(vaep_ranked,
-                        use_container_width=True, hide_index=True)
-                st.caption("VAEP: each touch scored by change in scoring threat. Positive = moved team closer to scoring.")
+                    render_dataframe(vaep_ranked, use_container_width=True, hide_index=True)
+                if not value_reports_df.empty:
+                    with st.expander("Data details: Season-style Value Profile"):
+                        render_dataframe(value_reports_df, use_container_width=True, hide_index=True)
+                st.caption("VAEP now uses transition-value deltas from canonical possession states.")
             else:
                 st.info("No VAEP data available.")
             st.divider()

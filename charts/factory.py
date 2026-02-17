@@ -685,3 +685,99 @@ def chemistry_ranking_table(pair_df: pd.DataFrame, *, top_n: int = 20) -> pd.Dat
         "Samples",
         "Confidence",
     ]]
+
+
+def value_timeline_chart(actions_df: pd.DataFrame, title: str = "Transition Value Timeline"):
+    """Render cumulative and per-action transition value over match time."""
+    if actions_df is None or actions_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title=title)
+        return apply_chart_theme(fig, tier="support", intent="dual_series", variant="primary")
+
+    df = actions_df.copy().sort_values("Time", kind="mergesort")
+    df["CumulativeVAEP"] = pd.to_numeric(df.get("VAEP", 0.0), errors="coerce").fillna(0.0).cumsum()
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=df["Time"],
+        y=df.get("VAEP", 0.0),
+        mode="markers",
+        name="Action VAEP",
+        marker=dict(size=7, color=semantic_color("outcome", "neutral"), opacity=0.75),
+        hovertemplate="Time: %{x:.1f}s<br>Action Value: %{y:+.3f}<extra></extra>",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["Time"],
+        y=df["CumulativeVAEP"],
+        mode="lines",
+        name="Cumulative Value",
+        line=dict(width=3, color=semantic_color("dual_series", "primary")),
+        hovertemplate="Time: %{x:.1f}s<br>Cumulative: %{y:+.3f}<extra></extra>",
+    ))
+    fig.update_layout(title=title, xaxis_title="Time (s)", yaxis_title="Goal Differential Value")
+    return apply_chart_theme(fig, tier="support", intent="dual_series", variant="primary")
+
+
+def action_type_value_decomposition_chart(actions_df: pd.DataFrame, title: str = "Value by Action Type"):
+    """Render stacked decomposition of positive/negative value by action type."""
+    if actions_df is None or actions_df.empty:
+        return apply_chart_theme(go.Figure(), tier="support", intent="outcome", variant="neutral")
+
+    df = actions_df.copy()
+    df["EventType"] = df.get("EventType", "touch")
+    df["VAEP"] = pd.to_numeric(df.get("VAEP", 0.0), errors="coerce").fillna(0.0)
+    grouped = df.groupby("EventType", as_index=False).agg(
+        PositiveValue=("VAEP", lambda s: float(s[s > 0].sum())),
+        NegativeValue=("VAEP", lambda s: float(s[s < 0].sum())),
+    )
+    grouped = grouped.sort_values("PositiveValue", ascending=False)
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=grouped["EventType"], y=grouped["PositiveValue"], name="Positive",
+        marker_color=semantic_color("outcome", "win"),
+        hovertemplate="Action: %{x}<br>Positive Value: %{y:+.3f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        x=grouped["EventType"], y=grouped["NegativeValue"], name="Negative",
+        marker_color=semantic_color("outcome", "loss"),
+        hovertemplate="Action: %{x}<br>Negative Value: %{y:+.3f}<extra></extra>",
+    ))
+    fig.update_layout(title=title, barmode="relative", xaxis_title="Action Type", yaxis_title="Value")
+    return apply_chart_theme(fig, tier="support", intent="outcome", variant="neutral")
+
+
+def teammate_synergy_matrix(shared_actions_df: pd.DataFrame, title: str = "Teammate Synergy Matrix"):
+    """Render pairwise synergy from shared transition gains."""
+    base_cols = ["Player1", "Player2", "SharedTransitionGain"]
+    if shared_actions_df is None or shared_actions_df.empty:
+        return apply_chart_theme(go.Figure(), tier="support", intent="dual_series", variant="primary")
+
+    df = shared_actions_df.copy()
+    if "SharedTransitionGain" not in df.columns and "VAEP" in df.columns:
+        df["SharedTransitionGain"] = pd.to_numeric(df["VAEP"], errors="coerce").fillna(0.0)
+    for col in base_cols:
+        if col not in df.columns:
+            if col in ("Player1", "Player2") and "Player" in df.columns:
+                df[col] = df["Player"].astype(str)
+            else:
+                df[col] = 0.0
+
+    pairs = (
+        df.groupby(["Player1", "Player2"], as_index=False)["SharedTransitionGain"].sum()
+    )
+    players = sorted(set(pairs["Player1"]).union(set(pairs["Player2"])))
+    matrix = pd.DataFrame(0.0, index=players, columns=players)
+    for row in pairs.itertuples(index=False):
+        matrix.loc[row.Player1, row.Player2] += float(row.SharedTransitionGain)
+        matrix.loc[row.Player2, row.Player1] += float(row.SharedTransitionGain)
+
+    fig = go.Figure(go.Heatmap(
+        x=players,
+        y=players,
+        z=matrix.values,
+        colorscale="RdBu",
+        zmid=0.0,
+        hovertemplate="%{y} + %{x}<br>Shared Gain: %{z:+.3f}<extra></extra>",
+    ))
+    fig.update_layout(title=title, xaxis_title="Teammate", yaxis_title="Teammate")
+    return apply_chart_theme(fig, tier="support", intent="dual_series", variant="primary")
