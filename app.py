@@ -4154,12 +4154,14 @@ elif app_mode == "📈 Season Batch Processor":
                     avg_luck = round(s_df['Luck'].mean(), 1) if 'Luck' in s_df else 0
                     ot_count_s = int(s_df['Overtime'].sum()) if 'Overtime' in s_df else 0
                     session_summary.append({
-                        'Session': sid, 'Games': games, 'Wins': wins,
+                        'Session': sid, 'Games per Session': games, 'Wins': wins,
                         'Win Rate %': wr, 'Avg Rating': avg_r,
                         'Avg Luck %': avg_luck, 'OT Games': ot_count_s
                     })
                 summary_df = pd.DataFrame(session_summary)
-                render_dataframe(summary_df.style.background_gradient(subset=['Win Rate %'], cmap='RdYlGn', vmin=0, vmax=100), use_container_width=True, hide_index=True)
+                table_cols = ['Session', 'Games per Session', 'Win Rate %', 'Avg Rating', 'Wins', 'Avg Luck %', 'OT Games']
+                compact_summary = summary_df[[c for c in table_cols if c in summary_df.columns]]
+                render_dataframe(compact_summary.style.background_gradient(subset=['Win Rate %'], cmap='RdYlGn', vmin=0, vmax=100), use_container_width=True, hide_index=True)
                 # Session performance chart
                 fig_sess = session_composite_chart(summary_df)
                 st.plotly_chart(fig_sess, use_container_width=True)
