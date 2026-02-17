@@ -117,8 +117,8 @@ if os.path.exists(_pitch_path):
     with open(_pitch_path, "rb") as _f:
         PITCH_IMAGE_B64 = "data:image/png;base64," + base64.b64encode(_f.read()).decode()
 
-st.set_page_config(page_title="RL Pro Analytics", layout="wide", page_icon="🚀")
-st.title("🚀 Rocket League Pro Analytics (Final Version)")
+st.set_page_config(page_title="RL Analytics", layout="wide", page_icon="🚀")
+st.title("🚀 Rocket League Analytics")
 
 # --- SESSION STATE INITIALIZATION ---
 if "match_store" not in st.session_state:
