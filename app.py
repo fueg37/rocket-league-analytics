@@ -2920,17 +2920,74 @@ if app_mode == "🔍 Single Match Analysis":
                 st.markdown("#### Role Distribution")
                 rc1, rc2 = st.columns(2)
                 with rc1:
-                    fig_roles = themed_figure()
-                    for role, color in [('1st', '#EF553B'), ('2nd', '#FFA15A')]:
-                        col_name = f'Time_{role}%'
-                        fig_roles.add_trace(go.Bar(
-                            x=rotation_summary['Name'], y=rotation_summary[col_name],
-                            name=f'{role} Man', marker_color=color))
+                    dist = rotation_summary.copy()
+                    match_duration = game_df.index.max() / float(REPLAY_FPS) if len(game_df.index) else 1.0
+                    dist['RoleBias'] = dist['Time_1st%'] - dist['Time_2nd%']
+                    dist['DoubleCommitsPer100s'] = dist['DoubleCommits'] / (match_duration / 100.0 if match_duration > 0 else 1.0)
+                    dist = dist.sort_values(['Team', 'RoleBias'], ascending=[True, False]).reset_index(drop=True)
+
+                    fig_roles = make_subplots(
+                        rows=1,
+                        cols=2,
+                        column_widths=[0.65, 0.35],
+                        horizontal_spacing=0.14,
+                        subplot_titles=("Role Bias (1st vs 2nd)", "Commitment Risk")
+                    )
+
+                    for team in ["Blue", "Orange"]:
+                        team_df = dist[dist['Team'] == team]
+                        if team_df.empty:
+                            continue
+                        team_color = TEAM_COLORS[team]["primary"]
+
+                        fig_roles.add_trace(
+                            go.Bar(
+                                y=team_df['Name'],
+                                x=team_df['RoleBias'],
+                                orientation='h',
+                                marker_color=team_color,
+                                name=f"{team} Role Bias",
+                                legendgroup=team,
+                                showlegend=True,
+                                customdata=np.stack([team_df['Time_1st%'], team_df['Time_2nd%']], axis=-1),
+                                hovertemplate="<b>%{y}</b><br>Bias: %{x:+.1f} pts"
+                                              "<br>1st man: %{customdata[0]:.1f}%"
+                                              "<br>2nd man: %{customdata[1]:.1f}%<extra></extra>"
+                            ),
+                            row=1,
+                            col=1
+                        )
+
+                        fig_roles.add_trace(
+                            go.Bar(
+                                y=team_df['Name'],
+                                x=team_df['DoubleCommitsPer100s'],
+                                orientation='h',
+                                marker_color=team_color,
+                                opacity=0.65,
+                                name=f"{team} Commits",
+                                legendgroup=team,
+                                showlegend=False,
+                                customdata=np.stack([team_df['DoubleCommits'], team_df['RotationBreaks']], axis=-1),
+                                hovertemplate="<b>%{y}</b><br>Double commits / 100s: %{x:.2f}"
+                                              "<br>Double commits: %{customdata[0]}"
+                                              "<br>Rotation breaks: %{customdata[1]}<extra></extra>"
+                            ),
+                            row=1,
+                            col=2
+                        )
+
+                    fig_roles.add_vline(x=0, line_dash='dot', line_color='rgba(255,255,255,0.45)', row=1, col=1)
+                    fig_roles.update_xaxes(title_text="1st-heavy ← 0 → 2nd-heavy", row=1, col=1, zeroline=False)
+                    fig_roles.update_xaxes(title_text="Double commits / 100s", row=1, col=2, rangemode='tozero')
+                    fig_roles.update_yaxes(title_text="Player", row=1, col=1)
+                    fig_roles.update_yaxes(showticklabels=False, row=1, col=2)
                     fig_roles.update_layout(
-                        barmode='stack',
-                        title="Time Spent as 1st/2nd Man",
-                        yaxis_title="% of Match",
-                        legend=dict(orientation='h', y=1.12),
+                        barmode='overlay',
+                        title="Rotation Profile by Player",
+                        legend=dict(orientation='h', y=1.2),
+                        height=420,
+                        margin=dict(t=90, l=20, r=20, b=20),
                     )
                     st.plotly_chart(fig_roles, use_container_width=True)
                 with rc2:
@@ -2939,7 +2996,7 @@ if app_mode == "🔍 Single Match Analysis":
                         team_data = rotation_summary[rotation_summary['Team'] == team]
                         if not team_data.empty:
                             st.markdown(f"**{team} Team**")
-                            st.dataframe(team_data[['Name', 'Time_1st%', 'Time_2nd%', 'DoubleCommits']].reset_index(drop=True),
+                            st.dataframe(team_data[['Name', 'Time_1st%', 'Time_2nd%', 'DoubleCommits', 'RotationBreaks']].reset_index(drop=True),
                                 use_container_width=True, hide_index=True)
 
                 st.divider()
@@ -2988,7 +3045,7 @@ if app_mode == "🔍 Single Match Analysis":
                 else:
                     st.success("No double commits detected!")
 
-                st.caption("1st man = closest to ball, 2nd = support/last back. Double commits = 2 players within 800u of ball in attacking half.")
+                st.caption("Role bias tracks how first-man heavy each player was (1st% - 2nd%). Commitment risk normalizes double commits by match length. 1st man = closest to ball, 2nd = support/last back.")
             else:
                 st.info("No rotation data available.")
 
