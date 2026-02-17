@@ -34,6 +34,32 @@ SHOT_COL_X = "X"
 SHOT_COL_Y = "Y"
 SHOT_COL_SPEED = "Speed"
 
+
+BASIC_SHOT_METRIC_COLUMNS = (
+    SHOT_COL_PLAYER,
+    SHOT_COL_TEAM,
+    SHOT_COL_FRAME,
+    COL_XG,
+    COL_XGOT,
+    COL_ON_TARGET,
+    COL_TARGET_X,
+    COL_TARGET_Z,
+    SHOT_COL_RESULT,
+    SHOT_COL_X,
+    SHOT_COL_Y,
+)
+
+UNCERTAINTY_SHOT_METRIC_COLUMNS = (
+    "xG_CI_Low",
+    "xG_CI_High",
+    "xG_SampleSize",
+    "xG_Reliability",
+    "xGOT_CI_Low",
+    "xGOT_CI_High",
+    "xGOT_SampleSize",
+    "xGOT_Reliability",
+)
+
 SHOT_EVENT_COLUMNS = (
     SHOT_COL_PLAYER,
     SHOT_COL_TEAM,
@@ -266,27 +292,7 @@ def validate_shot_metric_columns(
     an explicit `required` list when strict uncertainty columns are needed.
     """
     col_set = set(columns)
-    expected = list(required) if required is not None else [
-        SHOT_COL_PLAYER,
-        SHOT_COL_TEAM,
-        SHOT_COL_FRAME,
-        COL_XG,
-        "xG_CI_Low",
-        "xG_CI_High",
-        "xG_SampleSize",
-        "xG_Reliability",
-        COL_XGOT,
-        "xGOT_CI_Low",
-        "xGOT_CI_High",
-        "xGOT_SampleSize",
-        "xGOT_Reliability",
-        COL_ON_TARGET,
-        COL_TARGET_X,
-        COL_TARGET_Z,
-        SHOT_COL_RESULT,
-        SHOT_COL_X,
-        SHOT_COL_Y,
-    ]
+    expected = list(required) if required is not None else list(BASIC_SHOT_METRIC_COLUMNS)
     missing = [c for c in expected if c not in col_set]
     return len(missing) == 0, missing
 
