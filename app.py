@@ -2381,7 +2381,6 @@ if app_mode == "🔍 Single Match Analysis":
         focus_players = st.sidebar.multiselect(
             "🎯 Focus Analysis On:",
             all_players,
-            default=st.session_state.shared_focus_players,
             key="shared_focus_players",
             help="Shared player filter synced across related match tabs.",
         )

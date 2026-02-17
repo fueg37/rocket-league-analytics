@@ -260,7 +260,11 @@ def aggregate_metric_contract(values: Iterable[float], metric_name: str) -> dict
 def validate_shot_metric_columns(
     columns: Iterable[str], required: Iterable[str] | None = None
 ) -> tuple[bool, list[str]]:
-    """Validate required shot metric columns before chart rendering."""
+    """Validate required shot metric columns before chart rendering.
+
+    Contract fields are optional for backward compatibility; callers may pass
+    an explicit `required` list when strict uncertainty columns are needed.
+    """
     col_set = set(columns)
     expected = list(required) if required is not None else [
         SHOT_COL_PLAYER,

@@ -166,8 +166,8 @@ def build_win_probability_chart(
         pd.to_numeric(contract_df.get("ScoreDiff", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
     )
     probs = _smooth_probability(probs_raw, window=5)
-    ci_low = pd.to_numeric(contract_df.get("WinProb_CI_Low", probs_raw), errors="coerce").fillna(probs_raw).to_numpy(dtype=float)
-    ci_high = pd.to_numeric(contract_df.get("WinProb_CI_High", probs_raw), errors="coerce").fillna(probs_raw).to_numpy(dtype=float)
+    ci_low = pd.to_numeric(contract_df.get("WinProb_CI_Low"), errors="coerce").fillna(pd.Series(probs_raw)).to_numpy(dtype=float)
+    ci_high = pd.to_numeric(contract_df.get("WinProb_CI_High"), errors="coerce").fillna(pd.Series(probs_raw)).to_numpy(dtype=float)
 
     states = _assign_states(probs)
     states = _debounce_states(states, min_run=3)
