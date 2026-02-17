@@ -21,7 +21,7 @@ from constants import (
 from utils import (
     build_pid_team_map, build_pid_name_map, build_player_team_map,
     get_team_players, build_player_positions,
-    frame_to_seconds, seconds_to_frame, fmt_time,
+    frame_to_seconds, seconds_to_frame, fmt_time, format_speed,
 )
 
 from charts.theme import apply_chart_theme
@@ -2517,6 +2517,7 @@ if app_mode == "🔍 Single Match Analysis":
                             t_shots = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Shot')]
                             t_goals = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Goal')]
                             if not t_shots.empty:
+                                shot_speed = pd.to_numeric(t_shots.get('Speed', 0), errors='coerce').fillna(0)
                                 fig.add_trace(go.Scatter(
                                     x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
                                     marker=dict(size=10, color=color, opacity=0.5),
@@ -2527,11 +2528,13 @@ if app_mode == "🔍 Single Match Analysis":
                                         t_shots[SHOT_COL_RESULT],
                                         pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0),
                                         pd.to_numeric(t_shots.get(COL_XGOT, 0), errors='coerce').fillna(0),
-                                        pd.to_numeric(t_shots.get('Speed', 0), errors='coerce').fillna(0),
+                                        shot_speed,
+                                        shot_speed.map(lambda speed_uu: format_speed(speed_uu, unit="mph", precision=1)),
                                     ], axis=-1),
-                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[5]:.0f} uu/s<extra></extra>",
+                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[6]}<extra></extra>",
                                 ))
                             if not t_goals.empty:
+                                goal_speed = pd.to_numeric(t_goals.get('Speed', 0), errors='coerce').fillna(0)
                                 fig.add_trace(go.Scatter(
                                     x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
                                     marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
@@ -2542,9 +2545,10 @@ if app_mode == "🔍 Single Match Analysis":
                                         t_goals[SHOT_COL_RESULT],
                                         pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0),
                                         pd.to_numeric(t_goals.get(COL_XGOT, 0), errors='coerce').fillna(0),
-                                        pd.to_numeric(t_goals.get('Speed', 0), errors='coerce').fillna(0),
+                                        goal_speed,
+                                        goal_speed.map(lambda speed_uu: format_speed(speed_uu, unit="mph", precision=1)),
                                     ], axis=-1),
-                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[5]:.0f} uu/s<extra></extra>",
+                                    hovertemplate="<b>%{customdata[0]}</b><br>t=%{customdata[1]:.1f}s | %{customdata[2]}<br>xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>Speed %{customdata[6]}<extra></extra>",
                                 ))
                         big_chances = filtered_shots[filtered_shots['BigChance'] == True]
                         if not big_chances.empty:
@@ -2599,7 +2603,10 @@ if app_mode == "🔍 Single Match Analysis":
                 mc3.metric("xGOT", f"{pd.to_numeric(shot_row.get(COL_XGOT, 0), errors='coerce'):.2f}")
                 mc4.metric("Result", shot_row[SHOT_COL_RESULT])
                 mc5, _mc_spacer = st.columns([1, 3])
-                mc5.metric("Speed", f"{shot_row.get('Speed', 'N/A')} uu/s")
+                mc5.metric(
+                    "Speed",
+                    format_speed(pd.to_numeric(shot_row.get('Speed', np.nan), errors='coerce'), unit="mph", precision=1),
+                )
 
                 mini = goal_mouth_scatter(
                     pd.DataFrame([shot_row]),
