@@ -3689,7 +3689,16 @@ if app_mode == "🔍 Single Match Analysis":
             if coach_report_df is None or coach_report_df.empty:
                 st.info("No high-leverage decision windows were detected for this match.")
             else:
-                timeline_fig = coach_report_timeline_chart(win_prob_df, momentum_series, coach_report_df)
+                timeline_report_df = coach_report_df.copy()
+                for uncertainty_col in [
+                    "ExpectedSwingMean",
+                    "ExpectedSwingP10",
+                    "ExpectedSwingP90",
+                    "ExpectedSwingIntervalWidth",
+                ]:
+                    if uncertainty_col not in timeline_report_df.columns:
+                        timeline_report_df[uncertainty_col] = np.nan
+                timeline_fig = coach_report_timeline_chart(win_prob_df, momentum_series, timeline_report_df)
                 st.plotly_chart(timeline_fig, use_container_width=True)
                 st.caption("Timeline aligns win probability and momentum with missed-opportunity markers so you can scan context before reviewing clips.")
 
