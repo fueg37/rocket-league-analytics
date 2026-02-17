@@ -550,3 +550,83 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
     fig.update_yaxes(title=title_case_label("target z"), range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
     fig.update_layout(title="Goal Mouth", legend_title_text="Team")
     return apply_chart_theme(fig, tier="support")
+
+
+def chemistry_network_chart(pair_df: pd.DataFrame, *, min_samples: int = 3, title: str = "Chemistry Network"):
+    """Render player chemistry graph (nodes=players, edges=chemistry strength)."""
+    fig = go.Figure()
+    if pair_df is None or pair_df.empty:
+        fig.update_layout(title=title)
+        fig.add_annotation(x=0.5, y=0.5, xref="paper", yref="paper", text="No chemistry data", showarrow=False)
+        return apply_chart_theme(fig, tier="support")
+
+    data = pair_df[pair_df["Samples"] >= int(min_samples)].copy()
+    if data.empty:
+        fig.update_layout(title=title)
+        fig.add_annotation(x=0.5, y=0.5, xref="paper", yref="paper", text="Insufficient chemistry samples", showarrow=False)
+        return apply_chart_theme(fig, tier="support")
+
+    players = sorted(set(data["Player1"]).union(set(data["Player2"])))
+    if not players:
+        return apply_chart_theme(fig, tier="support")
+
+    theta = np.linspace(0, 2 * np.pi, len(players), endpoint=False)
+    radius = 1.0
+    pos = {p: (radius * np.cos(t), radius * np.sin(t)) for p, t in zip(players, theta)}
+
+    strength_col = "ChemistryScore_Shrunk" if "ChemistryScore_Shrunk" in data.columns else "ChemistryScore"
+    min_s, max_s = float(data[strength_col].min()), float(data[strength_col].max())
+    span = max(1e-9, max_s - min_s)
+
+    for _, row in data.iterrows():
+        x0, y0 = pos[row["Player1"]]
+        x1, y1 = pos[row["Player2"]]
+        strength = float(row[strength_col])
+        norm = (strength - min_s) / span
+        width = 1.0 + 6.0 * norm
+        color = f"rgba(99, 210, 255, {0.18 + 0.72 * norm:.2f})"
+        fig.add_trace(go.Scatter(
+            x=[x0, x1], y=[y0, y1], mode="lines", showlegend=False,
+            line=dict(width=width, color=color),
+            hovertemplate=(
+                f"{row['Player1']} ↔ {row['Player2']}<br>"
+                f"Strength: {strength:.3f}<br>"
+                f"Samples: {int(row['Samples'])}<extra></extra>"
+            ),
+        ))
+
+    degree = {p: 0.0 for p in players}
+    for _, row in data.iterrows():
+        score = float(row[strength_col])
+        degree[row["Player1"]] += score
+        degree[row["Player2"]] += score
+
+    node_size = [18 + 7 * (degree[p] - min(degree.values())) / max(1e-9, (max(degree.values()) - min(degree.values()))) for p in players]
+    fig.add_trace(go.Scatter(
+        x=[pos[p][0] for p in players],
+        y=[pos[p][1] for p in players],
+        text=players,
+        mode="markers+text",
+        textposition="top center",
+        marker=dict(size=node_size, color=semantic_color("dual_series", "primary"), line=dict(width=1.5, color="white")),
+        hovertemplate="Player: %{text}<extra></extra>",
+        showlegend=False,
+    ))
+    fig.update_xaxes(visible=False)
+    fig.update_yaxes(visible=False, scaleanchor="x", scaleratio=1)
+    fig.update_layout(title=title)
+    return apply_chart_theme(fig, tier="support", intent="dual_series")
+
+
+def chemistry_ranking_table(pair_df: pd.DataFrame, *, top_n: int = 20) -> pd.DataFrame:
+    """Season-level pair ranking table for UI display."""
+    if pair_df is None or pair_df.empty:
+        return pd.DataFrame(columns=["Rank", "Team", "Pair", "Chemistry", "CI", "Samples", "Reliability"])
+    out = pair_df.copy()
+    out["Pair"] = out["Player1"].astype(str) + " + " + out["Player2"].astype(str)
+    score_col = "ChemistryScore_Shrunk" if "ChemistryScore_Shrunk" in out.columns else "ChemistryScore"
+    out = out.sort_values(score_col, ascending=False).head(int(top_n)).reset_index(drop=True)
+    out["Rank"] = np.arange(1, len(out) + 1)
+    out["Chemistry"] = out[score_col].map(lambda v: f"{float(v):.3f}")
+    out["CI"] = out.apply(lambda r: f"[{float(r.get('CI_Low', 0)):.3f}, {float(r.get('CI_High', 0)):.3f}]", axis=1)
+    return out[["Rank", "Team", "Pair", "Chemistry", "CI", "Samples", "Reliability"]]
