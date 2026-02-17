@@ -2375,7 +2375,9 @@ if app_mode == "🔍 Single Match Analysis":
                     with col_k1:
                         wins = len(disp_kickoff[disp_kickoff['Result'] == 'Win'])
                         total = len(disp_kickoff)
-                        win_rate = int((wins/total)*100) if total > 0 else 0
+                        win_rate = (wins / total) * 100 if total > 0 else 0.0
+                        st.metric("Kickoff Win Rate", f"{win_rate:.1f}%", help=f"{wins} wins across {total} kickoffs")
+                        st.progress(min(max(win_rate / 100, 0.0), 1.0))
                         fig = kickoff_kpi_indicator(win_rate=win_rate, title="Kickoff Win Rate (Selected)")
                         st.plotly_chart(fig, use_container_width=True)
                     with col_k2:
@@ -3757,7 +3759,10 @@ elif app_mode == "📈 Season Batch Processor":
                 c_a, c_b = st.columns(2)
                 with c_a:
                     wins = len(hero_k[hero_k['Result'] == 'Win'])
-                    win_rate = int((wins/len(hero_k))*100) if len(hero_k) > 0 else 0
+                    total_kickoffs = len(hero_k)
+                    win_rate = (wins / total_kickoffs) * 100 if total_kickoffs > 0 else 0.0
+                    st.metric(f"{hero} Kickoff Win Rate", f"{win_rate:.1f}%", help=f"{wins} wins across {total_kickoffs} kickoffs")
+                    st.progress(min(max(win_rate / 100, 0.0), 1.0))
                     fig = kickoff_kpi_indicator(win_rate=win_rate, title=f"{hero} Win Rate")
                     fig.update_layout(height=250)
                     st.plotly_chart(fig, use_container_width=True)
@@ -3789,13 +3794,35 @@ elif app_mode == "📈 Season Batch Processor":
         with t3:
             st.subheader("Positional Tendencies")
             if 'Pos_Def' in hero_df:
-                col_pie, col_bar = st.columns(2)
-                with col_pie:
-                    avg_def = hero_df['Pos_Def'].mean()
-                    avg_mid = hero_df['Pos_Mid'].mean()
-                    avg_off = hero_df['Pos_Off'].mean()
-                    fig = themed_px(px.pie, names=['Defense', 'Midfield', 'Offense'], values=[avg_def, avg_mid, avg_off], title=f"{hero} Avg Positioning", color_discrete_sequence=['#EF553B', '#FFA15A', '#00CC96'])
-                    st.plotly_chart(fig, use_container_width=True)
+                col_pos, col_bar = st.columns(2)
+                with col_pos:
+                    avg_def = float(hero_df['Pos_Def'].mean())
+                    avg_mid = float(hero_df['Pos_Mid'].mean())
+                    avg_off = float(hero_df['Pos_Off'].mean())
+                    pos_df = pd.DataFrame({
+                        'Player': [hero],
+                        'Defense': [avg_def],
+                        'Midfield': [avg_mid],
+                        'Offense': [avg_off],
+                    })
+                    pos_long = pos_df.melt(id_vars='Player', var_name='Zone', value_name='Time %')
+                    pos_long = apply_categorical_order(pos_long, 'Zone', ['Defense', 'Midfield', 'Offense'])
+                    pos_long = stable_sort(pos_long, by=['Player', 'Zone'], ascending=[True, True])
+                    fig_pos = themed_px(
+                        px.bar,
+                        pos_long,
+                        x='Player',
+                        y='Time %',
+                        color='Zone',
+                        title=f"{hero} Avg Positioning",
+                        barmode='stack',
+                        text='Time %',
+                        color_discrete_map={'Defense': '#EF553B', 'Midfield': '#FFA15A', 'Offense': '#00CC96'}
+                    )
+                    fig_pos.update_yaxes(range=[0, 100], ticksuffix='%')
+                    fig_pos.update_traces(texttemplate='%{y:.1f}%', textposition='inside', cliponaxis=False)
+                    fig_pos.update_layout(uniformtext_minsize=10, uniformtext_mode='hide')
+                    st.plotly_chart(fig_pos, use_container_width=True)
                 with col_bar:
                     # Granular zones bar chart
                     zone_data = {
@@ -3844,24 +3871,44 @@ elif app_mode == "📈 Season Batch Processor":
                         fig_comp.update_layout(title=f"{hero} vs {teammate} Zone Tendencies", xaxis_title='Time %')
                         st.plotly_chart(fig_comp, use_container_width=True)
         with t4:
-            st.subheader("Player Comparison Radar")
+            st.subheader("Player Comparison")
             categories = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', SPEED_METRIC_DISPLAY, 'Aerial %', 'Total_VAEP']
-            # Normalize each category to 0-100 scale across all players for fair comparison
             season_display = with_dashboard_speed_display(season)
             all_avgs = season_display.groupby('Name')[categories].mean()
-            cat_max = all_avgs.max()
-            cat_max = cat_max.replace(0, 1)  # avoid division by zero
+            cat_max = all_avgs.max().replace(0, 1)
             hero_avg = hero_display_df[categories].mean()
             hero_norm = (hero_avg / cat_max * 100).fillna(0)
-            fig = themed_figure()
-            fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
+
+            compare_df = pd.DataFrame({'Metric': categories, hero: hero_norm.values})
             if teammate != "None":
                 mate_df = season_display[season_display['Name'] == teammate]
                 mate_avg = mate_df[categories].mean()
                 mate_norm = (mate_avg / cat_max * 100).fillna(0)
-                fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
-            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=500)
-            st.plotly_chart(fig, use_container_width=True)
+                compare_df[teammate] = mate_norm.values
+
+            mode = st.toggle("Show radar chart", value=False, help="Default view is normalized grouped bars for readability.")
+            if mode:
+                fig = themed_figure()
+                fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
+                if teammate != "None":
+                    fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
+                fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=500)
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                comp_long = compare_df.melt(id_vars='Metric', var_name='Player', value_name='Normalized Score')
+                fig_bar = themed_px(
+                    px.bar,
+                    comp_long,
+                    x='Metric',
+                    y='Normalized Score',
+                    color='Player',
+                    barmode='group',
+                    title='Normalized Stat Comparison (0-100)',
+                    text='Normalized Score',
+                )
+                fig_bar.update_traces(texttemplate='%{y:.0f}', textposition='outside')
+                fig_bar.update_yaxes(range=[0, 110], title='Normalized Score')
+                st.plotly_chart(fig_bar, use_container_width=True)
         with t8:
             st.subheader("Career Insights")
             _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'xA', SPEED_METRIC_DISPLAY,
@@ -4016,16 +4063,29 @@ elif app_mode == "📈 Season Batch Processor":
                 _g2h = int(hero_df['Goals_Second_Half'].sum())
                 _glm = int(hero_df['Goals_Last_Min'].sum())
                 _total_g = _g1h + _g2h
-                # Period distribution pie chart
-                fig_period = themed_figure(data=[go.Pie(
-                    labels=['First Half', 'Second Half (excl. last min)', 'Last Minute'],
-                    values=[_g1h, max(0, _g2h - _glm), _glm],
-                    marker_colors=['#636EFA', '#EF553B', '#FFA15A'],
-                    hole=0.4,
-                    textinfo='label+percent+value'
-                )])
-                fig_period.update_layout(title="Goal Distribution by Period", height=350,
-                    margin=dict(t=40, b=20, l=20, r=20))
+                period_chart_df = pd.DataFrame({
+                    'Period': ['First Half', 'Second Half', 'Last Minute'],
+                    'Count': [_g1h, _g2h, _glm],
+                })
+                period_chart_df['Share'] = period_chart_df['Count'] / max(period_chart_df['Count'].sum(), 1) * 100
+                period_chart_df = apply_categorical_order(period_chart_df, 'Period', ['First Half', 'Second Half', 'Last Minute'])
+                period_chart_df = stable_sort(period_chart_df, by=['Period'], ascending=[True])
+                fig_period = themed_px(
+                    px.bar,
+                    period_chart_df,
+                    x='Period',
+                    y='Count',
+                    color='Period',
+                    title='Goal Distribution by Period',
+                    text='Count',
+                    color_discrete_map={'First Half': '#636EFA', 'Second Half': '#EF553B', 'Last Minute': '#FFA15A'},
+                    hover_data={'Share':':.1f', 'Count': True}
+                )
+                fig_period.update_traces(
+                    hovertemplate='%{x}<br>Goals: %{y}<br>Share: %{customdata[0]:.1f}%<extra></extra>',
+                    customdata=period_chart_df[['Share']].to_numpy(),
+                )
+                fig_period.update_layout(showlegend=False, height=350, margin=dict(t=40, b=20, l=20, r=20))
                 period_details = pd.DataFrame({
                     'Period': ['First Half', 'Second Half', 'Last Minute'],
                     'Goals': [_g1h, _g2h, _glm],
@@ -4214,15 +4274,28 @@ elif app_mode == "📈 Season Batch Processor":
                     c2.metric("Last Minute Saves", late_saves)
                     c3.metric("Clutch Save Rate", f"{round(late_saves / total_saves * 100, 1)}%")
 
-                    fig_sv = themed_figure(data=[go.Pie(
-                        labels=['Regular Saves', 'Last Minute Saves'],
-                        values=[early_saves, late_saves],
-                        marker_colors=['#636EFA', '#EF553B'],
-                        hole=0.4,
-                        textinfo='label+percent+value'
-                    )])
-                    fig_sv.update_layout(title="Save Distribution by Timing", height=300,
-                        margin=dict(t=40, b=20, l=20, r=20))
+                    save_chart_df = pd.DataFrame({
+                        'Timing': ['First Half', 'Second Half', 'Last Minute'],
+                        'Count': [max(0, early_saves // 2), max(0, early_saves - (early_saves // 2)), late_saves],
+                    })
+                    save_chart_df['Share'] = save_chart_df['Count'] / max(save_chart_df['Count'].sum(), 1) * 100
+                    save_chart_df = apply_categorical_order(save_chart_df, 'Timing', ['First Half', 'Second Half', 'Last Minute'])
+                    save_chart_df = stable_sort(save_chart_df, by=['Timing'], ascending=[True])
+                    fig_sv = themed_px(
+                        px.bar,
+                        save_chart_df,
+                        x='Timing',
+                        y='Count',
+                        color='Timing',
+                        title='Save Distribution by Timing',
+                        text='Count',
+                        color_discrete_map={'First Half': '#636EFA', 'Second Half': '#00CC96', 'Last Minute': '#EF553B'}
+                    )
+                    fig_sv.update_traces(
+                        hovertemplate='%{x}<br>Saves: %{y}<br>Share: %{customdata[0]:.1f}%<extra></extra>',
+                        customdata=save_chart_df[['Share']].to_numpy(),
+                    )
+                    fig_sv.update_layout(showlegend=False, height=300, margin=dict(t=40, b=20, l=20, r=20))
                     st.plotly_chart(fig_sv, use_container_width=True)
                     st.caption("Late-save share estimates how often your defensive impact comes in high-pressure moments.")
 
@@ -4274,12 +4347,13 @@ elif app_mode == "📈 Season Batch Processor":
         with t7:
             st.subheader("Season Dashboard Export")
             if KALEIDO_AVAILABLE:
+                export_use_radar = st.toggle("Use radar in export", value=False, help="Default export uses normalized grouped bars for accessibility.")
                 if st.button("Generate Season Dashboard Image"):
                     with st.spinner("Rendering..."):
                         comp_fig = make_subplots(
                             rows=2, cols=2,
-                            subplot_titles=["Rating Over Time", "Positioning", "Win Rate by Session", "Radar"],
-                            specs=[[{"type": "xy"}, {"type": "xy"}], [{"type": "xy"}, {"type": "scatterpolar"}]],
+                            subplot_titles=["Rating Over Time", "Positioning", "Win Rate by Session", "Player Profile"],
+                            specs=[[{"type": "xy"}, {"type": "xy"}], [{"type": "xy"}, {"type": "xy"}]],
                             vertical_spacing=0.15, horizontal_spacing=0.1
                         )
                         # Rating trend
@@ -4290,10 +4364,34 @@ elif app_mode == "📈 Season Batch Processor":
                         # Session win rates
                         if 'SessionID' in hero_df.columns and len(session_ids) > 1:
                             comp_fig.add_trace(go.Bar(x=summary_df['Session'], y=summary_df['Win Rate %'], marker_color='#00cc96', showlegend=False), row=2, col=1)
-                        # Radar
                         categories_exp = ['Rating', 'Goals', 'Assists', 'Saves', 'Shots', 'xG']
+                        season_export_avgs = season.groupby('Name')[categories_exp].mean()
+                        export_max = season_export_avgs.max().replace(0, 1)
                         hero_avg_exp = hero_df[categories_exp].mean()
-                        comp_fig.add_trace(go.Scatterpolar(r=hero_avg_exp.values.tolist() + [hero_avg_exp.values[0]], theta=categories_exp + [categories_exp[0]], fill='toself', line=dict(color='#007bff'), name=hero, showlegend=False), row=2, col=2)
+                        hero_norm_exp = (hero_avg_exp / export_max * 100).fillna(0)
+
+                        if export_use_radar:
+                            radar_like = go.Scatter(
+                                x=categories_exp + [categories_exp[0]],
+                                y=hero_norm_exp.values.tolist() + [hero_norm_exp.values[0]],
+                                mode='lines+markers',
+                                line=dict(color='#007bff', width=2),
+                                showlegend=False,
+                            )
+                            comp_fig.add_trace(radar_like, row=2, col=2)
+                        else:
+                            comp_fig.add_trace(
+                                go.Bar(
+                                    x=categories_exp,
+                                    y=hero_norm_exp.values,
+                                    marker_color='#007bff',
+                                    text=[f"{v:.0f}" for v in hero_norm_exp.values],
+                                    textposition='outside',
+                                    showlegend=False,
+                                ),
+                                row=2,
+                                col=2,
+                            )
                         comp_fig.update_layout(height=800, width=1200, title_text=f"{hero} Season Dashboard")
                         img_bytes = comp_fig.to_image(format="png", width=1200, height=800, scale=2)
                         st.image(img_bytes, caption="Season Dashboard", use_container_width=True)

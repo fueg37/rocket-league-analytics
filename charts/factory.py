@@ -38,7 +38,7 @@ _STEM_COLOR = {
 
 
 def kickoff_kpi_indicator(win_rate: float, title: str, tier: str = "detail"):
-    """Build a kickoff KPI gauge with semantic threshold accent."""
+    """Build a kickoff KPI with progress/bullet encoding and benchmark markers."""
     if win_rate >= 50:
         bar_color = semantic_color("threshold", "positive")
     elif win_rate < 30:
@@ -46,15 +46,48 @@ def kickoff_kpi_indicator(win_rate: float, title: str, tier: str = "detail"):
     else:
         bar_color = semantic_color("threshold", "neutral")
 
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=float(win_rate),
-            title={"text": title},
-            gauge={"axis": {"range": [None, 100]}, "bar": {"color": bar_color}},
+    benchmark_traces = [
+        (45, "Baseline", "dot", "rgba(255,255,255,0.95)"),
+        (50, "Break-even", "dash", "rgba(255,255,255,0.8)"),
+        (55, "Elite", "dot", "rgba(255,255,255,0.95)"),
+    ]
+
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=[float(win_rate)],
+            y=[title],
+            orientation="h",
+            marker=dict(color=bar_color),
+            text=[f"{win_rate:.1f}%"],
+            textposition="inside",
+            insidetextanchor="middle",
+            hovertemplate="Kickoff Win Rate: %{x:.1f}%<extra></extra>",
+            name="Win Rate",
+            showlegend=False,
         )
     )
-    fig.update_layout(height=300)
+
+    for x_pos, label, dash, color in benchmark_traces:
+        fig.add_shape(
+            type="line",
+            x0=x_pos,
+            x1=x_pos,
+            y0=-0.45,
+            y1=0.45,
+            line=dict(color=color, width=2, dash=dash),
+        )
+        fig.add_annotation(
+            x=x_pos,
+            y=0.62,
+            text=label,
+            showarrow=False,
+            font=dict(size=10, color=color),
+        )
+
+    fig.update_xaxes(range=[0, 100], ticksuffix="%", title="Win Rate")
+    fig.update_yaxes(showticklabels=False)
+    fig.update_layout(height=260, barmode="overlay", margin=dict(l=20, r=20, t=60, b=30), title=title)
     return apply_chart_theme(fig, tier=tier, intent="threshold", variant="neutral")
 
 
