@@ -7,6 +7,7 @@ import plotly.graph_objects as go
 
 from constants import GOAL_HALF_W, GOAL_HEIGHT, REPLAY_FPS, TEAM_COLORS
 from charts.theme import apply_chart_theme
+from utils import format_speed
 from analytics.shot_quality import (
     COL_ON_TARGET,
     COL_TARGET_X,
@@ -322,13 +323,14 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
                         team_rows["_xg"],
                         team_rows["_xgot"],
                         team_rows["_speed"],
+                        team_rows["_speed"].map(lambda speed_uu: format_speed(speed_uu, unit="mph", precision=1)),
                     )
                 ),
                 hovertemplate=(
                     "<b>%{customdata[0]}</b><br>"
                     "t=%{customdata[1]:.1f}s | %{customdata[2]}<br>"
                     "xG %{customdata[3]:.2f} · xGOT %{customdata[4]:.2f}<br>"
-                    "Speed %{customdata[5]:.0f} uu/s<extra></extra>"
+                    "Speed %{customdata[6]}<extra></extra>"
                 ),
             )
         )
