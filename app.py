@@ -41,6 +41,7 @@ from charts.factory import (
     spatial_outcome_scatter,
 )
 from analytics.chemistry import build_season_chemistry_tables
+from analytics.partnership_recommendations import build_pair_recommendations
 from charts.win_probability import build_win_probability_chart, extract_goal_events
 from analytics.shot_quality import (
     COL_ON_TARGET,
@@ -124,6 +125,8 @@ def render_chart_signal_summary(label: str, direction: str, value: float | int |
     if value is not None and pd.notna(value):
         value_txt = f" ({value:+.2f}{unit})" if isinstance(value, (int, float, np.number)) else f" ({value}{unit})"
     st.caption(f"{prefix} signal: {label}{value_txt}.")
+
+
 
 
 def apply_dark_export_legibility(fig: go.Figure):
@@ -4000,6 +4003,20 @@ elif app_mode == "📈 Season Batch Processor":
                 st.markdown("#### Partnership Network")
                 net_fig = chemistry_network_chart(pair_chemistry_df, min_samples=min_samples, title="Partnership Network")
                 st.plotly_chart(net_fig, use_container_width=True)
+
+                recs = build_pair_recommendations(pair_chemistry_df, min_samples=min_samples)
+                st.markdown("#### Partnership Recommendations")
+                r1, r2 = st.columns(2)
+                with r1:
+                    st.metric("Recommended Aggressive Partner", recs["aggressive"]["label"])
+                    st.caption(recs["aggressive"]["detail"])
+                    st.metric("Best High-Confidence Pair", recs["high_confidence"]["label"])
+                    st.caption(recs["high_confidence"]["detail"])
+                with r2:
+                    st.metric("Recommended Stabilizer", recs["stabilizer"]["label"])
+                    st.caption(recs["stabilizer"]["detail"])
+                    st.metric("High-Upside, Low-Sample Pair (watchlist)", recs["watchlist"]["label"])
+                    st.caption(recs["watchlist"]["detail"])
 
             st.markdown("#### Top Trios")
             with st.expander("Top Trios"):
