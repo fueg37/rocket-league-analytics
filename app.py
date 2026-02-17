@@ -30,6 +30,8 @@ from utils import (
 from charts.theme import apply_chart_theme, semantic_color
 from charts.formatters import dataframe_formatter, format_metric_value, title_case_label
 from charts.factory import (
+    chemistry_network_chart,
+    chemistry_ranking_table,
     comparison_dumbbell,
     goal_mouth_scatter,
     kickoff_kpi_indicator,
@@ -38,6 +40,7 @@ from charts.factory import (
     session_composite_chart,
     spatial_outcome_scatter,
 )
+from analytics.chemistry import build_season_chemistry_tables
 from charts.win_probability import build_win_probability_chart, extract_goal_events
 from analytics.shot_quality import (
     COL_ON_TARGET,
@@ -3703,6 +3706,8 @@ elif app_mode == "📈 Season Batch Processor":
         hero_df = detect_sessions(hero_df, session_gap)
         hero_display_df = with_dashboard_speed_display(hero_df)
 
+        pair_chemistry_df, trio_chemistry_df = build_season_chemistry_tables(season)
+
         # Summary metrics
         ot_count = int(hero_df['Overtime'].sum()) if 'Overtime' in hero_df.columns else 0
         # Compute streaks
@@ -3745,7 +3750,7 @@ elif app_mode == "📈 Season Batch Processor":
         c6.metric("Current Streak", _streak_label)
         c7.metric("Best W Streak", _max_w_streak)
 
-        t1, t2, t3, t4, t8, t9, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "💡 Insights", "📊 Situational", "📊 Log", "🗓️ Sessions", "📸 Export"])
+        t1, t2, t3, t4, t8, t9, t10, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "💡 Insights", "📊 Situational", "🤝 Chemistry", "📊 Log", "🗓️ Sessions", "📸 Export"])
         with t1:
             st.subheader("Performance Trends")
             metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', SPEED_METRIC_DISPLAY, 'Luck', 'Carry_Time',
@@ -3947,6 +3952,58 @@ elif app_mode == "📈 Season Batch Processor":
                 top_metric = compare_df.set_index('Metric')[hero].sort_values(ascending=False).index[0]
                 top_val = float(compare_df.set_index('Metric').loc[top_metric, hero])
                 render_chart_signal_summary(f"Strongest normalized metric: {top_metric}", 'positive', top_val, unit=' score')
+
+            st.markdown("#### Best Partner Profile")
+            hero_pairs = pair_chemistry_df[(pair_chemistry_df['Player1'] == hero) | (pair_chemistry_df['Player2'] == hero)] if not pair_chemistry_df.empty else pd.DataFrame()
+            if hero_pairs.empty:
+                st.info("No chemistry pair data available yet for this player.")
+            else:
+                best_pair = hero_pairs.sort_values('ChemistryScore_Shrunk', ascending=False).iloc[0]
+                partner = best_pair['Player2'] if best_pair['Player1'] == hero else best_pair['Player1']
+                p1, p2, p3 = st.columns(3)
+                p1.metric("Best Partner", str(partner))
+                p2.metric("Chemistry Strength", f"{float(best_pair['ChemistryScore_Shrunk']):.3f}")
+                p3.metric("Confidence", f"{best_pair['Reliability'].title()} ({int(best_pair['Samples'])} samples)")
+
+                flags = []
+                if float(best_pair.get('ExpectedValueGain_Shrunk', 0)) >= 0.1:
+                    flags.append('Aggressive partner')
+                if float(best_pair.get('RotationalComplementarity_Shrunk', 0)) >= 0.55:
+                    flags.append('Stabilizer partner')
+                if float(best_pair.get('PossessionHandoffEfficiency_Shrunk', 0)) >= 0.55:
+                    flags.append('Transition partner')
+                if float(best_pair.get('PressureReleaseReliability_Shrunk', 0)) >= 0.5:
+                    flags.append('Pressure-release partner')
+                if not flags:
+                    flags = ['Balanced profile']
+                st.caption("Recommendation flags: " + ", ".join(flags))
+
+        with t10:
+            st.subheader("Chemistry Rankings")
+            chem_col1, chem_col2 = st.columns([1, 2])
+            with chem_col1:
+                min_samples = st.slider("Minimum pair samples", 1, 25, 4, 1, key="chem_min_samples")
+                top_n = st.slider("Top chemistry pairs", 5, 50, 20, 1, key="chem_top_n")
+            rank_df = chemistry_ranking_table(pair_chemistry_df[pair_chemistry_df['Samples'] >= min_samples] if not pair_chemistry_df.empty else pair_chemistry_df, top_n=top_n)
+            if rank_df.empty:
+                st.info("No qualifying chemistry pairs for selected sample filter.")
+            else:
+                render_dataframe(rank_df, use_container_width=True, hide_index=True)
+
+            with chem_col2:
+                net_fig = chemistry_network_chart(pair_chemistry_df, min_samples=min_samples, title="Season Chemistry Network")
+                st.plotly_chart(net_fig, use_container_width=True)
+
+            with st.expander("Top trios"):
+                if trio_chemistry_df.empty:
+                    st.info("No trio chemistry data available.")
+                else:
+                    tri = trio_chemistry_df.copy().head(top_n)
+                    tri['Trio'] = tri['Player1'].astype(str) + ' + ' + tri['Player2'].astype(str) + ' + ' + tri['Player3'].astype(str)
+                    tri['Chemistry'] = tri['ChemistryScore_Shrunk'].map(lambda v: f"{float(v):.3f}")
+                    tri['CI'] = tri.apply(lambda r: f"[{float(r['CI_Low']):.3f}, {float(r['CI_High']):.3f}]", axis=1)
+                    render_dataframe(tri[['Team', 'Trio', 'Chemistry', 'CI', 'Samples', 'Reliability']], use_container_width=True, hide_index=True)
+
         with t8:
             st.subheader("Career Insights")
             _insight_stats = ['Rating', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', 'xA', SPEED_METRIC_DISPLAY,
