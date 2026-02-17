@@ -21,7 +21,8 @@ from constants import (
 from utils import (
     build_pid_team_map, build_pid_name_map, build_player_team_map,
     get_team_players, build_player_positions,
-    frame_to_seconds, seconds_to_frame, fmt_time, format_speed, uu_per_sec_to_mph,
+    frame_to_seconds, seconds_to_frame, fmt_time, format_speed,
+    normalize_speed_uu_per_sec, uu_per_sec_to_mph,
 )
 
 from charts.theme import apply_chart_theme
@@ -929,7 +930,8 @@ def calculate_shot_data(proto, game_df, pid_team, player_map):
         if ball_pos and ball_vel:
             shot_x, shot_y, shot_z = ball_pos
             vel_x, vel_y, vel_z = ball_vel
-            speed = int(np.sqrt(vel_x ** 2 + vel_y ** 2 + vel_z ** 2))
+            raw_speed = float(np.sqrt(vel_x ** 2 + vel_y ** 2 + vel_z ** 2))
+            speed = int(round(normalize_speed_uu_per_sec(raw_speed)))
             dist_to_goal = float(np.sqrt((shot_x ** 2) + ((target_y - shot_y) ** 2)))
             shot_angle = float(np.arctan2(abs(shot_x), abs(target_y - shot_y)))
 
