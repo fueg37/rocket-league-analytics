@@ -172,6 +172,128 @@ def rolling_trend_with_wl_markers(hero_df, hero_display_df, metric: str, hero: s
     return apply_chart_theme(fig, tier="support", intent="dual_series", variant="primary")
 
 
+def coach_report_timeline_chart(
+    win_prob_df: pd.DataFrame,
+    momentum_series: pd.Series,
+    coach_report_df: pd.DataFrame,
+):
+    """Build a tactical timeline combining win probability, momentum, and coach opportunities."""
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+
+    wp = win_prob_df.copy() if win_prob_df is not None else pd.DataFrame()
+    if not wp.empty:
+        time_col = "Time" if "Time" in wp.columns else None
+        if time_col is not None:
+            wp[time_col] = pd.to_numeric(wp[time_col], errors="coerce")
+            wp_col = "WinProb" if "WinProb" in wp.columns else ("BlueWinProb" if "BlueWinProb" in wp.columns else None)
+            if wp_col is not None:
+                wp[wp_col] = pd.to_numeric(wp[wp_col], errors="coerce")
+                wp = wp[[time_col, wp_col]].dropna().sort_values(time_col)
+                if not wp.empty:
+                    wp_values = wp[wp_col].to_numpy(dtype=float)
+                    if wp_col == "BlueWinProb" and np.nanmax(wp_values) <= 1.0:
+                        wp_values = wp_values * 100.0
+                    fig.add_trace(
+                        go.Scatter(
+                            x=wp[time_col],
+                            y=wp_values,
+                            mode="lines",
+                            line=dict(color=semantic_color("dual_series", "primary"), width=3),
+                            name="Win probability",
+                            hovertemplate="Time %{x:.1f}s<br>Win probability %{y:.1f}%<extra></extra>",
+                        ),
+                        secondary_y=False,
+                    )
+
+    if momentum_series is not None and not momentum_series.empty:
+        mom = pd.to_numeric(momentum_series, errors="coerce").dropna()
+        if not mom.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=mom.index.to_numpy(dtype=float),
+                    y=mom.to_numpy(dtype=float),
+                    mode="lines",
+                    line=dict(color=semantic_color("dual_series", "secondary"), width=2, dash="dash"),
+                    name="Momentum",
+                    hovertemplate="Time %{x:.1f}s<br>Momentum %{y:.3f}<extra></extra>",
+                ),
+                secondary_y=True,
+            )
+
+    report = coach_report_df.copy() if coach_report_df is not None else pd.DataFrame()
+    if not report.empty and "Time" in report.columns:
+        report["Time"] = pd.to_numeric(report["Time"], errors="coerce")
+        report["MissedSwing"] = pd.to_numeric(report.get("MissedSwing", 0.0), errors="coerce").fillna(0.0)
+        report["Confidence"] = pd.to_numeric(report.get("Confidence", 0.0), errors="coerce").fillna(0.0)
+        report = report.dropna(subset=["Time"]).sort_values("Time")
+        if not report.empty:
+            max_missed = max(float(report["MissedSwing"].abs().max()), 1e-6)
+            report["marker_size"] = 9 + 18 * (report["MissedSwing"].abs() / max_missed)
+            report["action"] = report.get("RecommendedAction", "n/a").fillna("n/a").astype(str)
+            report["role"] = report.get("Role", "n/a").fillna("n/a").astype(str)
+            p10 = pd.to_numeric(report.get("ExpectedSwingP10", np.nan), errors="coerce")
+            p90 = pd.to_numeric(report.get("ExpectedSwingP90", np.nan), errors="coerce")
+            interval_labels = np.where(
+                p10.notna() & p90.notna(),
+                "[" + p10.round(3).astype(str) + ", " + p90.round(3).astype(str) + "]",
+                "n/a",
+            )
+            clip_key = report.get("ClipKey", "n/a").fillna("n/a").astype(str)
+
+            customdata = np.column_stack(
+                [
+                    report["action"],
+                    report["role"],
+                    interval_labels,
+                    (report["Confidence"] * 100.0).round(1),
+                    clip_key,
+                    report["MissedSwing"].round(3),
+                ]
+            )
+            marker_line = np.where(report["MissedSwing"] >= 0, "rgba(125, 238, 160, 0.95)", "rgba(255, 130, 130, 0.95)")
+            fig.add_trace(
+                go.Scatter(
+                    x=report["Time"],
+                    y=np.full(len(report), 50.0),
+                    mode="markers",
+                    name="Missed opportunities",
+                    marker=dict(
+                        size=report["marker_size"],
+                        color=report["Confidence"],
+                        colorscale="Turbo",
+                        cmin=0.0,
+                        cmax=1.0,
+                        opacity=0.92,
+                        line=dict(color=marker_line, width=2),
+                        colorbar=dict(title="Confidence", tickformat=".0%"),
+                        symbol="diamond",
+                    ),
+                    customdata=customdata,
+                    hovertemplate=(
+                        "Time %{x:.1f}s"
+                        "<br>Action %{customdata[0]}"
+                        "<br>Role %{customdata[1]}"
+                        "<br>Expected swing interval %{customdata[2]}"
+                        "<br>Confidence %{customdata[3]:.1f}%"
+                        "<br>Missed swing %{customdata[5]}"
+                        "<br>Clip %{customdata[4]}"
+                        "<extra></extra>"
+                    ),
+                ),
+                secondary_y=False,
+            )
+
+    fig.update_layout(
+        title="Coach timeline: win probability, momentum, and missed opportunities",
+        hovermode="x unified",
+        margin=dict(l=20, r=20, t=60, b=20),
+    )
+    fig.update_xaxes(title_text="Match time (s)")
+    fig.update_yaxes(title_text="Win probability (%)", range=[0, 100], secondary_y=False)
+    fig.update_yaxes(title_text="Momentum", zeroline=True, secondary_y=True)
+    return apply_chart_theme(fig, tier="hero", intent="dual_series", variant="primary")
+
+
 def session_composite_chart(summary_df):
     """Build synchronized session subplots for win-rate and rating with sample-size context."""
     ordered = summary_df.sort_values(["Session"], ascending=[True], kind="mergesort").reset_index(drop=True)
