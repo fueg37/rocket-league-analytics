@@ -130,3 +130,26 @@ def dataframe_formatter(df: pd.DataFrame) -> pd.io.formats.style.Styler:
             formatters[column] = lambda value, col=column: format_metric_value(value, col)
     return df.style.format(formatters)
 
+
+
+def reliability_badge(reliability: str | None, sample_size: int | None = None) -> str:
+    """Render compact reliability badge text for tooltips/labels."""
+    level = str(reliability or "low").lower()
+    icon = {"high": "🟢", "medium": "🟡", "low": "🔴"}.get(level, "⚪")
+    n_text = "" if sample_size is None else f" (n={int(sample_size)})"
+    return f"{icon} {level.title()}{n_text}"
+
+
+def format_confidence_interval(
+    value: Any,
+    ci_low: Any,
+    ci_high: Any,
+    metric_name: str,
+    *,
+    include_unit: bool = True,
+) -> str:
+    """Format a metric with uncertainty interval for UI surfaces."""
+    center = format_metric_value(value, metric_name, include_unit=include_unit)
+    low = format_metric_value(ci_low, metric_name, include_unit=include_unit)
+    high = format_metric_value(ci_high, metric_name, include_unit=include_unit)
+    return f"{center} [{low}, {high}]"

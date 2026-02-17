@@ -15,6 +15,8 @@ from typing import Dict, Iterable, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from analytics.contracts import flatten_metric_contract, metric_contract
+from analytics.stats_uncertainty import bootstrap_mean_interval, deterministic_seed, reliability_from_sample_size
 from constants import FIELD_HALF_Y, REPLAY_FPS
 from analytics.shot_quality import (
     COL_DIST_TO_GOAL,
@@ -46,8 +48,20 @@ CANONICAL_EVENT_COLUMNS = [
     "ShotHeight",
     "SaverDist",
     "SaveDifficultyIndex",
+    "SaveDifficultyIndex_CI_Low",
+    "SaveDifficultyIndex_CI_High",
+    "SaveDifficultyIndex_SampleSize",
+    "SaveDifficultyIndex_Reliability",
     "ExpectedSaveProb",
+    "ExpectedSaveProb_CI_Low",
+    "ExpectedSaveProb_CI_High",
+    "ExpectedSaveProb_SampleSize",
+    "ExpectedSaveProb_Reliability",
     "SaveImpact",
+    "SaveImpact_CI_Low",
+    "SaveImpact_CI_High",
+    "SaveImpact_SampleSize",
+    "SaveImpact_Reliability",
 ]
 
 CANONICAL_SUMMARY_COLUMNS = [
@@ -60,6 +74,10 @@ CANONICAL_SUMMARY_COLUMNS = [
     "Actual_Saves",
     "Total_SaveImpact",
     "Avg_SaveImpact",
+    "Avg_SaveImpact_CI_Low",
+    "Avg_SaveImpact_CI_High",
+    "Avg_SaveImpact_SampleSize",
+    "Avg_SaveImpact_Reliability",
     "HighDifficultySaves",
 ]
 
@@ -267,8 +285,10 @@ def build_save_events(
             )
 
         score = score_save(features, mode=scoring_mode)
-        events.append(
-            {
+        sdi_contract = flatten_metric_contract("SaveDifficultyIndex", metric_contract(score.save_difficulty_index, ci_low=max(0.0, score.save_difficulty_index - 0.08), ci_high=min(1.0, score.save_difficulty_index + 0.08), sample_size=1, reliability="low"))
+        exp_contract = flatten_metric_contract("ExpectedSaveProb", metric_contract(score.expected_save_prob, ci_low=max(0.0, score.expected_save_prob - 0.08), ci_high=min(1.0, score.expected_save_prob + 0.08), sample_size=1, reliability="low"))
+        impact_contract = flatten_metric_contract("SaveImpact", metric_contract(score.save_impact, ci_low=max(0.0, score.save_impact - 0.08), ci_high=min(1.0, score.save_impact + 0.08), sample_size=1, reliability="low"))
+        event_row = {
                 "Saver": saver,
                 "Team": defending_team,
                 "Frame": frame,
@@ -285,7 +305,10 @@ def build_save_events(
                 "ExpectedSaveProb": score.expected_save_prob,
                 "SaveImpact": score.save_impact,
             }
-        )
+        event_row.update(sdi_contract)
+        event_row.update(exp_contract)
+        event_row.update(impact_contract)
+        events.append(event_row)
 
     return pd.DataFrame(events, columns=CANONICAL_EVENT_COLUMNS)
 
@@ -308,6 +331,14 @@ def aggregate_save_summary(proto, save_events_df: pd.DataFrame, high_difficulty_
         total_expected = round(float(p_saves["ExpectedSaveProb"].sum()), 2) if save_events else 0.0
         total_impact = round(float(p_saves["SaveImpact"].sum()), 2) if save_events else 0.0
         avg_impact = round(float(p_saves["SaveImpact"].mean()), 3) if save_events else 0.0
+        if save_events:
+            mean_impact, impact_ci_low, impact_ci_high = bootstrap_mean_interval(
+                p_saves["SaveImpact"].tolist(),
+                seed=deterministic_seed(name, team, save_events, "save_impact"),
+            )
+        else:
+            mean_impact, impact_ci_low, impact_ci_high = 0.0, 0.0, 0.0
+        reliability = reliability_from_sample_size(save_events)
         high_difficulty_saves = int((p_saves["SaveDifficultyIndex"] >= threshold).sum()) if save_events else 0
 
         rows.append(
@@ -320,7 +351,11 @@ def aggregate_save_summary(proto, save_events_df: pd.DataFrame, high_difficulty_
                 "Total_ExpectedSaves": total_expected,
                 "Actual_Saves": save_events,
                 "Total_SaveImpact": total_impact,
-                "Avg_SaveImpact": avg_impact,
+                "Avg_SaveImpact": round(mean_impact, 3) if save_events else avg_impact,
+                "Avg_SaveImpact_CI_Low": round(impact_ci_low, 3),
+                "Avg_SaveImpact_CI_High": round(impact_ci_high, 3),
+                "Avg_SaveImpact_SampleSize": save_events,
+                "Avg_SaveImpact_Reliability": reliability,
                 "HighDifficultySaves": high_difficulty_saves,
                 # Legacy aliases for compatibility
                 "Saves_Nearby": save_events,
