@@ -25,6 +25,7 @@ from utils import (
 
 from charts.theme import apply_chart_theme
 from charts.factory import comparison_dumbbell, goal_mouth_scatter, player_rank_lollipop
+from charts.win_probability import build_win_probability_chart, extract_goal_events
 from analytics.shot_quality import (
     COL_ON_TARGET,
     COL_TARGET_X,
@@ -496,6 +497,7 @@ def calculate_win_probability(proto, game_df, pid_team):
     blue_goals.sort()
     orange_goals.sort()
     probs = []
+    score_diffs = []
 
     match_length = 300.0  # standard match length in seconds
 
@@ -503,6 +505,7 @@ def calculate_win_probability(proto, game_df, pid_team):
         b_score = sum(1 for gf in blue_goals if gf <= f)
         o_score = sum(1 for gf in orange_goals if gf <= f)
         diff = b_score - o_score
+        score_diffs.append(diff)
 
         if t >= match_length and diff == 0:
             p = 0.5
@@ -520,7 +523,7 @@ def calculate_win_probability(proto, game_df, pid_team):
             p = 1 / (1 + np.exp(-x))
         probs.append(p * 100)
 
-    return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'IsOT': is_ot})
+    return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'ScoreDiff': score_diffs, 'IsOT': is_ot})
 
 # --- 7b. WIN PROBABILITY MODEL (TRAINED) ---
 def extract_win_prob_training_data(game_df, proto, pid_team):
@@ -646,10 +649,12 @@ def calculate_win_probability_trained(proto, game_df, pid_team, model, scaler):
     ball_y_arr = ball_df['pos_y'].values if ball_df is not None and 'pos_y' in ball_df.columns else np.array([])
 
     probs = []
+    score_diffs = []
     for f, t in zip(frames, seconds):
         b_score = sum(1 for gf in blue_gf if gf <= f)
         o_score = sum(1 for gf in orange_gf if gf <= f)
         diff = b_score - o_score
+        score_diffs.append(diff)
         if t >= 300 and diff == 0:
             probs.append(50.0)
             continue
@@ -681,7 +686,7 @@ def calculate_win_probability_trained(proto, game_df, pid_team, model, scaler):
         p = model.predict_proba(X_scaled)[0][1] * 100
         probs.append(p)
 
-    return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'IsOT': is_ot}), True
+    return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'ScoreDiff': score_diffs, 'IsOT': is_ot}), True
 
 # --- 8. MATH: KICKOFFS ---
 def calculate_kickoff_stats(game, proto, game_df, player_map, match_id=""):
@@ -1977,26 +1982,21 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
     )
     return fig
 
-def build_export_win_prob(proto, game_df, pid_team, is_overtime):
+def build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=None, wp_model_used=False, pid_name_map=None):
     """Win probability chart for export."""
-    win_prob_df = calculate_win_probability(proto, game_df, pid_team)
-    fig = themed_figure()
-    if not win_prob_df.empty:
-        fig.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy',
-            mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.25)', showlegend=False))
-        fig.add_trace(go.Scatter(x=win_prob_df['Time'], y=[100]*len(win_prob_df), fill='tonexty',
-            mode='none', fillcolor='rgba(255, 153, 0, 0.25)', showlegend=False))
-        fig.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], mode='lines',
-            line=dict(color='white', width=2), name='Win Prob', showlegend=False))
-        fig.add_shape(type="line", x0=win_prob_df['Time'].min(), y0=50, x1=win_prob_df['Time'].max(), y1=50,
-            line=dict(color="gray", width=1, dash="dot"))
-    if is_overtime:
-        fig.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.5)")
-    fig.update_layout(
-        title=dict(text="Win Probability", font=dict(size=14, color='white')),
-        yaxis=dict(title=dict(text="Blue Win %", font=dict(size=10)), range=[0, 100], showgrid=False, color='#888'),
-        xaxis=dict(title=dict(text="Time (s)", font=dict(size=10)), showgrid=False, color='#888'),
-                margin=dict(l=40, r=10, t=35, b=30)
+    win_prob_df = win_prob_df if win_prob_df is not None else calculate_win_probability(proto, game_df, pid_team)
+    max_frame = game_df.index.max() if game_df is not None and not game_df.empty else None
+    goal_events = extract_goal_events(proto, pid_team, pid_name_map=pid_name_map or {}, max_frame=max_frame)
+    model_meta = {
+        "subtitle": "In-game win probability trend",
+    }
+    fig = build_win_probability_chart(
+        win_prob_df=win_prob_df,
+        is_overtime=is_overtime,
+        model_meta=model_meta,
+        events=goal_events,
+        tier="detail",
+        title_prefix="",
     )
     return fig
 
@@ -2403,16 +2403,18 @@ if app_mode == "🔍 Single Match Analysis":
             # --- A. WIN PROBABILITY CHART ---
             try:
                 if not win_prob_df.empty:
-                    fig_prob = themed_figure(tier="detail")
-                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], fill='tozeroy', mode='lines', line=dict(width=0), fillcolor='rgba(0, 123, 255, 0.2)', name='Blue Win %', showlegend=False))
-                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=[100]*len(win_prob_df), fill='tonexty', mode='none', fillcolor='rgba(255, 153, 0, 0.2)', name='Orange Win %', showlegend=False))
-                    fig_prob.add_trace(go.Scatter(x=win_prob_df['Time'], y=win_prob_df['WinProb'], mode='lines', line=dict(color='white', width=2), name='Win Probability'))
-                    fig_prob.add_shape(type="line", x0=win_prob_df['Time'].min(), y0=50, x1=win_prob_df['Time'].max(), y1=50, line=dict(color="gray", width=1, dash="dot"))
-                    if is_overtime:
-                        fig_prob.add_vline(x=300, line_dash="dash", line_color="rgba(255,204,0,0.7)", annotation_text="OT Start")
-                    fig_prob.update_layout(title="🏆 Win Probability" + (" (Overtime)" if is_overtime else ""), yaxis=dict(title="Blue Win %", range=[0, 100], showgrid=False), xaxis=dict(title="Time (Seconds)", showgrid=False), height=250, margin=dict(l=20, r=20, t=40, b=20))
+                    goal_events = extract_goal_events(proto, pid_team, pid_name_map=temp_map, max_frame=game_df.index.max())
+                    model_meta = {
+                        "subtitle": "In-game win probability trend",
+                    }
+                    fig_prob = build_win_probability_chart(
+                        win_prob_df=win_prob_df,
+                        is_overtime=is_overtime,
+                        model_meta=model_meta,
+                        events=goal_events,
+                        tier="detail",
+                    )
                     st.plotly_chart(fig_prob, use_container_width=True)
-                    st.caption("Model: " + ("Trained (logistic regression on career data)" if wp_model_used else "Hand-tuned heuristic") + ". Process 15+ replays in Season mode to train a data-driven model.")
             except Exception as e: st.error(f"Could not calculate Win Probability: {e}")
             st.divider()
 
@@ -3236,7 +3238,7 @@ if app_mode == "🔍 Single Match Analysis":
                             fig_heatmap = build_export_heatmap(game_df, heatmap_player)
                             fig_scoreboard = build_export_scoreboard(df, shot_df, is_overtime)
                             fig_xg = build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime)
-                            fig_winprob = build_export_win_prob(proto, game_df, pid_team, is_overtime)
+                            fig_winprob = build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=win_prob_df, wp_model_used=wp_model_used, pid_name_map=temp_map)
                             fig_zones = build_export_zones(df, focus_players)
                             fig_pressure = build_export_pressure(momentum_series, proto, pid_team)
 
