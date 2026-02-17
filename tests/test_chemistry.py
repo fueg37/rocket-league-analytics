@@ -3,6 +3,7 @@ import unittest
 import pandas as pd
 
 from analytics.chemistry import (
+    add_chemistry_explanations,
     build_pairwise_feature_matrix,
     build_season_chemistry_tables,
     build_trio_feature_matrix,
@@ -49,6 +50,23 @@ class ChemistryTests(unittest.TestCase):
             "sample_count",
             "expected_xgd_lift_per_match",
             "win_rate_lift_points",
+
+            "ExpectedValueGain_ContributionPct",
+            "RotationalComplementarity_ContributionPct",
+            "PossessionHandoffEfficiency_ContributionPct",
+            "PressureReleaseReliability_ContributionPct",
+            "context_score_leading",
+            "context_score_tied",
+            "context_score_trailing",
+            "context_score_defensive_third",
+            "context_score_offensive_third",
+            "context_score_high_pressure",
+            "primary_driver_label",
+            "secondary_driver_label",
+            "best_context_label",
+            "risk_context_label",
+            "primary_driver_explanation",
+            "context_usage_explanation",
         }
         self.assertTrue(required.issubset(set(out.columns)))
         self.assertTrue((out["CI_High"] >= out["CI_Low"]).all())
@@ -78,6 +96,33 @@ class ChemistryTests(unittest.TestCase):
         pair, trio = build_season_chemistry_tables(season)
         self.assertFalse(pair.empty)
         self.assertFalse(trio.empty)
+
+
+    def test_contribution_percentages_sum_to_100(self):
+        frames, events = self._streams()
+        out = build_pairwise_feature_matrix(frames, events)
+        pct_cols = [
+            "ExpectedValueGain_ContributionPct",
+            "RotationalComplementarity_ContributionPct",
+            "PossessionHandoffEfficiency_ContributionPct",
+            "PressureReleaseReliability_ContributionPct",
+        ]
+        total = out[pct_cols].sum(axis=1).round(6)
+        self.assertTrue((total == 100.0).all())
+
+    def test_low_confidence_explanations_downgrade_certainty(self):
+        df = pd.DataFrame([
+            {
+                "primary_driver_label": "Pressure Release",
+                "best_context_label": "Trailing game states",
+                "sample_count": 2,
+                "ci_low": 40.0,
+                "ci_high": 80.0,
+            }
+        ])
+        out = add_chemistry_explanations(df)
+        self.assertIn("Shows signs", out.loc[0, "primary_driver_explanation"])
+        self.assertIn("May be", out.loc[0, "context_usage_explanation"])
 
 
 if __name__ == "__main__":
