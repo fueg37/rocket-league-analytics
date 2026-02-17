@@ -52,3 +52,48 @@ _TEAM_ACCENTS: Mapping[str, str] = {
     "neutral": "#94a3b8",
 }
 TEAM_ACCENTS = MappingProxyType(dict(_TEAM_ACCENTS))
+
+OUTCOME_COLORS = MappingProxyType(
+    {
+        "win": TEAM_ACCENTS["positive"],
+        "loss": TEAM_ACCENTS["negative"],
+        "neutral": "#636efa",
+    }
+)
+
+ROLE_ZONE_PALETTES = MappingProxyType(
+    {
+        "positioning": MappingProxyType(
+            {
+                "defense": "#EF553B",
+                "midfield": "#FFA15A",
+                "offense": "#00CC96",
+            }
+        ),
+        "granular_zone": MappingProxyType(
+            {
+                "defensive_third": "#636efa",
+                "backboard": "#EF553B",
+                "midfield": "#AB63FA",
+                "offensive_third": "#00CC96",
+            }
+        ),
+    }
+)
+
+THRESHOLD_ACCENTS = MappingProxyType(
+    {
+        "positive": TEAM_ACCENTS["positive"],
+        "negative": TEAM_ACCENTS["negative"],
+        "neutral": "#ffcc00",
+    }
+)
+
+DUAL_SERIES_DEFAULTS = MappingProxyType(
+    {
+        "primary": TEAM_ACCENTS["blue"],
+        "secondary": TEAM_ACCENTS["orange"],
+        "comparison_left": "#8C9AAD",
+        "comparison_right": TEAM_ACCENTS["positive"],
+    }
+)
