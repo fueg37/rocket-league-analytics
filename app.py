@@ -136,6 +136,64 @@ def render_chart_signal_summary(label: str, direction: str, value: float | int |
 
 
 
+
+def _fmt_signed(value: float, *, precision: int = 3, scale: float = 1.0, suffix: str = "") -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return "—"
+    return f"{float(numeric) * scale:+.{precision}f}{suffix}"
+
+
+def _fmt_plain(value: float, *, precision: int = 3, scale: float = 1.0, suffix: str = "") -> str:
+    numeric = pd.to_numeric(value, errors="coerce")
+    if pd.isna(numeric):
+        return "—"
+    return f"{float(numeric) * scale:.{precision}f}{suffix}"
+
+
+def _role_metric_labels(role: str) -> dict[str, str]:
+    role_key = str(role or "").lower()
+    pressure_label = "Defensive Pressure Control" if "third" in role_key else "Challenge Pressure"
+    field_label = "Defensive-to-Offensive Field Tilt" if "third" in role_key else "Attacking Field Tilt"
+    return {
+        "PossessionBelief": "Likely Team Possession",
+        "Pressure": pressure_label,
+        "FieldPositionProxy": field_label,
+        "ProjectedValue": "Projected Possession Value (10s)",
+    }
+
+
+def _build_opportunity_comparison_grid(row: pd.Series) -> pd.DataFrame:
+    labels = _role_metric_labels(row.get("Role", ""))
+    rows = [
+        {
+            "Signal": labels["PossessionBelief"],
+            "Baseline": _fmt_plain(row.get("BaselinePossessionBelief"), precision=1, scale=100, suffix="%"),
+            "Recommended": _fmt_plain(row.get("RecommendedPossessionBelief"), precision=1, scale=100, suffix="%"),
+            "Delta": _fmt_signed(row.get("DeltaPossessionBelief"), precision=1, scale=100, suffix=" pts"),
+        },
+        {
+            "Signal": labels["Pressure"],
+            "Baseline": _fmt_plain(row.get("BaselinePressure"), precision=1, scale=100, suffix="%"),
+            "Recommended": _fmt_plain(row.get("RecommendedPressure"), precision=1, scale=100, suffix="%"),
+            "Delta": _fmt_signed(row.get("DeltaPressure"), precision=1, scale=100, suffix=" pts"),
+        },
+        {
+            "Signal": labels["FieldPositionProxy"],
+            "Baseline": _fmt_plain(row.get("BaselineFieldPositionProxy"), precision=2),
+            "Recommended": _fmt_plain(row.get("RecommendedFieldPositionProxy"), precision=2),
+            "Delta": _fmt_signed(row.get("DeltaFieldPositionProxy"), precision=2),
+        },
+        {
+            "Signal": labels["ProjectedValue"],
+            "Baseline": _fmt_plain(row.get("BaselineProjectedValue"), precision=3),
+            "Recommended": _fmt_plain(row.get("RecommendedProjectedValue"), precision=3),
+            "Delta": _fmt_signed(row.get("DeltaProjectedValue"), precision=3),
+        },
+    ]
+    return pd.DataFrame(rows)
+
+
 def apply_dark_export_legibility(fig: go.Figure):
     """Ensure export charts keep high-contrast text/grid in dark theme."""
     fig.update_layout(
@@ -3473,6 +3531,27 @@ if app_mode == "🔍 Single Match Analysis":
                 ]
                 render_dataframe(top_report[display_cols], use_container_width=True, hide_index=True)
                 st.caption("ClipKey provides frame/window lookup IDs for downstream export tooling.")
+
+                detail_labels = {
+                    idx: (
+                        f"{fmt_time(row['Time'])} • {title_case_label(str(row['Role']))} • "
+                        f"{title_case_label(str(row['RecommendedAction']).replace('_', ' '))}"
+                    )
+                    for idx, row in top_report.iterrows()
+                }
+                selected_row_idx = st.selectbox(
+                    "Inspect projected state shift",
+                    options=list(detail_labels.keys()),
+                    format_func=lambda idx: detail_labels[idx],
+                    key="coach_report_detail_select",
+                )
+                detail_row = top_report.loc[selected_row_idx]
+                with st.expander("Baseline vs recommended state", expanded=True):
+                    detail_grid = _build_opportunity_comparison_grid(detail_row)
+                    render_dataframe(detail_grid, use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"Role-aware view for {detail_row['Role']}: {detail_row['RecommendationText']}"
+                    )
 
         with t7:
             st.subheader("Composite Dashboard Export")

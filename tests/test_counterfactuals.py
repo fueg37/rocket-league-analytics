@@ -91,6 +91,18 @@ def test_action_library_filters_and_scores():
         "ExpectedSwingIntervalWidth",
         "Confidence",
         "RoleTargets",
+        "BaselinePossessionBelief",
+        "RecommendedPossessionBelief",
+        "DeltaPossessionBelief",
+        "BaselinePressure",
+        "RecommendedPressure",
+        "DeltaPressure",
+        "BaselineFieldPositionProxy",
+        "RecommendedFieldPositionProxy",
+        "DeltaFieldPositionProxy",
+        "BaselineProjectedValue",
+        "RecommendedProjectedValue",
+        "DeltaProjectedValue",
     }.issubset(scored.columns)
 
 
@@ -145,7 +157,25 @@ def test_extract_moments_and_build_report():
     rotation_summary = pd.DataFrame({"Name": ["A"], "Team": ["Blue"], "Time_1st%": [45.0], "Time_2nd%": [40.0]})
     report = build_coach_report(states, momentum, win_prob_df, rotation_timeline, rotation_summary, team="Blue", top_n=5)
     assert not report.empty
-    assert {"MissedSwing", "RecommendationText", "ClipKey", "RankScore", "ActionabilityFlag"}.issubset(report.columns)
+    assert {
+        "MissedSwing",
+        "RecommendationText",
+        "ClipKey",
+        "RankScore",
+        "ActionabilityFlag",
+        "BaselinePossessionBelief",
+        "RecommendedPossessionBelief",
+        "DeltaPossessionBelief",
+        "BaselinePressure",
+        "RecommendedPressure",
+        "DeltaPressure",
+        "BaselineFieldPositionProxy",
+        "RecommendedFieldPositionProxy",
+        "DeltaFieldPositionProxy",
+        "BaselineProjectedValue",
+        "RecommendedProjectedValue",
+        "DeltaProjectedValue",
+    }.issubset(report.columns)
 
 
 def test_build_coach_report_actionability_dedup_and_rank_deterministic(monkeypatch):
