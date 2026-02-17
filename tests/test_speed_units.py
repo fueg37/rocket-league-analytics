@@ -14,7 +14,7 @@ from analytics.shot_quality import (
     SHOT_COL_RESULT,
     SHOT_COL_TEAM,
 )
-from utils import format_speed, uu_per_sec_to_mph
+from utils import format_speed, normalize_speed_uu_per_sec, uu_per_sec_to_mph
 
 
 class SpeedUnitsTests(unittest.TestCase):
@@ -46,6 +46,11 @@ class SpeedUnitsTests(unittest.TestCase):
     def test_format_speed_falls_back_when_precision_invalid(self):
         self.assertEqual(format_speed(2200, precision="x"), "49.2 mph")
         self.assertEqual(SPEED_DISPLAY_UNIT_DEFAULT, "mph")
+
+    def test_normalize_speed_telemetry_scale(self):
+        self.assertEqual(normalize_speed_uu_per_sec(21320), 2132.0)
+        self.assertEqual(normalize_speed_uu_per_sec(3100), 3100)
+        self.assertEqual(normalize_speed_uu_per_sec(-1), 0.0)
 
     def test_goal_mouth_scatter_speed_display_uses_mph_only(self):
         shots = pd.DataFrame(

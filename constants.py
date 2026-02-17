@@ -11,6 +11,7 @@ SPEED_CANONICAL_UNIT = "uu/s"
 SPEED_DISPLAY_UNIT_DEFAULT = "mph"
 UU_PER_SEC_TO_MPH = 0.0223694
 SUPERSONIC_SPEED_UU_PER_SEC = 2200
+MAX_BALL_SPEED_UU_PER_SEC = 6000
 
 # ── Persistence ─────────────────────────────────────────────────────────
 DB_FILE = "career_stats.csv"
