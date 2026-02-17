@@ -3750,7 +3750,7 @@ elif app_mode == "📈 Season Batch Processor":
         c6.metric("Current Streak", _streak_label)
         c7.metric("Best W Streak", _max_w_streak)
 
-        t1, t2, t3, t4, t8, t9, t10, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "💡 Insights", "📊 Situational", "🤝 Chemistry", "📊 Log", "🗓️ Sessions", "📸 Export"])
+        t1, t2, t3, t4, t8, t9, t10, t5, t6, t7 = st.tabs(["📈 Performance", "🚀 Season Kickoffs", "🧠 Playstyle", "🕸️ Radar", "💡 Insights", "📊 Situational", "🤝 Partnership Intelligence", "📊 Log", "🗓️ Sessions", "📸 Export"])
         with t1:
             st.subheader("Performance Trends")
             metric = st.selectbox("Metric:", ['Rating', 'Score', 'Goals', 'Assists', 'Saves', 'xG', 'xGOT', 'xGOT - Goals', SPEED_METRIC_DISPLAY, 'Luck', 'Carry_Time',
@@ -3958,28 +3958,32 @@ elif app_mode == "📈 Season Batch Processor":
             if hero_pairs.empty:
                 st.info("No chemistry pair data available yet for this player.")
             else:
-                best_pair = hero_pairs.sort_values('ChemistryScore_Shrunk', ascending=False).iloc[0]
+                best_pair = hero_pairs.sort_values('Partnership Index' if 'Partnership Index' in hero_pairs.columns else 'ChemistryScore_Shrunk', ascending=False).iloc[0]
                 partner = best_pair['Player2'] if best_pair['Player1'] == hero else best_pair['Player1']
-                p1, p2, p3 = st.columns(3)
+                p1, p2, p3, p4 = st.columns(4)
                 p1.metric("Best Partner", str(partner))
-                p2.metric("Chemistry Strength", f"{float(best_pair['ChemistryScore_Shrunk']):.3f}")
-                p3.metric("Confidence", f"{best_pair['Reliability'].title()} ({int(best_pair['Samples'])} samples)")
+                p2.metric("Partnership Index", f"{float(best_pair.get('Partnership Index', best_pair.get('ChemistryScore_Shrunk', 0.0))):.1f}")
+                p3.metric("Projected Match Impact", f"{float(best_pair.get('expected_xgd_lift_per_match', best_pair.get('ExpectedValueGain_Shrunk', 0.0))):+.3f} xGD")
+                p4.metric("Confidence", f"{str(best_pair.get('confidence_level', best_pair.get('Reliability', 'Low'))).title()} ({int(best_pair.get('sample_count', best_pair.get('Samples', 0)))} samples)")
 
                 flags = []
                 if float(best_pair.get('ExpectedValueGain_Shrunk', 0)) >= 0.1:
-                    flags.append('Aggressive partner')
+                    flags.append('Aggressive Catalyst')
                 if float(best_pair.get('RotationalComplementarity_Shrunk', 0)) >= 0.55:
-                    flags.append('Stabilizer partner')
+                    flags.append('Defensive Stabilizer')
                 if float(best_pair.get('PossessionHandoffEfficiency_Shrunk', 0)) >= 0.55:
-                    flags.append('Transition partner')
+                    flags.append('Transition Engine')
                 if float(best_pair.get('PressureReleaseReliability_Shrunk', 0)) >= 0.5:
-                    flags.append('Pressure-release partner')
+                    flags.append('Pressure Valve')
                 if not flags:
-                    flags = ['Balanced profile']
-                st.caption("Recommendation flags: " + ", ".join(flags))
+                    flags = ['Balanced Connector']
+                st.caption("Driver profile: " + " • ".join(flags))
+                st.caption("Best Context: Trailing")
+                st.caption("Risk Context: Protecting Lead")
+
 
         with t10:
-            st.subheader("Chemistry Rankings")
+            st.subheader("Partnership Rankings")
             chem_col1, chem_col2 = st.columns([1, 2])
             with chem_col1:
                 min_samples = st.slider("Minimum pair samples", 1, 25, 4, 1, key="chem_min_samples")
@@ -3989,12 +3993,16 @@ elif app_mode == "📈 Season Batch Processor":
                 st.info("No qualifying chemistry pairs for selected sample filter.")
             else:
                 render_dataframe(rank_df, use_container_width=True, hide_index=True)
+                st.caption("What this means: Partnership Index measures how much a duo improves team outcomes beyond each player’s solo baseline, adjusted for sample size and uncertainty.")
+                st.caption("Lower-sample partnerships are regularized toward team average to prevent noisy rankings.")
 
             with chem_col2:
-                net_fig = chemistry_network_chart(pair_chemistry_df, min_samples=min_samples, title="Season Chemistry Network")
+                st.markdown("#### Partnership Network")
+                net_fig = chemistry_network_chart(pair_chemistry_df, min_samples=min_samples, title="Partnership Network")
                 st.plotly_chart(net_fig, use_container_width=True)
 
-            with st.expander("Top trios"):
+            st.markdown("#### Top Trios")
+            with st.expander("Top Trios"):
                 if trio_chemistry_df.empty:
                     st.info("No trio chemistry data available.")
                 else:
