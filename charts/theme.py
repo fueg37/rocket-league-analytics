@@ -4,7 +4,41 @@ from __future__ import annotations
 
 from typing import Any
 
-from .tokens import BACKGROUNDS, GRID_OPACITY, SPACING, TEAM_ACCENTS, TEXT, TYPOGRAPHY
+from .tokens import (
+    BACKGROUNDS,
+    DUAL_SERIES_DEFAULTS,
+    GRID_OPACITY,
+    OUTCOME_COLORS,
+    ROLE_ZONE_PALETTES,
+    SPACING,
+    TEAM_ACCENTS,
+    TEXT,
+    THRESHOLD_ACCENTS,
+    TYPOGRAPHY,
+)
+
+
+
+
+def semantic_color(intent: str, variant: str = "default") -> str:
+    """Resolve semantic chart colors by intent/variant names."""
+    key = (intent or "").lower()
+    var = (variant or "default").lower()
+
+    if key == "outcome":
+        return OUTCOME_COLORS.get(var, OUTCOME_COLORS["neutral"])
+    if key == "threshold":
+        return THRESHOLD_ACCENTS.get(var, THRESHOLD_ACCENTS["neutral"])
+    if key == "dual_series":
+        return DUAL_SERIES_DEFAULTS.get(var, TEXT.primary)
+    if key == "role_zone":
+        if ":" in var:
+            palette, token = var.split(":", 1)
+            palette_map = ROLE_ZONE_PALETTES.get(palette, {})
+            return palette_map.get(token, TEXT.primary)
+        return TEXT.primary
+
+    return TEAM_ACCENTS.get(key, TEXT.primary)
 
 PRESETS = {
     "hero": {
@@ -25,10 +59,10 @@ PRESETS = {
 }
 
 
-def apply_chart_theme(fig: Any, tier: str = "support", intent: str | None = None):
+def apply_chart_theme(fig: Any, tier: str = "support", intent: str | None = None, variant: str = "default"):
     """Apply app-wide defaults for Plotly figures."""
     preset = PRESETS.get(tier, PRESETS["support"])
-    accent = TEAM_ACCENTS.get((intent or "").lower(), TEXT.primary)
+    accent = semantic_color((intent or ""), variant=variant)
 
     fig.update_layout(
         font=dict(family=TYPOGRAPHY.family, size=TYPOGRAPHY.body, color=TEXT.primary),

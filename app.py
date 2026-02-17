@@ -25,8 +25,16 @@ from utils import (
     normalize_speed_uu_per_sec, uu_per_sec_to_mph,
 )
 
-from charts.theme import apply_chart_theme
-from charts.factory import comparison_dumbbell, goal_mouth_scatter, player_rank_lollipop
+from charts.theme import apply_chart_theme, semantic_color
+from charts.factory import (
+    comparison_dumbbell,
+    goal_mouth_scatter,
+    kickoff_kpi_indicator,
+    player_rank_lollipop,
+    rolling_trend_with_wl_markers,
+    session_composite_chart,
+    spatial_outcome_scatter,
+)
 from charts.win_probability import build_win_probability_chart, extract_goal_events
 from analytics.shot_quality import (
     COL_ON_TARGET,
@@ -52,14 +60,14 @@ from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_V
 logger = logging.getLogger(__name__)
 
 
-def themed_figure(*args, tier="support", intent=None, **kwargs):
+def themed_figure(*args, tier="support", intent=None, variant="default", **kwargs):
     fig = go.Figure(*args, **kwargs)
-    return apply_chart_theme(fig, tier=tier, intent=intent)
+    return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
 
 
-def themed_px(factory, *args, tier="support", intent=None, **kwargs):
+def themed_px(factory, *args, tier="support", intent=None, variant="default", **kwargs):
     fig = factory(*args, **kwargs)
-    return apply_chart_theme(fig, tier=tier, intent=intent)
+    return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
 
 
 SPEED_METRIC_RAW = "Avg Speed"
@@ -2310,26 +2318,19 @@ if app_mode == "🔍 Single Match Analysis":
                         wins = len(disp_kickoff[disp_kickoff['Result'] == 'Win'])
                         total = len(disp_kickoff)
                         win_rate = int((wins/total)*100) if total > 0 else 0
-                        fig = themed_figure(go.Indicator(
-                            mode = "gauge+number", value = win_rate,
-                            title = {'text': "Kickoff Win Rate (Selected)"},
-                            gauge = {'axis': {'range': [None, 100]}, 'bar': {'color': "#00cc96"}}
-                        ))
-                        fig.update_layout(height=300)
+                        fig = kickoff_kpi_indicator(win_rate=win_rate, title="Kickoff Win Rate (Selected)")
                         st.plotly_chart(fig, use_container_width=True)
                     with col_k2:
-
-                        color_map = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#AB63FA"}
-                        fig = themed_figure()
-                        for outcome, color in color_map.items():
-                            subset = disp_kickoff[disp_kickoff['Result'] == outcome]
-                            if not subset.empty:
-                                fig.add_trace(go.Scatter(
-                                    x=subset['End_X'], y=subset['End_Y'], mode='markers',
-                                    marker=dict(size=12, color=color, opacity=0.85, line=dict(width=1, color='white')),
-                                    name=outcome, text=subset['Player'],
-                                    hovertemplate="%{text}<br>Result: " + outcome + "<extra></extra>"
-                                ))
+                        fig = spatial_outcome_scatter(
+                            disp_kickoff,
+                            x_col="End_X",
+                            y_col="End_Y",
+                            outcome_col="Result",
+                            label_col="Player",
+                            title="Kickoff Outcomes",
+                            intent="outcome",
+                            variant="neutral",
+                        )
                         fig.update_layout(get_field_layout("Kickoff Outcomes"))
                         fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color='white')))
                         st.plotly_chart(fig, use_container_width=True)
@@ -3619,41 +3620,26 @@ elif app_mode == "📈 Season Batch Processor":
                 rolling_window = st.slider("Rolling Average Window", 3, 20, 10, 1, key="roll_window")
             with t_opt2:
                 show_wl_markers = st.checkbox("Color by Win/Loss", value=True, key="wl_markers")
-            fig = themed_figure()
-            fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=hero_display_df[metric], name=hero,
-                line=dict(color='#007bff', width=2, dash='dot' if show_wl_markers else 'solid'),
-                opacity=0.4 if show_wl_markers else 1.0))
-            # Rolling average
-            if len(hero_df) >= rolling_window:
-                rolling = hero_display_df[metric].rolling(window=rolling_window, min_periods=1).mean()
-                fig.add_trace(go.Scatter(x=hero_df['GameNum'], y=rolling, name=f'{hero} ({rolling_window}g avg)',
-                    line=dict(color='#007bff', width=3)))
-            # Win/Loss colored markers
-            if show_wl_markers and 'Won' in hero_df.columns:
-                wins_display = hero_display_df[hero_df['Won'] == True]
-                losses_display = hero_display_df[hero_df['Won'] == False]
-                if not wins_display.empty:
-                    fig.add_trace(go.Scatter(x=wins_display['GameNum'], y=wins_display[metric], mode='markers',
-                        marker=dict(size=8, color='#00cc96', symbol='circle'), name='Win'))
-                if not losses_display.empty:
-                    fig.add_trace(go.Scatter(x=losses_display['GameNum'], y=losses_display[metric], mode='markers',
-                        marker=dict(size=8, color='#EF553B', symbol='x'), name='Loss'))
+            mate_display_df = None
             if teammate != "None":
                 mate_df = season[season['Name'] == teammate].reset_index(drop=True)
                 mate_df['GameNum'] = mate_df.index + 1
                 mate_display_df = with_dashboard_speed_display(mate_df)
-                if metric in mate_display_df.columns:
-                    fig.add_trace(go.Scatter(x=mate_display_df['GameNum'], y=mate_display_df[metric], name=teammate, line=dict(color='#ff9900', width=2, dash='dot')))
-                    if len(mate_display_df) >= rolling_window:
-                        mate_rolling = mate_display_df[metric].rolling(window=rolling_window, min_periods=1).mean()
-                        fig.add_trace(go.Scatter(x=mate_df['GameNum'], y=mate_rolling, name=f'{teammate} ({rolling_window}g avg)',
-                            line=dict(color='#ff9900', width=3)))
-            # Mark OT games
+
+            fig = rolling_trend_with_wl_markers(
+                hero_df=hero_df,
+                hero_display_df=hero_display_df,
+                metric=metric,
+                hero=hero,
+                rolling_window=rolling_window,
+                show_wl_markers=show_wl_markers,
+                teammate_df=mate_display_df if (teammate != "None" and mate_display_df is not None and metric in mate_display_df.columns) else None,
+                teammate_name=teammate if (teammate != "None" and mate_display_df is not None and metric in mate_display_df.columns) else None,
+            )
             if 'Overtime' in hero_df.columns:
                 ot_games_display = hero_display_df[hero_df['Overtime'] == True]
                 if not ot_games_display.empty:
-                    fig.add_trace(go.Scatter(x=ot_games_display['GameNum'], y=ot_games_display[metric], mode='markers', marker=dict(size=12, color='#ffcc00', symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
-            fig.update_layout(title=f"{metric} over Time", yaxis_title=metric)
+                    fig.add_trace(go.Scatter(x=ot_games_display['GameNum'], y=ot_games_display[metric], mode='markers', marker=dict(size=12, color=semantic_color('threshold', 'neutral'), symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
             st.plotly_chart(fig, use_container_width=True)
         with t2:
             st.subheader("Season Kickoff Meta")
@@ -3663,10 +3649,7 @@ elif app_mode == "📈 Season Batch Processor":
                 with c_a:
                     wins = len(hero_k[hero_k['Result'] == 'Win'])
                     win_rate = int((wins/len(hero_k))*100) if len(hero_k) > 0 else 0
-                    fig = themed_figure(go.Indicator(
-                        mode = "gauge+number", value = win_rate, title = {'text': f"{hero} Win Rate"},
-                        gauge = {'axis': {'range': [None, 100]}, 'bar': {'color': "#00cc96"}}
-                    ))
+                    fig = kickoff_kpi_indicator(win_rate=win_rate, title=f"{hero} Win Rate")
                     fig.update_layout(height=250)
                     st.plotly_chart(fig, use_container_width=True)
                 with c_b:
@@ -4147,16 +4130,7 @@ elif app_mode == "📈 Season Batch Processor":
                 summary_df = pd.DataFrame(session_summary)
                 st.dataframe(summary_df.style.background_gradient(subset=['Win Rate %'], cmap='RdYlGn', vmin=0, vmax=100), use_container_width=True, hide_index=True)
                 # Session performance chart
-                fig_sess = themed_figure(tier="hero")
-                fig_sess.add_trace(go.Bar(x=summary_df['Session'], y=summary_df['Win Rate %'], name='Win Rate %', marker_color='#00cc96'))
-                fig_sess.add_trace(go.Scatter(x=summary_df['Session'], y=summary_df['Avg Rating'], name='Avg Rating', yaxis='y2', line=dict(color='#ff9900', width=3), mode='lines+markers'))
-                fig_sess.update_layout(
-                    title="Session Performance Overview",
-                    xaxis=dict(title="Session #", dtick=1),
-                    yaxis=dict(title="Win Rate %", range=[0, 100]),
-                    yaxis2=dict(title="Avg Rating", overlaying='y', side='right', range=[0, 10]),
-                    legend=dict(x=0.01, y=0.99)
-                )
+                fig_sess = session_composite_chart(summary_df)
                 st.plotly_chart(fig_sess, use_container_width=True)
             else:
                 st.info("No session data available. Upload replays to generate sessions.")
