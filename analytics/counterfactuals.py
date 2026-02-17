@@ -205,10 +205,21 @@ def score_candidate_actions(
     rollout_count = max(1, int(rollout_count))
 
     baseline_value = predict_state_value(base, model=value_model).get("10s", 0.0)
+    baseline_projected_value = baseline_value * (1 if team == "Blue" else -1)
     wp_baseline = _local_wp(win_prob_df, reference_time)
+    baseline_pressure = float(np.clip(float(base.get(pressure_col, 0.0)), 0.0, 1.0))
+    baseline_possession = float(np.clip(float(base.get(poss_col, 0.5)), 0.0, 1.0))
+    attack_sign = 1 if team == "Blue" else -1
+    baseline_field_position = float(
+        np.clip((float(base.get("BallPosY", 0.0)) * attack_sign) / max(float(FIELD_HALF_Y), 1.0), -1.0, 1.0)
+    )
 
     for action in actions:
         swings: list[float] = []
+        post_pressures: list[float] = []
+        post_possessions: list[float] = []
+        post_field_positions: list[float] = []
+        post_projected_values: list[float] = []
         source_counts = {"possession_value_graph": 0, "win_probability": 0}
         for _ in range(rollout_count):
             post = base.copy()
@@ -218,7 +229,6 @@ def score_candidate_actions(
             pressure_sigma = float(np.clip(0.02 + priors.accel_p95 / 14000.0, 0.015, 0.12))
             possession_sigma = float(np.clip(0.015 + priors.boost_usage_p95 / 700.0, 0.01, 0.1))
 
-            attack_sign = 1 if team == "Blue" else -1
             y_delta = action.attack_bias * FIELD_HALF_Y * 0.2 * attack_sign + rng.normal(0.0, position_sigma)
             x_delta = rng.normal(0.0, position_sigma * 0.35)
             pressure_delta = action.pressure_delta + rng.normal(0.0, pressure_sigma)
@@ -228,8 +238,12 @@ def score_candidate_actions(
             post["BallPosX"] = float(np.clip(float(post.get("BallPosX", 0.0)) + x_delta, -FIELD_HALF_X, FIELD_HALF_X))
             post[pressure_col] = float(np.clip(float(post.get(pressure_col, 0.0)) + pressure_delta, 0.0, 1.0))
             post[poss_col] = float(np.clip(float(post.get(poss_col, 0.5)) + possession_delta, 0.0, 1.0))
+            post_field_position = float(
+                np.clip((float(post.get("BallPosY", 0.0)) * attack_sign) / max(float(FIELD_HALF_Y), 1.0), -1.0, 1.0)
+            )
 
             model_value = predict_state_value(post, model=value_model).get("10s", baseline_value)
+            projected_value = float(model_value * attack_sign)
             model_swing = (model_value - baseline_value) * (1 if team == "Blue" else -1)
 
             wp_future = _local_wp(win_prob_df, reference_time + action.constraint.duration_s)
@@ -240,6 +254,11 @@ def score_candidate_actions(
             else:
                 swings.append(float(0.75 * model_swing + 0.25 * wp_swing))
                 source_counts["possession_value_graph"] += 1
+
+            post_pressures.append(float(post[pressure_col]))
+            post_possessions.append(float(post[poss_col]))
+            post_field_positions.append(post_field_position)
+            post_projected_values.append(projected_value)
 
         swings_arr = np.asarray(swings, dtype=float)
         expected_mean = float(np.mean(swings_arr))
@@ -265,6 +284,18 @@ def score_candidate_actions(
                 "Confidence": confidence,
                 "RoleTargets": ", ".join(action.role_targets),
                 "ModelSource": source,
+                "BaselinePossessionBelief": baseline_possession,
+                "RecommendedPossessionBelief": float(np.mean(post_possessions)) if post_possessions else baseline_possession,
+                "DeltaPossessionBelief": (float(np.mean(post_possessions)) - baseline_possession) if post_possessions else 0.0,
+                "BaselinePressure": baseline_pressure,
+                "RecommendedPressure": float(np.mean(post_pressures)) if post_pressures else baseline_pressure,
+                "DeltaPressure": (float(np.mean(post_pressures)) - baseline_pressure) if post_pressures else 0.0,
+                "BaselineFieldPositionProxy": baseline_field_position,
+                "RecommendedFieldPositionProxy": float(np.mean(post_field_positions)) if post_field_positions else baseline_field_position,
+                "DeltaFieldPositionProxy": (float(np.mean(post_field_positions)) - baseline_field_position) if post_field_positions else 0.0,
+                "BaselineProjectedValue": baseline_projected_value,
+                "RecommendedProjectedValue": float(np.mean(post_projected_values)) if post_projected_values else baseline_projected_value,
+                "DeltaProjectedValue": (float(np.mean(post_projected_values)) - baseline_projected_value) if post_projected_values else 0.0,
             }
         )
     return pd.DataFrame(rows).sort_values("ExpectedSwing", ascending=False).reset_index(drop=True)
@@ -322,6 +353,18 @@ def build_coach_report(
                 "Role": role,
                 "RecommendationText": _recommendation_text(role, str(best["Action"])),
                 "ModelSource": str(best["ModelSource"]),
+                "BaselinePossessionBelief": float(best.get("BaselinePossessionBelief", np.nan)),
+                "RecommendedPossessionBelief": float(best.get("RecommendedPossessionBelief", np.nan)),
+                "DeltaPossessionBelief": float(best.get("DeltaPossessionBelief", np.nan)),
+                "BaselinePressure": float(best.get("BaselinePressure", np.nan)),
+                "RecommendedPressure": float(best.get("RecommendedPressure", np.nan)),
+                "DeltaPressure": float(best.get("DeltaPressure", np.nan)),
+                "BaselineFieldPositionProxy": float(best.get("BaselineFieldPositionProxy", np.nan)),
+                "RecommendedFieldPositionProxy": float(best.get("RecommendedFieldPositionProxy", np.nan)),
+                "DeltaFieldPositionProxy": float(best.get("DeltaFieldPositionProxy", np.nan)),
+                "BaselineProjectedValue": float(best.get("BaselineProjectedValue", np.nan)),
+                "RecommendedProjectedValue": float(best.get("RecommendedProjectedValue", np.nan)),
+                "DeltaProjectedValue": float(best.get("DeltaProjectedValue", np.nan)),
                 "ClipKey": f"frame:{int(m.Frame)}|window:{int(m.WindowStartFrame)}-{int(m.WindowEndFrame)}",
             }
         )
