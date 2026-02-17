@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 
 from constants import GOAL_HALF_W, GOAL_HEIGHT, REPLAY_FPS, TEAM_COLORS
 from charts.theme import apply_chart_theme, semantic_color
@@ -125,17 +126,63 @@ def rolling_trend_with_wl_markers(hero_df, hero_display_df, metric: str, hero: s
 
 
 def session_composite_chart(summary_df):
-    """Build win-rate + average-rating dual-axis session composite chart."""
-    fig = go.Figure()
-    fig.add_trace(go.Bar(x=summary_df["Session"], y=summary_df["Win Rate %"], name="Win Rate %", marker_color=semantic_color("outcome", "win")))
-    fig.add_trace(go.Scatter(x=summary_df["Session"], y=summary_df["Avg Rating"], name="Avg Rating", yaxis="y2", line=dict(color=semantic_color("dual_series", "secondary"), width=3), mode="lines+markers"))
+    """Build synchronized session subplots for win-rate and rating with sample-size context."""
+    ordered = summary_df.sort_values(["Session"], ascending=[True], kind="mergesort").reset_index(drop=True)
+
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        row_heights=[0.55, 0.45],
+        subplot_titles=("Win Rate %", "Avg Rating"),
+    )
+
+    hover_base = (
+        "Session %{x}<br>"
+        "Games per Session: %{customdata[0]}<br>"
+    )
+
+    fig.add_trace(
+        go.Bar(
+            x=ordered["Session"],
+            y=ordered["Win Rate %"],
+            name="Win Rate %",
+            marker_color=semantic_color("outcome", "win"),
+            text=ordered["Games per Session"].map(lambda v: f"n={int(v)}"),
+            textposition="outside",
+            cliponaxis=False,
+            customdata=ordered[["Games per Session"]],
+            hovertemplate=hover_base + "Win Rate %: %{y:.1f}%<extra></extra>",
+        ),
+        row=1,
+        col=1,
+    )
+
+    fig.add_trace(
+        go.Scatter(
+            x=ordered["Session"],
+            y=ordered["Avg Rating"],
+            name="Avg Rating",
+            mode="lines+markers",
+            line=dict(color=semantic_color("dual_series", "secondary"), width=3),
+            marker=dict(size=8),
+            customdata=ordered[["Games per Session"]],
+            hovertemplate=hover_base + "Avg Rating: %{y:.2f}<extra></extra>",
+        ),
+        row=2,
+        col=1,
+    )
+
     fig.update_layout(
         title="Session Performance Overview",
-        xaxis=dict(title="Session #", dtick=1),
-        yaxis=dict(title="Win Rate %", range=[0, 100]),
-        yaxis2=dict(title="Avg Rating", overlaying="y", side="right", range=[0, 10]),
-        legend=dict(x=0.01, y=0.99),
+        legend=dict(x=0.01, y=1.02, orientation="h"),
+        bargap=0.25,
     )
+    fig.update_xaxes(title="Session", type="category", categoryorder="array", categoryarray=ordered["Session"].tolist(), row=2, col=1)
+    fig.update_yaxes(title="Win Rate %", range=[0, 100], row=1, col=1)
+    fig.update_yaxes(title="Avg Rating", rangemode="tozero", row=2, col=1)
+
     return apply_chart_theme(fig, tier="hero", intent="dual_series", variant="primary")
 
 
