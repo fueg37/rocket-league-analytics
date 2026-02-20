@@ -12,6 +12,7 @@ from analytics.contracts import flatten_metric_contract, metric_contract
 from analytics.stats_uncertainty import bayesian_binomial_interval, deterministic_seed, reliability_from_sample_size
 from charts.formatters import reliability_badge
 from charts.theme import apply_chart_theme
+from charts.tokens import GLOW
 from constants import REPLAY_FPS, TEAM_COLORS
 
 
@@ -165,7 +166,7 @@ def build_win_probability_chart(
     score_diff = (
         pd.to_numeric(contract_df.get("ScoreDiff", 0), errors="coerce").fillna(0).to_numpy(dtype=float)
     )
-    probs = _smooth_probability(probs_raw, window=5)
+    probs = _smooth_probability(probs_raw, window=7)
     ci_low = pd.to_numeric(contract_df.get("WinProb_CI_Low"), errors="coerce").fillna(pd.Series(probs_raw)).to_numpy(dtype=float)
     ci_high = pd.to_numeric(contract_df.get("WinProb_CI_High"), errors="coerce").fillna(pd.Series(probs_raw)).to_numpy(dtype=float)
 
@@ -178,42 +179,49 @@ def build_win_probability_chart(
     blue_color = TEAM_COLORS["Blue"]["primary"]
     orange_color = TEAM_COLORS["Orange"]["primary"]
 
-    # Toss-up confidence band
+    # Comfortable-lead threshold bands (60%+ Blue, 40%- Orange).
+    t_min, t_max = float(times.min()), float(times.max())
+    fig.add_shape(
+        type="rect", x0=t_min, x1=t_max, y0=60, y1=100,
+        fillcolor="rgba(59,130,246,0.07)", line=dict(width=0), layer="below",
+    )
+    fig.add_shape(
+        type="rect", x0=t_min, x1=t_max, y0=0, y1=40,
+        fillcolor="rgba(251,146,60,0.07)", line=dict(width=0), layer="below",
+    )
+    # Threshold label lines.
+    for y_val, label, color in ((60, "Blue Lead", "rgba(59,130,246,0.35)"), (40, "Orange Lead", "rgba(251,146,60,0.35)")):
+        fig.add_shape(
+            type="line", x0=t_min, x1=t_max, y0=y_val, y1=y_val,
+            line=dict(color=color, width=1, dash="dot"),
+        )
+        fig.add_annotation(
+            x=t_min, y=y_val, text=label, showarrow=False,
+            xanchor="left", yshift=6,
+            font=dict(size=9, color=color),
+        )
+
+    # Toss-up confidence band (45–55).
     fig.add_shape(
         type="rect",
-        x0=float(times.min()),
-        x1=float(times.max()),
-        y0=45,
-        y1=55,
+        x0=t_min, x1=t_max, y0=45, y1=55,
         fillcolor="rgba(148,163,184,0.10)",
         line=dict(width=0),
         layer="below",
     )
 
-    # Uncertainty ribbon and threshold-centered fill for directional control.
-
+    # Uncertainty ribbon and threshold-centered fill for directional conviction.
     fig.add_trace(
         go.Scatter(
-            x=times,
-            y=ci_high,
-            mode="lines",
-            line=dict(width=0),
-            hoverinfo="skip",
-            showlegend=False,
-            name="CI High",
+            x=times, y=ci_high, mode="lines", line=dict(width=0),
+            hoverinfo="skip", showlegend=False, name="CI High",
         )
     )
     fig.add_trace(
         go.Scatter(
-            x=times,
-            y=ci_low,
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(148,163,184,0.18)",
-            hoverinfo="skip",
-            showlegend=True,
-            name="Confidence Band",
+            x=times, y=ci_low, mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor="rgba(148,163,184,0.15)",
+            hoverinfo="skip", showlegend=True, name="Confidence Band",
         )
     )
     base = np.full_like(probs, 50.0)
@@ -222,27 +230,17 @@ def build_win_probability_chart(
     fig.add_trace(go.Scatter(x=times, y=base, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
     fig.add_trace(
         go.Scatter(
-            x=times,
-            y=above,
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(0,123,255,0.16)",
-            hoverinfo="skip",
-            showlegend=False,
+            x=times, y=above, mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor="rgba(59,130,246,0.22)",
+            hoverinfo="skip", showlegend=False,
         )
     )
     fig.add_trace(go.Scatter(x=times, y=base, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
     fig.add_trace(
         go.Scatter(
-            x=times,
-            y=below,
-            mode="lines",
-            line=dict(width=0),
-            fill="tonexty",
-            fillcolor="rgba(255,153,0,0.16)",
-            hoverinfo="skip",
-            showlegend=False,
+            x=times, y=below, mode="lines", line=dict(width=0),
+            fill="tonexty", fillcolor="rgba(251,146,60,0.22)",
+            hoverinfo="skip", showlegend=False,
         )
     )
 
@@ -263,7 +261,7 @@ def build_win_probability_chart(
                 x=x_seg,
                 y=y_seg,
                 mode="lines",
-                line=dict(color=color, width=3, shape="spline", smoothing=0.55),
+                line=dict(color=color, width=3, shape="spline", smoothing=1.3),
                 name=name,
                 legendgroup=name,
                 customdata=customdata,
@@ -299,24 +297,29 @@ def build_win_probability_chart(
             layer="below",
         )
 
-    # Goal event layer: short top stems to avoid full-chart clutter.
+    # Goal event layer: stem + glow ring + star marker.
     for evt in events or []:
-        color = blue_color if evt.get("team") == "Blue" else orange_color
+        team = evt.get("team", "Blue")
+        color = blue_color if team == "Blue" else orange_color
+        glow = GLOW.blue if team == "Blue" else GLOW.orange
         x = float(evt.get("time", 0))
         fig.add_shape(
-            type="line",
-            x0=x,
-            x1=x,
-            y0=84,
-            y1=100,
-            line=dict(color=color, width=1, dash="dot"),
+            type="line", x0=x, x1=x, y0=82, y1=100,
+            line=dict(color=color, width=1.5, dash="dot"),
         )
+        # Glow halo behind the star.
         fig.add_trace(
             go.Scatter(
-                x=[x],
-                y=[100],
-                mode="markers",
-                marker=dict(size=8, symbol="diamond", color=color, line=dict(color="white", width=1)),
+                x=[x], y=[100], mode="markers",
+                marker=dict(size=20, color=glow, line=dict(width=0)),
+                hoverinfo="skip", showlegend=False,
+            )
+        )
+        # Star marker.
+        fig.add_trace(
+            go.Scatter(
+                x=[x], y=[100], mode="markers",
+                marker=dict(size=12, symbol="star", color=color, line=dict(color="white", width=1.5)),
                 name=evt.get("label", "Goal"),
                 showlegend=False,
                 hovertemplate=f"{evt.get('label', 'Goal')}<br>t={x:.1f}s<extra></extra>",

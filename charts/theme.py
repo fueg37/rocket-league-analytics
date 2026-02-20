@@ -4,10 +4,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import plotly.graph_objects as go
+
 from .tokens import (
     BACKGROUNDS,
     DUAL_SERIES_DEFAULTS,
+    EMPHASIS_ACCENT,
+    GLOW,
     GRID_OPACITY,
+    HEATMAP_COLORSCALES,
     OUTCOME_COLORS,
     ROLE_ZONE_PALETTES,
     SPACING,
@@ -37,8 +42,60 @@ def semantic_color(intent: str, variant: str = "default") -> str:
             palette_map = ROLE_ZONE_PALETTES.get(palette, {})
             return palette_map.get(token, TEXT.primary)
         return TEXT.primary
+    if key == "glow":
+        # variant = "win" | "loss" | "blue" | "orange" | "neutral" | "emphasis" | "gold" | "ball"
+        return getattr(GLOW, var, GLOW.neutral)
+    if key == "emphasis":
+        return EMPHASIS_ACCENT
 
     return TEAM_ACCENTS.get(key, TEXT.primary)
+
+
+def team_heatmap_colorscale(team: str) -> list:
+    """Return a team-aware Plotly colorscale list for density heatmaps.
+
+    Args:
+        team: "Blue", "Orange", or any other value for a neutral violet scale.
+    """
+    key = team.lower() if team else "neutral"
+    return HEATMAP_COLORSCALES.get(key, HEATMAP_COLORSCALES["neutral"])
+
+
+def add_glow_layer(
+    fig: Any,
+    x: list | Any,
+    y: list | Any,
+    glow_color: str,
+    size: int = 20,
+    row: int | None = None,
+    col: int | None = None,
+) -> Any:
+    """Add a semi-transparent radial glow behind scatter markers.
+
+    Inserts a larger, translucent circle trace *before* the primary markers
+    so it renders beneath them, creating a soft halo effect.
+
+    Args:
+        fig: Plotly Figure to mutate.
+        x, y: Coordinate arrays matching the primary trace.
+        glow_color: RGBA string from GLOW palette.
+        size: Diameter of the glow circle in pixels (default 20).
+        row/col: Subplot row/col if using make_subplots.
+    """
+    kwargs: dict[str, Any] = dict(
+        x=x,
+        y=y,
+        mode="markers",
+        marker=dict(size=size, color=glow_color, line=dict(width=0)),
+        hoverinfo="skip",
+        showlegend=False,
+    )
+    if row is not None and col is not None:
+        fig.add_trace(go.Scatter(**kwargs), row=row, col=col)
+    else:
+        fig.add_trace(go.Scatter(**kwargs))
+    return fig
+
 
 PRESETS = {
     "hero": {
@@ -80,7 +137,11 @@ def apply_chart_theme(fig: Any, tier: str = "support", intent: str | None = None
         hoverlabel=dict(
             bgcolor=BACKGROUNDS.elevated,
             bordercolor=BACKGROUNDS.elevated,
-            font=dict(color=TEXT.primary, size=TYPOGRAPHY.annotation),
+            font=dict(
+                color=TEXT.primary,
+                size=TYPOGRAPHY.annotation,
+                family=TYPOGRAPHY.family,
+            ),
         ),
     )
 
