@@ -2912,8 +2912,119 @@ def build_export_pressure(momentum_series, proto, pid_team):
     )
     return fig
 
+
+def _normalized_action_status(score: float) -> str:
+    """Normalize action-health scores to a shared status vocabulary."""
+    bounded = float(np.clip(score, 0.0, 1.0))
+    if bounded >= 0.67:
+        return "Strong"
+    if bounded >= 0.34:
+        return "Stable"
+    return "Improve"
+
+
+def _coach_role_action_priority_actions(coach_report_df: pd.DataFrame, limit: int = 4) -> list[tuple[str, str]]:
+    """Derive action rows from coach role/action aggregates when available."""
+    if coach_report_df is None or coach_report_df.empty:
+        return []
+    if not {"Role", "Action"}.issubset(coach_report_df.columns):
+        return []
+
+    report = coach_report_df.copy()
+    if "MissedSwing" in report.columns:
+        report["MissedSwing"] = pd.to_numeric(report["MissedSwing"], errors="coerce").fillna(0.0)
+        grouped = (
+            report.groupby(["Role", "Action"], as_index=False)
+            .agg(MissedSwing=("MissedSwing", "sum"), Events=("Action", "count"))
+            .sort_values(["Events", "MissedSwing"], ascending=[False, True])
+        )
+        grouped["score"] = 0.5 + 0.45 * np.tanh(grouped["MissedSwing"] / 1.5)
+    else:
+        grouped = (
+            report.groupby(["Role", "Action"], as_index=False)
+            .agg(Events=("Action", "count"))
+            .sort_values("Events", ascending=False)
+        )
+        grouped["score"] = (1.0 / (1.0 + grouped["Events"])).clip(0.15, 0.55)
+
+    actions: list[tuple[str, str]] = []
+    for _, row in grouped.head(limit).iterrows():
+        label = f"{title_case_label(str(row['Role']))} · {title_case_label(str(row['Action']))}"
+        actions.append((label, _normalized_action_status(float(row["score"]))))
+    return actions
+
+
+def _derived_priority_actions(
+    df: pd.DataFrame,
+    pass_df: pd.DataFrame,
+    rotation_summary: pd.DataFrame,
+    double_commits_df: pd.DataFrame,
+    kickoff_df: pd.DataFrame,
+    defense_df: pd.DataFrame,
+    limit: int = 4,
+) -> list[tuple[str, str]]:
+    """Build fallback actions from available match telemetry before using static text."""
+    candidates: list[tuple[str, float]] = []
+
+    if rotation_summary is not None and not rotation_summary.empty:
+        role_spread = pd.to_numeric(rotation_summary.get("Time_1st%", pd.Series(dtype=float)), errors="coerce").dropna()
+        if not role_spread.empty:
+            spread = float(role_spread.std(ddof=0))
+            candidates.append(("Third-man spacing", 1.0 - min(1.0, spread / 35.0)))
+
+    if double_commits_df is not None and not double_commits_df.empty:
+        commit_rate = len(double_commits_df) / max(len(df), 1)
+        candidates.append(("Double-commit discipline", 1.0 - min(1.0, commit_rate * 18.0)))
+
+    if kickoff_df is not None and not kickoff_df.empty and "Result" in kickoff_df.columns:
+        results = kickoff_df["Result"].astype(str).str.lower()
+        total = float(len(results))
+        if total > 0:
+            kickoff_win_rate = float((results == "win").sum()) / total
+            candidates.append(("Kickoff conversion", kickoff_win_rate))
+
+    if defense_df is not None and not defense_df.empty:
+        shadow = pd.to_numeric(defense_df.get("Shadow %", pd.Series(dtype=float)), errors="coerce").dropna()
+        pressure_time = pd.to_numeric(defense_df.get("Pressure Time (s)", pd.Series(dtype=float)), errors="coerce").dropna()
+        if not shadow.empty:
+            candidates.append(("Defensive shadow coverage", min(1.0, float(shadow.mean()) / 70.0)))
+        if not pressure_time.empty:
+            candidates.append(("Defensive third exits", 1.0 - min(1.0, float(pressure_time.mean()) / 30.0)))
+
+    total_poss = float(pd.to_numeric(df.get("Possession", pd.Series(dtype=float)), errors="coerce").fillna(0).sum())
+    if total_poss > 0:
+        team_poss = pd.to_numeric(df[df["Team"] == "Blue"].get("Possession", pd.Series(dtype=float)), errors="coerce").fillna(0).sum()
+        candidates.append(("Possession control", min(1.0, float(team_poss) / total_poss)))
+
+    if pass_df is not None and not pass_df.empty:
+        pass_density = len(pass_df) / max(len(df), 1)
+        candidates.append(("Passing rhythm", min(1.0, pass_density / 4.0)))
+
+    ordered = sorted(candidates, key=lambda item: item[1])
+    deduped: list[tuple[str, str]] = []
+    seen = set()
+    for label, score in ordered:
+        if label in seen:
+            continue
+        deduped.append((label, _normalized_action_status(score)))
+        seen.add(label)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
 # --- 11. UI COMPONENTS ---
-def render_elite_overview_shell(df, shot_df, pass_df, story_model, coach_report_df, focus_players):
+def render_elite_overview_shell(
+    df,
+    shot_df,
+    pass_df,
+    story_model,
+    coach_report_df,
+    focus_players,
+    rotation_summary=None,
+    double_commits_df=None,
+    kickoff_df=None,
+    defense_df=None,
+):
     """Top-level command center surface modeled after the elite iOS concept."""
     blue_df = df[df['Team'] == 'Blue']
     orange_df = df[df['Team'] == 'Orange']
@@ -3005,11 +3116,16 @@ def render_elite_overview_shell(df, shot_df, pass_df, story_model, coach_report_
         with right:
             with st.container(border=True):
                 st.markdown("#### Priority Actions")
-                actions = []
-                if coach_report_df is not None and not coach_report_df.empty and 'Role' in coach_report_df.columns:
-                    role_counts = coach_report_df['Role'].value_counts().head(4)
-                    for role, count in role_counts.items():
-                        actions.append((title_case_label(str(role)), 'Improve' if count >= 2 else 'Stable'))
+                actions = _coach_role_action_priority_actions(coach_report_df)
+                if not actions:
+                    actions = _derived_priority_actions(
+                        df=df,
+                        pass_df=pass_df,
+                        rotation_summary=rotation_summary if rotation_summary is not None else pd.DataFrame(),
+                        double_commits_df=double_commits_df if double_commits_df is not None else pd.DataFrame(),
+                        kickoff_df=kickoff_df if kickoff_df is not None else pd.DataFrame(),
+                        defense_df=defense_df if defense_df is not None else pd.DataFrame(),
+                    )
                 if not actions:
                     actions = [
                         ('Defensive Third exits', 'Improve'),
@@ -3264,7 +3380,18 @@ if app_mode == "🔍 Single Match Analysis":
         goal_events = extract_goal_events(proto, pid_team, pid_name_map=temp_map, max_frame=max_frame)
         story_model = build_match_story_view_model(win_prob_df, momentum_series, goal_events)
 
-        render_elite_overview_shell(df, shot_df, pass_df, story_model, coach_report_df, focus_players)
+        render_elite_overview_shell(
+            df,
+            shot_df,
+            pass_df,
+            story_model,
+            coach_report_df,
+            focus_players,
+            rotation_summary=rotation_summary,
+            double_commits_df=double_commits_df,
+            kickoff_df=kickoff_df,
+            defense_df=defense_df,
+        )
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
