@@ -7,7 +7,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from constants import GOAL_HALF_W, GOAL_HEIGHT, REPLAY_FPS, TEAM_COLORS
+from constants import FIELD_HALF_X, FIELD_HALF_Y, GOAL_HALF_W, GOAL_HEIGHT, WALL_HEIGHT, REPLAY_FPS, TEAM_COLORS
 from charts.theme import apply_chart_theme, semantic_color
 from charts.formatters import (
     format_metric_series,
@@ -17,9 +17,10 @@ from charts.formatters import (
 )
 from analytics.shot_quality import (
     COL_ON_TARGET,
+    COL_GOALKEEPER_DIST,
+    COL_SHOT_Z,
     COL_TARGET_X,
     COL_TARGET_Z,
-    COL_SHOT_Z,
     COL_XG,
     COL_XGOT,
     SHOT_COL_FRAME,
@@ -687,6 +688,166 @@ def goal_mouth_scatter(df, team=None, player=None, include_xgot=True, on_target_
     fig.update_xaxes(title=title_case_label("target x"), range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], constrain="domain")
     fig.update_yaxes(title=title_case_label("target z"), range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
     fig.update_layout(title="Goal Mouth", legend_title_text="Team")
+    return apply_chart_theme(fig, tier="support")
+
+
+def arena_3d_shot_chart(
+    df: pd.DataFrame,
+    *,
+    team: str | None = None,
+    player: str | None = None,
+    on_target_only: bool = False,
+    color_metric: str = "xgot",
+    show_trajectories: bool = False,
+    enable_3d: bool = True,
+    save_events_df: pd.DataFrame | None = None,
+):
+    """Render Arena 3D shot geometry with metric-aware encoding and 2D fallback."""
+    required_cols = {SHOT_COL_X, SHOT_COL_Y, SHOT_COL_TEAM, SHOT_COL_PLAYER, SHOT_COL_RESULT}
+    shots = df.copy() if df is not None else pd.DataFrame()
+    missing = sorted(c for c in required_cols if c not in shots.columns)
+    if shots.empty or missing:
+        fig = go.Figure()
+        fig.update_layout(title="Arena 3D")
+        fig.add_annotation(x=0.5, y=0.5, xref="paper", yref="paper", text="No shot geometry available" if shots.empty else f"Missing columns: {', '.join(missing)}", showarrow=False)
+        return apply_chart_theme(fig, tier="support")
+
+    if save_events_df is not None and not save_events_df.empty and "SaveImpact" not in shots.columns and {"Frame", "Shooter", "SaveImpact", "ExpectedSaveProb", "SaveDifficultyIndex"}.issubset(save_events_df.columns):
+        save_view = save_events_df[["Frame", "Shooter", "SaveImpact", "ExpectedSaveProb", "SaveDifficultyIndex"]].copy()
+        save_view = save_view.rename(columns={"Shooter": SHOT_COL_PLAYER})
+        shots = shots.merge(save_view, on=["Frame", SHOT_COL_PLAYER], how="left")
+
+    if team:
+        shots = shots[shots[SHOT_COL_TEAM] == team]
+    if player:
+        shots = shots[shots[SHOT_COL_PLAYER] == player]
+    if on_target_only and COL_ON_TARGET in shots.columns:
+        shots = shots[(shots[COL_ON_TARGET] == True) | (shots[SHOT_COL_RESULT] == "Goal")]
+
+    shots[SHOT_COL_X] = pd.to_numeric(shots[SHOT_COL_X], errors="coerce")
+    shots[SHOT_COL_Y] = pd.to_numeric(shots[SHOT_COL_Y], errors="coerce")
+    shots["_z"] = pd.to_numeric(shots.get(COL_SHOT_Z, 0), errors="coerce").fillna(0).clip(lower=0, upper=WALL_HEIGHT)
+    shots["_target_x"] = pd.to_numeric(shots.get(COL_TARGET_X, np.nan), errors="coerce")
+    shots["_target_z"] = pd.to_numeric(shots.get(COL_TARGET_Z, np.nan), errors="coerce").clip(lower=0, upper=GOAL_HEIGHT)
+    shots["_goalkeeper_dist"] = pd.to_numeric(shots.get(COL_GOALKEEPER_DIST, np.nan), errors="coerce")
+    shots = shots.dropna(subset=[SHOT_COL_X, SHOT_COL_Y, "_z"])
+    if shots.empty:
+        return goal_mouth_scatter(df, team=team, player=player, include_xgot=True, on_target_only=on_target_only)
+
+    metric_map = {
+        "xg": (COL_XG, "xG", "Viridis"),
+        "xgot": (COL_XGOT, "xGOT", "Plasma"),
+        "save_impact": ("SaveImpact", "Save Impact", "RdBu"),
+        "expected_save_prob": ("ExpectedSaveProb", "Expected Save Prob", "Blues"),
+        "save_difficulty": ("SaveDifficultyIndex", "Save Difficulty", "Magma"),
+    }
+    metric_col, metric_label, metric_scale = metric_map.get(color_metric, metric_map["xgot"])
+    shots["_metric"] = pd.to_numeric(shots.get(metric_col, shots.get(COL_XGOT, 0.0)), errors="coerce").fillna(0.0)
+
+    if not enable_3d:
+        fig2d = go.Figure()
+        fig2d.add_shape(type="rect", x0=-GOAL_HALF_W, y0=0, x1=GOAL_HALF_W, y1=GOAL_HEIGHT, line=dict(color="rgba(255,255,255,0.7)", width=2))
+        fig2d.add_shape(type="line", x0=0, y0=0, x1=0, y1=GOAL_HEIGHT, line=dict(color="rgba(255,255,255,0.2)", width=1, dash="dot"))
+        fig2d.add_trace(go.Scatter(
+            x=shots["_target_x"].fillna(0),
+            y=shots["_target_z"].fillna(shots["_z"].clip(upper=GOAL_HEIGHT)),
+            mode="markers",
+            marker=dict(size=10, color=shots["_metric"], colorscale=metric_scale, showscale=True, colorbar=dict(title=metric_label), line=dict(width=1, color="white"), opacity=0.9),
+            customdata=np.stack([shots[SHOT_COL_PLAYER], shots[SHOT_COL_TEAM], shots[SHOT_COL_RESULT], shots["_metric"]], axis=-1),
+            hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Result: %{customdata[2]}<br>Metric: %{customdata[3]:.2f}<extra></extra>",
+            name="Events",
+        ))
+        fig2d.update_xaxes(title=title_case_label("target x"), range=[-GOAL_HALF_W * 1.05, GOAL_HALF_W * 1.05], constrain="domain")
+        fig2d.update_yaxes(title=title_case_label("target z"), range=[-20, GOAL_HEIGHT * 1.05], scaleanchor="x", scaleratio=1)
+        fig2d.update_layout(title=f"Arena 2D Fallback ({metric_label})")
+        return apply_chart_theme(fig2d, tier="support")
+
+    fig = go.Figure()
+
+    # Goal mouth planes (both ends).
+    for goal_y in (FIELD_HALF_Y, -FIELD_HALF_Y):
+        fig.add_trace(
+            go.Mesh3d(
+                x=[-GOAL_HALF_W, GOAL_HALF_W, GOAL_HALF_W, -GOAL_HALF_W],
+                y=[goal_y, goal_y, goal_y, goal_y],
+                z=[0, 0, GOAL_HEIGHT, GOAL_HEIGHT],
+                i=[0, 0],
+                j=[1, 2],
+                k=[2, 3],
+                color="rgba(255,255,255,0.14)",
+                hoverinfo="skip",
+                name=f"Goal plane y={int(goal_y)}",
+                showscale=False,
+            )
+        )
+        env_depth = 700
+        y0, y1 = (goal_y - env_depth, goal_y) if goal_y > 0 else (goal_y, goal_y + env_depth)
+        fig.add_trace(
+            go.Mesh3d(
+                x=[-GOAL_HALF_W, GOAL_HALF_W, GOAL_HALF_W, -GOAL_HALF_W, -GOAL_HALF_W, GOAL_HALF_W, GOAL_HALF_W, -GOAL_HALF_W],
+                y=[y0, y0, y1, y1, y0, y0, y1, y1],
+                z=[0, 0, 0, 0, WALL_HEIGHT * 0.55, WALL_HEIGHT * 0.55, WALL_HEIGHT * 0.55, WALL_HEIGHT * 0.55],
+                i=[0, 0, 4, 4, 0, 1, 2, 3, 0, 1, 2, 3],
+                j=[1, 2, 5, 6, 4, 5, 6, 7, 1, 2, 3, 0],
+                k=[2, 3, 6, 7, 5, 6, 7, 4, 4, 5, 6, 7],
+                color="rgba(142, 196, 255, 0.10)",
+                opacity=0.12,
+                hoverinfo="skip",
+                name="Keeper envelope",
+                showscale=False,
+            )
+        )
+
+    fig.add_trace(
+        go.Scatter3d(
+            x=shots[SHOT_COL_X],
+            y=shots[SHOT_COL_Y],
+            z=shots["_z"],
+            mode="markers",
+            name="Ball events",
+            marker=dict(size=5, color=shots["_metric"], colorscale=metric_scale, cmin=float(shots["_metric"].min()), cmax=float(shots["_metric"].max() + 1e-9), colorbar=dict(title=metric_label), line=dict(width=0.5, color="white"), opacity=0.9),
+            customdata=np.stack([
+                shots[SHOT_COL_PLAYER],
+                shots[SHOT_COL_TEAM],
+                shots[SHOT_COL_RESULT],
+                shots["_metric"],
+                shots["_goalkeeper_dist"],
+            ], axis=-1),
+            hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Result: %{customdata[2]}<br>Metric: %{customdata[3]:.2f}<br>Keeper dist: %{customdata[4]:.0f}<extra></extra>",
+        )
+    )
+
+    if show_trajectories:
+        traj_x, traj_y, traj_z = [], [], []
+        for _, row in shots.dropna(subset=["_target_x", "_target_z"]).iterrows():
+            target_y = FIELD_HALF_Y if float(row[SHOT_COL_Y]) <= 0 else -FIELD_HALF_Y
+            traj_x.extend([float(row[SHOT_COL_X]), float(row["_target_x"]), None])
+            traj_y.extend([float(row[SHOT_COL_Y]), target_y, None])
+            traj_z.extend([float(row["_z"]), float(row["_target_z"]), None])
+        if traj_x:
+            fig.add_trace(
+                go.Scatter3d(
+                    x=traj_x,
+                    y=traj_y,
+                    z=traj_z,
+                    mode="lines",
+                    name="Projected trajectory",
+                    line=dict(color="rgba(255,255,255,0.35)", width=2),
+                    hoverinfo="skip",
+                )
+            )
+
+    fig.update_layout(
+        title=f"Arena 3D ({metric_label})",
+        scene=dict(
+            xaxis=dict(title="X", range=[-FIELD_HALF_X, FIELD_HALF_X]),
+            yaxis=dict(title="Y", range=[-FIELD_HALF_Y - 200, FIELD_HALF_Y + 200]),
+            zaxis=dict(title="Z", range=[0, WALL_HEIGHT]),
+            aspectmode="manual",
+            aspectratio=dict(x=1.25, y=1.5, z=0.55),
+        ),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+    )
     return apply_chart_theme(fig, tier="support")
 
 
