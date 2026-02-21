@@ -730,8 +730,51 @@ def load_data():
     if os.path.exists(KICKOFF_DB_FILE):
         try: kickoff_df = pd.read_csv(KICKOFF_DB_FILE)
         except Exception as e: logger.warning("Failed to load %s: %s", KICKOFF_DB_FILE, e)
+
+    kickoff_df = ensure_kickoff_canonical_coordinates(kickoff_df)
         
     return stats_df, kickoff_df
+
+
+def ensure_kickoff_canonical_coordinates(kickoff_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize kickoff landing points into a single attacking-direction frame.
+
+    Convention: preserve X and only mirror Y for Orange so all teams attack toward +Y.
+    Raw End_X/End_Y stay untouched for debugging and export parity.
+    """
+    if kickoff_df.empty:
+        return kickoff_df
+
+    normalized = kickoff_df.copy()
+    if 'End_X' not in normalized.columns:
+        normalized['End_X'] = 0.0
+    if 'End_Y' not in normalized.columns:
+        normalized['End_Y'] = 0.0
+
+    normalized['End_X'] = pd.to_numeric(normalized['End_X'], errors='coerce').fillna(0.0)
+    normalized['End_Y'] = pd.to_numeric(normalized['End_Y'], errors='coerce').fillna(0.0)
+
+    if 'Team' in normalized.columns:
+        team_series = normalized['Team'].astype(str).str.strip().str.title()
+    else:
+        team_series = pd.Series(['Unknown'] * len(normalized), index=normalized.index)
+
+    canonical_y = np.where(team_series == 'Orange', -normalized['End_Y'], normalized['End_Y'])
+    canonical_x = normalized['End_X']
+
+    if 'Canon_End_X' in normalized.columns:
+        normalized['Canon_End_X'] = pd.to_numeric(normalized['Canon_End_X'], errors='coerce')
+        normalized['Canon_End_X'] = normalized['Canon_End_X'].where(normalized['Canon_End_X'].notna(), canonical_x)
+    else:
+        normalized['Canon_End_X'] = canonical_x
+
+    if 'Canon_End_Y' in normalized.columns:
+        normalized['Canon_End_Y'] = pd.to_numeric(normalized['Canon_End_Y'], errors='coerce')
+        normalized['Canon_End_Y'] = normalized['Canon_End_Y'].where(normalized['Canon_End_Y'].notna(), canonical_y)
+    else:
+        normalized['Canon_End_Y'] = canonical_y
+
+    return normalized
 
 def save_data(new_stats, new_kickoffs):
     """Appends new data to CSVs, handling duplicates by MatchID."""
@@ -1418,6 +1461,9 @@ def calculate_kickoff_stats(game, proto, game_df, player_map, match_id=""):
             except (KeyError, IndexError):
                 pass
 
+        canon_end_x = end_x
+        canon_end_y = -end_y if kicker_team == "Orange" else end_y
+
         kickoff_goal = False
         for gf in goal_frames:
             if k_frame < gf <= k_frame + 150: 
@@ -1428,7 +1474,9 @@ def calculate_kickoff_stats(game, proto, game_df, player_map, match_id=""):
             kickoff_list.append({
                 "MatchID": str(match_id), "Frame": k_frame, "Player": kicker_name, "Team": kicker_team,
                 "Spawn": spawn_loc, "Time to Hit": round(time_to_hit, 2), "Boost": boost_at_hit,
-                "Result": outcome, "Goal (5s)": kickoff_goal, "End_X": end_x, "End_Y": end_y
+                "Result": outcome, "Goal (5s)": kickoff_goal,
+                "End_X": end_x, "End_Y": end_y,
+                "Canon_End_X": canon_end_x, "Canon_End_Y": canon_end_y,
             })
     return pd.DataFrame(kickoff_list)
 
@@ -3111,11 +3159,11 @@ if app_mode == "🔍 Single Match Analysis":
                     with col_k2:
                         fig = spatial_outcome_scatter(
                             disp_kickoff,
-                            x_col="End_X",
-                            y_col="End_Y",
+                            x_col="Canon_End_X",
+                            y_col="Canon_End_Y",
                             outcome_col="Result",
                             label_col="Player",
-                            title="Kickoff Outcomes",
+                            title="Kickoff Outcomes (Canonical Field Frame)",
                             intent="outcome",
                             variant="neutral",
                         )
@@ -4667,13 +4715,13 @@ elif app_mode == "📈 Season Batch Processor":
                     subset = hero_k[hero_k['Result'] == result]
                     if not subset.empty:
                         fig.add_trace(go.Scatter(
-                            x=subset['End_X'], y=subset['End_Y'],
+                            x=subset['Canon_End_X'], y=subset['Canon_End_Y'],
                             mode='markers',
                             marker=dict(size=11, color=color, symbol=result_symbols.get(result, 'circle'), line=dict(width=1, color='white'), opacity=0.8),
                             name=f"{result} ({len(subset)})",
                             hovertemplate="Result: " + result + "<extra></extra>",
                         ))
-                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View)"))
+                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View, Canonical)"))
                 fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
  
                 st.plotly_chart(fig, use_container_width=True)
