@@ -42,6 +42,7 @@ from charts.factory import (
     spatial_outcome_scatter,
     value_timeline_chart,
     action_type_value_decomposition_chart,
+    arena_3d_shot_chart,
     teammate_synergy_matrix,
 )
 from analytics.chemistry import build_season_chemistry_tables
@@ -2964,7 +2965,7 @@ if app_mode == "🔍 Single Match Analysis":
                 if not shot_schema_ok:
                     st.warning(f"Shot metrics unavailable for shot map: missing columns {', '.join(shot_schema_missing)}")
                 else:
-                    filt1, filt2, filt3 = st.columns([1, 1, 1])
+                    filt1, filt2, filt3, filt4 = st.columns([1, 1, 1, 1])
                     with filt1:
                         map_team = st.selectbox("Team Filter", ["All", "Blue", "Orange"], key="shared_match_team")
                     with filt2:
@@ -2974,6 +2975,16 @@ if app_mode == "🔍 Single Match Analysis":
                         map_player = st.selectbox("Player Filter", player_opts, key="shared_match_player")
                     with filt3:
                         map_on_target = st.toggle("On-target only", value=True, key="shot_map_on_target")
+                    with filt4:
+                        shot_map_mode = st.selectbox("Mode", ["2D Shot Map", "Arena 3D", "Arena 2D Fallback"], key="shot_map_mode")
+
+                    arena_opts_a, arena_opts_b, arena_opts_c = st.columns([1, 1, 1])
+                    with arena_opts_a:
+                        arena_color_metric = st.selectbox("Arena Color", ["xgot", "xg", "save_impact", "expected_save_prob", "save_difficulty"], format_func=lambda x: x.replace("_", " ").upper())
+                    with arena_opts_b:
+                        arena_show_traj = st.toggle("Show trajectories", value=False, disabled=(shot_map_mode == "2D Shot Map"))
+                    with arena_opts_c:
+                        st.caption("Arena 3D uses shot/target/keeper geometry and save analytics where available.")
 
                     filtered_shots = shot_df.copy()
                     if map_team != "All":
@@ -2981,58 +2992,62 @@ if app_mode == "🔍 Single Match Analysis":
                     if map_player != "All":
                         filtered_shots = filtered_shots[filtered_shots[SHOT_COL_PLAYER] == map_player]
 
-                    c_pitch, c_goal = st.columns([2, 1])
+                    if shot_map_mode == "2D Shot Map":
+                        c_pitch, c_goal = st.columns([2, 1])
 
-                    with c_pitch:
-                        fig = themed_figure()
-                        fig.update_layout(get_field_layout("Shot Map"))
+                        with c_pitch:
+                            fig = themed_figure()
+                            fig.update_layout(get_field_layout("Shot Map"))
 
-                        # Team-colored shots and goals
-                        for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
-                            t_shots = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Shot')]
-                            t_goals = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Goal')]
-                            if not t_shots.empty:
-                                shot_speed = pd.to_numeric(t_shots.get('Speed', 0), errors='coerce').fillna(0)
-                                fig.add_trace(go.Scatter(
-                                    x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
-                                    marker=dict(size=10, color=color, opacity=0.5),
-                                    name=f'{team} Shot',
-                                    customdata=np.stack([
-                                        t_shots[SHOT_COL_PLAYER],
-                                        [team] * len(t_shots),
-                                        pd.to_numeric(t_shots[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
-                                        pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
-                                    ], axis=-1),
-                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
-                                ))
-                            if not t_goals.empty:
-                                goal_speed = pd.to_numeric(t_goals.get('Speed', 0), errors='coerce').fillna(0)
-                                fig.add_trace(go.Scatter(
-                                    x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
-                                    marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
-                                    name=f'{team} Goal',
-                                    customdata=np.stack([
-                                        t_goals[SHOT_COL_PLAYER],
-                                        [team] * len(t_goals),
-                                        pd.to_numeric(t_goals[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
-                                        pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
-                                    ], axis=-1),
-                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
-                                ))
-                        big_chances = filtered_shots[filtered_shots['BigChance'] == True]
-                        if not big_chances.empty:
-                            fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers',
-                                marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
-                                name='Big Chance', hoverinfo='skip'))
-                        st.plotly_chart(fig, use_container_width=True)
+                            for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
+                                t_shots = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Shot')]
+                                t_goals = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Goal')]
+                                if not t_shots.empty:
+                                    fig.add_trace(go.Scatter(
+                                        x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
+                                        marker=dict(size=10, color=color, opacity=0.5),
+                                        name=f'{team} Shot',
+                                        customdata=np.stack([
+                                            t_shots[SHOT_COL_PLAYER],
+                                            [team] * len(t_shots),
+                                            pd.to_numeric(t_shots[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
+                                            pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
+                                        ], axis=-1),
+                                        hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
+                                    ))
+                                if not t_goals.empty:
+                                    fig.add_trace(go.Scatter(
+                                        x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
+                                        marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
+                                        name=f'{team} Goal',
+                                        customdata=np.stack([
+                                            t_goals[SHOT_COL_PLAYER],
+                                            [team] * len(t_goals),
+                                            pd.to_numeric(t_goals[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
+                                            pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
+                                        ], axis=-1),
+                                        hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
+                                    ))
+                            big_chances = filtered_shots[filtered_shots['BigChance'] == True]
+                            if not big_chances.empty:
+                                fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers', marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')), name='Big Chance', hoverinfo='skip'))
+                            st.plotly_chart(fig, use_container_width=True)
 
-                    with c_goal:
-                        fig_goal_mouth = goal_mouth_scatter(
+                        with c_goal:
+                            fig_goal_mouth = goal_mouth_scatter(filtered_shots, include_xgot=True, on_target_only=map_on_target)
+                            st.plotly_chart(fig_goal_mouth, use_container_width=True)
+                    else:
+                        arena_fig = arena_3d_shot_chart(
                             filtered_shots,
-                            include_xgot=True,
+                            team=None,
+                            player=None,
                             on_target_only=map_on_target,
+                            color_metric=arena_color_metric,
+                            show_trajectories=arena_show_traj,
+                            enable_3d=(shot_map_mode == "Arena 3D"),
+                            save_events_df=xs_events_df,
                         )
-                        st.plotly_chart(fig_goal_mouth, use_container_width=True)
+                        st.plotly_chart(arena_fig, use_container_width=True)
 
         with t3b:
             st.subheader("Frozen Frame Shot Viewer")
@@ -4264,6 +4279,37 @@ elif app_mode == "📈 Season Batch Processor":
                 if not ot_games_display.empty:
                     fig.add_trace(go.Scatter(x=ot_games_display['GameNum'], y=ot_games_display[metric], mode='markers', marker=dict(size=12, color=semantic_color('threshold', 'neutral'), symbol='diamond', line=dict(width=1, color='white')), name='OT Game'))
             st.plotly_chart(fig, use_container_width=True)
+
+            st.markdown("#### Arena 3D (Season Context)")
+            st.caption("Uses loaded match shots in this session to provide a season-level 3D arena view.")
+            season_shot_frames = []
+            for _mid in st.session_state.get("match_order", []):
+                _store = st.session_state.get("match_store", {}).get(_mid, {})
+                _shots = _store.get("shot_df")
+                if isinstance(_shots, pd.DataFrame) and not _shots.empty:
+                    season_shot_frames.append(_shots.copy())
+            if season_shot_frames:
+                season_shots = pd.concat(season_shot_frames, ignore_index=True)
+                arena_col1, arena_col2, arena_col3 = st.columns([1, 1, 1])
+                with arena_col1:
+                    season_arena_mode = st.selectbox("Arena mode", ["Arena 3D", "Arena 2D Fallback"], key="season_arena_mode")
+                with arena_col2:
+                    season_arena_metric = st.selectbox("Arena color", ["xgot", "xg", "save_impact", "expected_save_prob", "save_difficulty"], format_func=lambda x: x.replace("_", " ").upper(), key="season_arena_metric")
+                with arena_col3:
+                    season_arena_traj = st.toggle("Show trajectories", value=False, key="season_arena_traj")
+                season_arena_fig = arena_3d_shot_chart(
+                    season_shots,
+                    team=None,
+                    player=hero,
+                    on_target_only=False,
+                    color_metric=season_arena_metric,
+                    show_trajectories=season_arena_traj,
+                    enable_3d=(season_arena_mode == "Arena 3D"),
+                    save_events_df=None,
+                )
+                st.plotly_chart(season_arena_fig, use_container_width=True)
+            else:
+                st.info("Arena 3D season mode requires at least one loaded match in this session. Falling back to standard 2D charts.")
         with t2:
             st.subheader("Season Kickoff Meta")
             if not season_kickoffs.empty:
