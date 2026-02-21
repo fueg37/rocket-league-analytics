@@ -75,6 +75,7 @@ from analytics.spatial_index import PlayerFrameAccessor
 from analytics.possession_value import compute_action_value_deltas, encode_replay_states
 from analytics.aggregations.value_reports import build_player_value_reports
 from analytics.counterfactuals import build_coach_report
+from analytics.insights import build_key_insight
 
 logger = logging.getLogger(__name__)
 
@@ -2995,12 +2996,11 @@ def render_elite_overview_shell(df, shot_df, pass_df, story_model, coach_report_
 
             with st.container(border=True):
                 st.markdown("#### Key Insight")
-                top_edge = 'midfield pressure conversion'
-                if not df.empty and 'Saves' in df.columns and (blue_df['Saves'].sum() + orange_df['Saves'].sum()) > 12:
-                    top_edge = 'defensive save quality under pressure'
-                st.markdown(f"### Your strongest edge was {top_edge}.")
-                st.caption("When second-man challenge timing tightened, expected possession value increased and unlocked higher-quality shots.")
-                st.success("Recommended: Preserve rotation spacing + early midfield challenge")
+                insight = build_key_insight(df, shot_df, momentum_series, coach_report_df)
+                st.markdown(f"### {insight['headline']}")
+                st.caption(insight['explanation'])
+                st.success(f"Recommended: {insight['recommendation']}")
+                st.caption(f"Confidence/source: {insight['confidence_source_tag']}")
 
         with right:
             with st.container(border=True):
