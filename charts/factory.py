@@ -27,6 +27,8 @@ from analytics.shot_quality import (
     SHOT_COL_PLAYER,
     SHOT_COL_RESULT,
     SHOT_COL_TEAM,
+    SHOT_COL_X,
+    SHOT_COL_Y,
 )
 
 _TEAM_ACCENT = {
