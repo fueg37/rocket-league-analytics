@@ -10,6 +10,7 @@ import tempfile
 import logging
 import numpy as np
 from datetime import datetime, timedelta
+from time import perf_counter
 
 from constants import (
     REPLAY_FPS, DB_FILE, KICKOFF_DB_FILE, WIN_PROB_MODEL_FILE,
@@ -1978,7 +1979,7 @@ def estimate_scoring_threat(ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz, t
     threat = (positional_threat * 0.5 + possession_factor * 0.3 + vel_bonus + proximity_bonus) * height_factor
     return max(0.0, min(threat, 0.99))
 
-def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
+def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df, states=None):
     """Calculate action value from canonical transition-value model.
 
     Backward-compatible aliases retained: VAEP, Total_VAEP, Avg_VAEP.
@@ -1988,7 +1989,9 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
         return pd.DataFrame(), pd.DataFrame()
 
     match_id = str(getattr(getattr(proto, "game_metadata", None), "id", "match"))
-    states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
+    replay_states = states
+    if replay_states is None:
+        replay_states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
 
     events = []
     max_frame = int(game_df.index.max()) if len(game_df.index) else 0
@@ -2014,7 +2017,7 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
         )
 
     event_df = pd.DataFrame(events)
-    valued_events = compute_action_value_deltas(event_df, states)
+    valued_events = compute_action_value_deltas(event_df, replay_states)
     if valued_events.empty:
         return valued_events, pd.DataFrame()
 
@@ -2402,6 +2405,12 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     pid_team = build_pid_team_map(proto)
     player_team = build_player_team_map(proto)
     player_pos = build_player_positions(proto, game_df)
+    match_id = str(getattr(getattr(proto, "game_metadata", None), "id", "match"))
+
+    state_encoding_start = perf_counter()
+    replay_states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
+    logger.info("Pipeline timing | stage=state_encoding | duration_s=%.3f | match_id=%s", perf_counter() - state_encoding_start, match_id)
+
     shot_df = calculate_shot_data(proto, game_df, pid_team, temp_map)
     momentum_series = calculate_contextual_momentum(game_df, proto)
     pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, pass_threshold)
@@ -2410,7 +2419,9 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     recovery_df = calculate_recovery_time(proto, game_df, pid_team, temp_map)
     defense_df = calculate_defensive_pressure(game_df, proto)
     xga_df = calculate_xg_against(proto, game_df, temp_map, shot_df)
-    vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df)
+    vaep_start = perf_counter()
+    vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df, states=replay_states)
+    logger.info("Pipeline timing | stage=vaep | duration_s=%.3f | match_id=%s", perf_counter() - vaep_start, match_id)
     value_reports_df = build_player_value_reports(vaep_df)
     rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(game_df, proto, player_pos)
     xs_events_df, xs_summary = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df)
@@ -2431,7 +2442,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
             team_goals = int(df[df['Team'] == team]['Goals'].sum())
             luck_val = calculate_luck_percentage(shot_df, team, team_goals)
             df.loc[df['Team'] == team, 'Luck'] = luck_val
-    replay_states = encode_replay_states("match", game_df, player_pos, pid_team)
+    coach_report_start = perf_counter()
     coach_report_df = build_coach_report(
         replay_states,
         momentum_series,
@@ -2441,6 +2452,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         team="Blue",
         top_n=5,
     )
+    logger.info("Pipeline timing | stage=coach_report | duration_s=%.3f | match_id=%s", perf_counter() - coach_report_start, match_id)
     return {
         "manager": manager, "game": game, "game_df": game_df, "proto": proto,
         "df_unfiltered": df, "shot_df": shot_df, "pass_df": pass_df,
