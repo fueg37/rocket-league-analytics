@@ -683,8 +683,7 @@ def render_ios_hero_banner() -> None:
     st.markdown(
         """
         <div class="ios-hero">
-          <h1>🚀 Elite Match Command Center</h1>
-          <p>Apple-grade visual clarity for replay intelligence: story first, deep analytics on demand.</p>
+          <h1>Match Command Center</h1>
           <div class="ios-chip-row">
             <span class="ios-chip">Overview-first IA</span>
             <span class="ios-chip">Narrative + action cards</span>
