@@ -295,7 +295,8 @@ def compute_action_value_deltas(events: pd.DataFrame, states: pd.DataFrame, mode
         return out
 
     estimator = model or _default_estimator()
-    state_lookup = states.set_index(["MatchID", "Frame"], drop=False)
+    state_lookup = states.reset_index(drop=True)
+    state_cache = _build_state_cache(state_lookup)
     valued = events.copy()
     value_3s = []
     value_10s = []
@@ -306,8 +307,8 @@ def compute_action_value_deltas(events: pd.DataFrame, states: pd.DataFrame, mode
         team = getattr(row, "Team", "Blue") or "Blue"
         post_frame = int(getattr(row, "PostFrame", frame + 1) or (frame + 1))
 
-        pre_state = _get_state(state_lookup, match_id, frame)
-        post_state = _get_state(state_lookup, match_id, post_frame)
+        pre_state = _get_state(state_lookup, state_cache, match_id, frame)
+        post_state = _get_state(state_lookup, state_cache, match_id, post_frame)
         pre_pred = estimator.predict_state_value(pre_state)
         post_pred = estimator.predict_state_value(post_state)
 
@@ -321,12 +322,45 @@ def compute_action_value_deltas(events: pd.DataFrame, states: pd.DataFrame, mode
     return valued
 
 
-def _get_state(state_lookup: pd.DataFrame, match_id: str, frame: int) -> pd.Series:
-    key = (match_id, frame)
-    if key in state_lookup.index:
-        return state_lookup.loc[key]
-    match_states = state_lookup[state_lookup["MatchID"] == match_id]
-    if match_states.empty:
+def _build_state_cache(states: pd.DataFrame) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    if states.empty:
+        return {}
+
+    match_ids = states["MatchID"].to_numpy(dtype=object)
+    frames = pd.to_numeric(states["Frame"], errors="coerce").fillna(0).to_numpy(dtype=int)
+    cache: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+
+    for match_id in pd.unique(match_ids):
+        row_positions = np.flatnonzero(match_ids == match_id)
+        if row_positions.size == 0:
+            continue
+        order = np.argsort(frames[row_positions], kind="mergesort")
+        sorted_positions = row_positions[order]
+        cache[match_id] = (frames[sorted_positions], sorted_positions)
+
+    return cache
+
+
+def _get_state(
+    state_lookup: pd.DataFrame,
+    state_cache: Mapping[str, tuple[np.ndarray, np.ndarray]],
+    match_id: str,
+    frame: int,
+) -> pd.Series:
+    cached = state_cache.get(match_id)
+    if cached is None:
         return pd.Series(dtype=float)
-    nearest_idx = int(np.argmin(np.abs(match_states["Frame"].to_numpy(dtype=int) - frame)))
-    return match_states.iloc[nearest_idx]
+
+    frames, row_positions = cached
+    insertion_idx = int(np.searchsorted(frames, frame, side="left"))
+
+    if insertion_idx <= 0:
+        nearest_idx = 0
+    elif insertion_idx >= len(frames):
+        nearest_idx = len(frames) - 1
+    else:
+        prev_diff = abs(frame - int(frames[insertion_idx - 1]))
+        next_diff = abs(int(frames[insertion_idx]) - frame)
+        nearest_idx = insertion_idx - 1 if prev_diff <= next_diff else insertion_idx
+
+    return state_lookup.iloc[int(row_positions[nearest_idx])]

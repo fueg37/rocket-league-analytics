@@ -36,3 +36,16 @@ def test_compute_action_value_deltas_adds_alias_vaep():
 def test_canonical_columns_contract():
     assert "MatchID" in CANONICAL_STATE_COLUMNS
     assert "Frame" in CANONICAL_STATE_COLUMNS
+
+
+def test_compute_action_value_deltas_uses_nearest_frame_when_exact_missing():
+    states = pd.DataFrame(
+        [
+            {"MatchID": "m1", "Frame": 10, "BluePossessionBelief": 0.4, "OrangePossessionBelief": 0.6, "BallPosY": -100, "BallVelY": -100, "NearestBlueDist": 800, "NearestOrangeDist": 500, "TeamBoostAvgBlue": 20, "TeamBoostAvgOrange": 40, "PressureBlue": 0.2, "PressureOrange": 0.5, "BlueAttacking": 0, "OrangeAttacking": 1},
+            {"MatchID": "m1", "Frame": 20, "BluePossessionBelief": 0.8, "OrangePossessionBelief": 0.2, "BallPosY": 300, "BallVelY": 450, "NearestBlueDist": 400, "NearestOrangeDist": 900, "TeamBoostAvgBlue": 50, "TeamBoostAvgOrange": 20, "PressureBlue": 0.7, "PressureOrange": 0.1, "BlueAttacking": 1, "OrangeAttacking": 0},
+        ]
+    )
+    events = pd.DataFrame([{"MatchID": "m1", "Frame": 14, "PostFrame": 15, "Player": "A", "Team": "Blue", "EventType": "touch"}])
+    out = compute_action_value_deltas(events, states)
+    assert float(out.loc[0, "ValueDelta_3s"]) == 0.0
+    assert float(out.loc[0, "ValueDelta_10s"]) == 0.0
