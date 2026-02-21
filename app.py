@@ -70,6 +70,7 @@ from analytics.shot_quality import (
     validate_shot_metric_columns,
 )
 from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_VERSION
+from analytics.spatial_index import PlayerFrameAccessor
 from analytics.possession_value import compute_action_value_deltas, encode_replay_states
 from analytics.aggregations.value_reports import build_player_value_reports
 from analytics.counterfactuals import build_coach_report
@@ -1906,36 +1907,25 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
     """For each shot, find the closest defender and assign xG-against to them."""
     if shot_df.empty:
         return pd.DataFrame()
-    orange_players = [p.name for p in proto.players if p.is_orange]
-    blue_players = [p.name for p in proto.players if not p.is_orange]
 
-    xga_per_player = {}  # name -> list of xG values conceded
-    for p in proto.players:
-        xga_per_player[p.name] = []
+    accessor = PlayerFrameAccessor.from_game_df(proto, game_df)
+    xga_per_player = {p.name: [] for p in proto.players}
 
     for _, shot in shot_df.iterrows():
         frame = int(shot[SHOT_COL_FRAME])
         shooter_team = shot['Team']
         xg = shot[COL_XG]
-        # Defenders are the opposing team
-        defenders = blue_players if shooter_team == "Orange" else orange_players
+        defending_team = "Blue" if shooter_team == "Orange" else "Orange"
 
-        if frame not in game_df.index:
-            continue
-
-        # Find closest defender to ball at shot frame
-        closest_defender = None
-        min_dist = 99999
         try:
-            ball_x, ball_y = shot[SHOT_COL_X], shot[SHOT_COL_Y]
-            for d_name in defenders:
-                if d_name in game_df:
-                    d_data = game_df[d_name].loc[frame]
-                    dist = np.sqrt((ball_x - d_data['pos_x'])**2 + (ball_y - d_data['pos_y'])**2)
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_defender = d_name
-        except (KeyError, IndexError):
+            ball_x, ball_y = float(shot[SHOT_COL_X]), float(shot[SHOT_COL_Y])
+            closest_defender, min_dist = accessor.nearest_defender(
+                frame=frame,
+                team=defending_team,
+                x=ball_x,
+                y=ball_y,
+            )
+        except (KeyError, IndexError, TypeError, ValueError):
             continue
 
         if closest_defender:
