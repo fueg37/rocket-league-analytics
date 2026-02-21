@@ -115,3 +115,18 @@ This file is the **single source of truth** for chart migration planning and exe
    - invariants pass,
    - regression checks pass.
 3. If scope changes, append new rows (never silently repurpose IDs).
+
+## Director Mode canonical tracks (timeline-first shell)
+
+| Status | Chart ID | Location | Canonical type | Intent | Migration protocol |
+|---|---|---|---|---|---|
+| [x] | DM-FLD-01 | `app.py` Director Mode field replay layer | `timeline + scatter` | Primary spatial replay synchronized to global timeline cursor | Uses shared `timeline_state` (`current_time`, `selected_event_id`, `playback_speed`, `selected_scenario`) and canonical event markers. |
+| [x] | DM-WP-02 | `app.py` Director Mode track stack row 1 | `line/area` | Win probability trajectory with ranked director event markers | Reuses `charts/win_probability.py` semantics and overlays canonical marker grammar (team/intent color, event shape, confidence opacity). |
+| [x] | DM-MINI-03 | `app.py` Director Mode track stack rows 2-4 | `line` mini-tracks | xG, VAEP, pressure synchronized on shared x-axis | All tracks consume synchronized timeline grid and vertical cursor for deterministic cross-track time locking. |
+| [x] | DM-NAR-04 | `analytics/narrative_engine.py` + `app.py` Narrative Studio | `timeline-linked claims` | Claim navigation from narrative to canonical event queue | Each claim stores `canonical_event_id`; click navigation jumps timeline and selected event state. |
+
+### Legacy tab-specific chart migration status protocol
+
+- Old tab-specific charts under single-match flow are now treated as **secondary deep-dive blocks** rendered beneath Director Mode.
+- New feature work must target Director Mode IDs (`DM-*`) first, then optionally backport to legacy sections.
+- Mark legacy rows complete only after (a) semantic parity in Director Mode and (b) explicit accessibility text-summary fallback under the track.

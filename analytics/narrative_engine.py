@@ -30,6 +30,7 @@ class NarrativeClaim:
     text: str
     confidence: float
     confidence_language: str
+    canonical_event_id: str | None
     evidence: list[EvidenceRef]
 
 
@@ -53,6 +54,7 @@ class NarrativeReport:
                     "text": c.text,
                     "confidence": round(c.confidence, 3),
                     "confidence_language": c.confidence_language,
+                    "canonical_event_id": c.canonical_event_id,
                     "evidence": [asdict(e) for e in c.evidence],
                 }
                 for c in self.claims
@@ -76,6 +78,8 @@ class NarrativeReport:
             lines.append(f"### {claim.phase.replace('_', ' ').title()}")
             lines.append(f"- {claim.text}")
             lines.append(f"- Confidence: {claim.confidence_language} ({claim.confidence:.2f})")
+            if claim.canonical_event_id:
+                lines.append(f"- Canonical event: `{claim.canonical_event_id}`")
             lines.append("- Evidence:")
             for ev in claim.evidence:
                 suffix = []
@@ -208,6 +212,27 @@ def _recommendations_for_role(role_target: RoleTarget, players_per_team: int | N
     ]
 
 
+def _canonical_event_for_phase(phase: NarrativePhase, director_event_queue: pd.DataFrame | None) -> str | None:
+    if director_event_queue is None or director_event_queue.empty:
+        return None
+    mapping = {
+        "kickoff": "kickoff",
+        "transition": "value_swing",
+        "offensive_zone": "shot_chance",
+        "defensive_zone": "save",
+        "clutch_minute": "win_probability_swing",
+    }
+    target = mapping.get(phase)
+    if not target:
+        return None
+    if "event_type" not in director_event_queue.columns:
+        return None
+    match = director_event_queue[director_event_queue["event_type"] == target]
+    if match.empty:
+        return None
+    return str(match.iloc[0].get("event_id"))
+
+
 def generate_narrative_report(
     *,
     momentum_series: pd.Series,
@@ -221,6 +246,7 @@ def generate_narrative_report(
     verbosity: VerbosityLevel = "standard",
     role_target: RoleTarget = "coaching_review",
     players_per_team: int | None = None,
+    director_event_queue: pd.DataFrame | None = None,
 ) -> NarrativeReport:
     metrics = _signal_metrics(
         momentum_series,
@@ -261,6 +287,7 @@ def generate_narrative_report(
                 text=text,
                 confidence=confidence,
                 confidence_language=_confidence_language(confidence),
+                canonical_event_id=_canonical_event_for_phase(phase, director_event_queue),
                 evidence=evidence,
             )
         )

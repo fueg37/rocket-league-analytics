@@ -15,6 +15,9 @@ from .tokens import (
     TEXT,
     THRESHOLD_ACCENTS,
     TYPOGRAPHY,
+    EVENT_TYPE_MARKERS,
+    CONFIDENCE_OPACITY,
+    INTENT_COLORS,
 )
 
 
@@ -100,3 +103,21 @@ def apply_chart_theme(fig: Any, tier: str = "support", intent: str | None = None
     )
 
     return fig
+
+
+
+def event_style(*, team: str | None = None, intent: str | None = None, event_type: str | None = None, confidence: float | None = None) -> dict[str, object]:
+    """Resolve canonical Director Mode visual grammar tokens."""
+    team_key = (team or "").lower()
+    intent_key = (intent or "neutral").lower()
+    color = TEAM_ACCENTS.get(team_key, INTENT_COLORS.get(intent_key, TEXT.primary))
+    marker = EVENT_TYPE_MARKERS.get((event_type or "default").lower(), EVENT_TYPE_MARKERS["default"])
+    if confidence is None:
+        opacity = CONFIDENCE_OPACITY["medium"]
+    elif confidence >= 0.8:
+        opacity = CONFIDENCE_OPACITY["high"]
+    elif confidence >= 0.55:
+        opacity = CONFIDENCE_OPACITY["medium"]
+    else:
+        opacity = CONFIDENCE_OPACITY["low"]
+    return {"color": color, "symbol": marker, "opacity": opacity}
