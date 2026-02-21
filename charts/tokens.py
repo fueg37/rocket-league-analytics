@@ -97,3 +97,31 @@ DUAL_SERIES_DEFAULTS = MappingProxyType(
         "comparison_right": TEAM_ACCENTS["positive"],
     }
 )
+
+
+EVENT_TYPE_MARKERS = MappingProxyType(
+    {
+        "win_probability_swing": "diamond",
+        "shot_chance": "circle",
+        "kickoff": "square",
+        "value_swing": "triangle-up",
+        "save": "x",
+        "default": "circle-open",
+    }
+)
+
+CONFIDENCE_OPACITY = MappingProxyType(
+    {
+        "high": 0.95,
+        "medium": 0.7,
+        "low": 0.45,
+    }
+)
+
+INTENT_COLORS = MappingProxyType(
+    {
+        "attack": TEAM_ACCENTS["orange"],
+        "defense": TEAM_ACCENTS["blue"],
+        "neutral": TEAM_ACCENTS["neutral"],
+    }
+)

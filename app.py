@@ -27,7 +27,7 @@ from utils import (
     apply_categorical_order, stable_sort,
 )
 
-from charts.theme import apply_chart_theme, semantic_color
+from charts.theme import apply_chart_theme, semantic_color, event_style
 from charts.formatters import dataframe_formatter, format_metric_value, title_case_label
 from charts.factory import (
     chemistry_network_chart,
@@ -77,6 +77,8 @@ from analytics.possession_value import compute_action_value_deltas, encode_repla
 from analytics.aggregations.value_reports import build_player_value_reports
 from analytics.counterfactuals import build_coach_report
 from analytics.narrative_engine import generate_narrative_report
+from analytics.director_mode import build_director_event_queue, synchronize_track_times
+from analytics.counterfactual_timeline import apply_counterfactual
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +143,110 @@ def render_chart_signal_summary(label: str, direction: str, value: float | int |
 
 
 
+
+
+
+def _timeline_state(match_duration_s: float) -> dict:
+    state = st.session_state.timeline_state
+    state["current_time"] = float(min(max(state.get("current_time", 0.0), 0.0), max(match_duration_s, 0.0)))
+    state["playback_speed"] = float(state.get("playback_speed", 1.0))
+    state.setdefault("selected_event_id", None)
+    state.setdefault("selected_scenario", "baseline")
+    return state
+
+
+def _render_timeline_controls(state: dict, match_duration_s: float, director_queue: pd.DataFrame):
+    c1, c2, c3, c4 = st.columns([3, 1, 1, 2])
+    with c1:
+        state["current_time"] = st.slider("Timeline position (s)", 0.0, float(max(match_duration_s, 0.0)), float(state["current_time"]), 0.5, key="timeline_position")
+    with c2:
+        state["playback_speed"] = st.select_slider("Speed", options=[0.5, 1.0, 1.5, 2.0], value=float(state["playback_speed"]), key="timeline_speed")
+    with c3:
+        state["selected_scenario"] = st.selectbox("Scenario", ["baseline", "remove_event", "swap_action_class", "adjust_possession_outcome"], index=["baseline", "remove_event", "swap_action_class", "adjust_possession_outcome"].index(state.get("selected_scenario", "baseline")), key="timeline_scenario")
+    with c4:
+        if director_queue is not None and not director_queue.empty:
+            opts = ["None"] + director_queue["event_id"].astype(str).tolist()
+            selected = state.get("selected_event_id") or "None"
+            if selected not in opts:
+                selected = "None"
+            picked = st.selectbox("Jump to event", opts, index=opts.index(selected), key="timeline_event_jump")
+            state["selected_event_id"] = None if picked == "None" else picked
+
+    step_left, step_right = st.columns(2)
+    with step_left:
+        if st.button("◀ Step -1s"):
+            state["current_time"] = max(0.0, float(state["current_time"]) - 1.0)
+            st.rerun()
+    with step_right:
+        if st.button("Step +1s ▶"):
+            state["current_time"] = min(float(match_duration_s), float(state["current_time"]) + 1.0)
+            st.rerun()
+
+
+def _build_track_stack_figure(win_prob_df: pd.DataFrame, shot_df: pd.DataFrame, vaep_df: pd.DataFrame, momentum_series: pd.Series, director_queue: pd.DataFrame, current_time: float, is_overtime: bool):
+    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.03, row_heights=[0.4, 0.2, 0.2, 0.2])
+
+    wp_fig = build_win_probability_chart(win_prob_df, is_overtime, events=[{"time": float(r.time), "team": r.team, "label": r.event_type} for r in director_queue.itertuples(index=False)])
+    for trace in wp_fig.data:
+        fig.add_trace(trace, row=1, col=1)
+
+    if not shot_df.empty and "xG" in shot_df.columns:
+        xs = pd.to_numeric(shot_df.get("Time", shot_df.get("Frame", 0)), errors="coerce").fillna(0.0)
+        if "Frame" in shot_df.columns and "Time" not in shot_df.columns:
+            xs = xs / float(REPLAY_FPS)
+        ys = pd.to_numeric(shot_df["xG"], errors="coerce").fillna(0.0)
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="xG", line=dict(color=semantic_color("threshold", "positive"))), row=2, col=1)
+
+    if not vaep_df.empty and "VAEP" in vaep_df.columns:
+        xs = pd.to_numeric(vaep_df.get("Time", vaep_df.get("Frame", 0)), errors="coerce").fillna(0.0)
+        if "Frame" in vaep_df.columns and "Time" not in vaep_df.columns:
+            xs = xs / float(REPLAY_FPS)
+        ys = pd.to_numeric(vaep_df["VAEP"], errors="coerce").fillna(0.0)
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name="VAEP", line=dict(color=semantic_color("dual_series", "primary"))), row=3, col=1)
+
+    if momentum_series is not None and not momentum_series.empty:
+        fig.add_trace(go.Scatter(x=momentum_series.index, y=momentum_series.values, mode="lines", name="Pressure", line=dict(color=semantic_color("dual_series", "secondary"))), row=4, col=1)
+
+    if director_queue is not None and not director_queue.empty:
+        for evt in director_queue.head(20).itertuples(index=False):
+            style = event_style(team=str(evt.team), event_type=str(evt.event_type), confidence=float(evt.confidence))
+            fig.add_trace(
+                go.Scatter(
+                    x=[float(evt.time)], y=[100], mode="markers", marker=dict(size=8, symbol=style["symbol"], color=style["color"], opacity=style["opacity"]), showlegend=False, hovertemplate=f"{evt.event_id}: {evt.summary}<extra></extra>",
+                ),
+                row=1,
+                col=1,
+            )
+
+    for row in (1, 2, 3, 4):
+        fig.add_vline(x=float(current_time), line_dash="dot", line_color="#ffffff", line_width=1, row=row, col=1)
+
+    fig = apply_chart_theme(fig, tier="hero", intent="neutral")
+    fig.update_layout(height=760, title="Director Mode Track Stack", showlegend=False)
+    fig.update_xaxes(title_text="Match Time (s)", row=4, col=1)
+    fig.update_yaxes(title_text="Win%", row=1, col=1)
+    fig.update_yaxes(title_text="xG", row=2, col=1)
+    fig.update_yaxes(title_text="VAEP", row=3, col=1)
+    fig.update_yaxes(title_text="Pressure", row=4, col=1)
+    return fig
+
+
+def _build_field_replay_layer(shot_df: pd.DataFrame, director_queue: pd.DataFrame, current_time: float) -> go.Figure:
+    fig = themed_figure()
+    fig.update_layout(get_field_layout("Field Replay Layer (2D)"))
+    if not shot_df.empty:
+        shots = shot_df.copy()
+        time_series = pd.to_numeric(shots.get("Time", shots.get("Frame", 0)), errors="coerce").fillna(0.0)
+        if "Frame" in shots.columns and "Time" not in shots.columns:
+            time_series = time_series / float(REPLAY_FPS)
+        near = shots[(time_series >= current_time - 3) & (time_series <= current_time + 3)]
+        if SHOT_COL_X in near.columns and SHOT_COL_Y in near.columns:
+            fig.add_trace(go.Scatter(x=near[SHOT_COL_X], y=near[SHOT_COL_Y], mode="markers", marker=dict(size=10, color="#ffffff", opacity=0.8), name="Nearby shots"))
+    if director_queue is not None and not director_queue.empty:
+        selected = director_queue.loc[(director_queue["time"] - current_time).abs().idxmin()]
+        style = event_style(team=str(selected.get("team", "")), event_type=str(selected.get("event_type", "")), confidence=float(selected.get("confidence", 0.5)))
+        fig.add_annotation(x=0, y=0, text=f"Now: {selected.get('summary', '')}", showarrow=False, font=dict(color=style["color"]))
+    return fig
 
 def _fmt_signed(value: float, *, precision: int = 3, scale: float = 1.0, suffix: str = "") -> str:
     numeric = pd.to_numeric(value, errors="coerce")
@@ -485,6 +591,7 @@ st.session_state.setdefault("shared_match_player", "All")
 st.session_state.setdefault("shared_time_window", (0.0, 30.0))
 st.session_state.setdefault("shared_hero", None)
 st.session_state.setdefault("shared_teammate", "None")
+st.session_state.setdefault("timeline_state", {"current_time": 0.0, "selected_event_id": None, "playback_speed": 1.0, "selected_scenario": "baseline"})
 
 # (Constants imported from constants.py)
 
@@ -3021,15 +3128,52 @@ if app_mode == "🔍 Single Match Analysis":
 
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
-            
-        tf1, tf2, tf3, tf4, tf5, tf6 = st.tabs([
-            "🌊 Game Flow",
-            "🎯 Shot Intelligence",
-            "🏃 Movement",
-            "🛡️ Defense & Mechanics",
-            "🧑‍🏫 Coach Report",
-            "📸 Export",
-        ])
+
+        max_time = 0.0
+        if not win_prob_df.empty and "Time" in win_prob_df.columns:
+            max_time = max(max_time, float(pd.to_numeric(win_prob_df["Time"], errors="coerce").fillna(0.0).max()))
+        if not shot_df.empty:
+            time_probe = pd.to_numeric(shot_df.get("Time", shot_df.get("Frame", 0)), errors="coerce").fillna(0.0)
+            if "Frame" in shot_df.columns and "Time" not in shot_df.columns:
+                time_probe = time_probe / float(REPLAY_FPS)
+            max_time = max(max_time, float(time_probe.max()))
+
+        director_queue = build_director_event_queue(
+            win_prob_df=win_prob_df,
+            shot_df=shot_df,
+            kickoff_df=kickoff_df,
+            vaep_df=vaep_df,
+            save_events_df=defense_df,
+        )
+        t_state = _timeline_state(max_time)
+        st.subheader("🎬 Director Mode")
+        _render_timeline_controls(t_state, max_time, director_queue)
+
+        track_df = synchronize_track_times(win_prob_df=win_prob_df, shot_df=shot_df, vaep_df=vaep_df, momentum_series=momentum_series)
+        if not track_df.empty and "event_id" not in track_df.columns:
+            track_df["event_id"] = None
+        if t_state.get("selected_scenario") and t_state["selected_scenario"] != "baseline":
+            track_df = apply_counterfactual(track_df, event_id=t_state.get("selected_event_id"), intervention=t_state["selected_scenario"])
+
+        replay_fig = _build_field_replay_layer(shot_df, director_queue, float(t_state["current_time"]))
+        st.plotly_chart(replay_fig, use_container_width=True)
+        st.caption(f"At {fmt_time(t_state['current_time'])}, synchronized replay cursor is active.")
+
+        stack_fig = _build_track_stack_figure(win_prob_df, shot_df, vaep_df, momentum_series, director_queue, float(t_state["current_time"]), is_overtime)
+        st.plotly_chart(stack_fig, use_container_width=True)
+
+        if not director_queue.empty:
+            nearest = director_queue.iloc[(director_queue["time"] - float(t_state["current_time"])).abs().argsort()[:3]]
+            for row in nearest.itertuples(index=False):
+                confidence_band = "high" if row.confidence >= 0.8 else "medium" if row.confidence >= 0.55 else "low"
+                st.caption(f"At {fmt_time(row.time)}, {row.team} {row.event_type} impact {row.impact_score:+.2f}, {confidence_band} confidence.")
+
+        tf1 = st.container()
+        tf2 = st.container()
+        tf3 = st.container()
+        tf4 = st.container()
+        tf5 = st.container()
+        tf6 = st.container()
             
         with tf1:
             st.subheader("Kickoff Analysis")
@@ -3112,11 +3256,18 @@ if app_mode == "🔍 Single Match Analysis":
                     verbosity=ns_verbosity,
                     role_target=ns_role,
                     players_per_team=players_per_team,
+                    director_event_queue=director_queue,
                 )
                 if narrative_report.claims:
                     for claim in narrative_report.claims:
                         st.markdown(f"**{claim.phase.replace('_', ' ').title()}** — {claim.text}")
                         st.caption(f"{claim.confidence_language.title()} ({claim.confidence:.2f})")
+                        if claim.canonical_event_id and st.button(f"Jump to {claim.canonical_event_id}", key=f"claim_jump_{claim.phase}_{claim.canonical_event_id}"):
+                            match_evt = director_queue[director_queue["event_id"] == claim.canonical_event_id] if not director_queue.empty else pd.DataFrame()
+                            if not match_evt.empty:
+                                st.session_state.timeline_state["current_time"] = float(match_evt.iloc[0]["time"])
+                                st.session_state.timeline_state["selected_event_id"] = claim.canonical_event_id
+                                st.rerun()
                         for ev in claim.evidence:
                             ev_bits = [f"source={ev.source}"]
                             if ev.row_index is not None:
