@@ -9,6 +9,7 @@ import base64
 import tempfile
 import logging
 import numpy as np
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from time import perf_counter
 
@@ -76,6 +77,23 @@ from analytics.aggregations.value_reports import build_player_value_reports
 from analytics.counterfactuals import build_coach_report
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class MatchStoryViewModel:
+    """Narrative-ready match context shared by story surfaces."""
+
+    win_prob_series: pd.Series
+    momentum_series: pd.Series
+    turning_points: list[dict[str, object]]
+
+    @property
+    def has_win_probability(self) -> bool:
+        return not self.win_prob_series.empty
+
+    @property
+    def has_momentum(self) -> bool:
+        return not self.momentum_series.empty
 
 
 def themed_figure(*args, tier="support", intent=None, variant="default", **kwargs):
@@ -2720,6 +2738,67 @@ def resolve_win_prob_series(win_prob_df):
     return normalized_df, normalized_df["WinProb"].dropna()
 
 
+
+
+def _build_leverage_turning_points(momentum_series: pd.Series, max_points: int = 3) -> list[dict[str, object]]:
+    """Identify major momentum swings as leverage turning points."""
+    if momentum_series is None or momentum_series.empty:
+        return []
+
+    series = pd.to_numeric(momentum_series, errors="coerce").dropna()
+    if series.size < 2:
+        return []
+
+    slope = series.diff().abs().dropna()
+    if slope.empty:
+        return []
+
+    top = slope.nlargest(max_points)
+    points: list[dict[str, object]] = []
+    for ts, magnitude in top.items():
+        if pd.isna(magnitude):
+            continue
+        direction = "Blue pressure spike" if series.loc[ts] >= 0 else "Orange pressure spike"
+        points.append({
+            "type": "leverage_spike",
+            "time": float(ts),
+            "label": direction,
+            "magnitude": float(magnitude),
+        })
+    return points
+
+
+def _build_goal_turning_points(goal_events: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Normalize goal events into shared turning-point format."""
+    points: list[dict[str, object]] = []
+    for event in goal_events or []:
+        try:
+            event_time = float(event.get("time", 0.0))
+        except (TypeError, ValueError):
+            event_time = 0.0
+        points.append({
+            "type": "goal",
+            "time": event_time,
+            "label": event.get("label") or "Goal",
+            "team": event.get("team"),
+        })
+    return points
+
+
+def build_match_story_view_model(win_prob_df, momentum_series, goal_events) -> MatchStoryViewModel:
+    """Build a canonical match story model for narrative rendering surfaces."""
+    _, win_prob_series = resolve_win_prob_series(win_prob_df)
+    normalized_momentum = pd.to_numeric(momentum_series, errors="coerce").dropna() if momentum_series is not None else pd.Series(dtype=float)
+
+    turning_points = _build_goal_turning_points(goal_events)
+    turning_points.extend(_build_leverage_turning_points(normalized_momentum))
+    turning_points = sorted(turning_points, key=lambda point: float(point.get("time", 0.0)))
+
+    return MatchStoryViewModel(
+        win_prob_series=win_prob_series,
+        momentum_series=normalized_momentum,
+        turning_points=turning_points,
+    )
 def build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=None, wp_model_used=False, pid_name_map=None):
     """Win probability chart for export."""
     win_prob_df = win_prob_df if win_prob_df is not None else calculate_win_probability(proto, game_df, pid_team)
@@ -2833,7 +2912,7 @@ def build_export_pressure(momentum_series, proto, pid_team):
     return fig
 
 # --- 11. UI COMPONENTS ---
-def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_df, focus_players):
+def render_elite_overview_shell(df, shot_df, pass_df, story_model, coach_report_df, focus_players):
     """Top-level command center surface modeled after the elite iOS concept."""
     blue_df = df[df['Team'] == 'Blue']
     orange_df = df[df['Team'] == 'Orange']
@@ -2847,7 +2926,7 @@ def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_
     poss_orange = float(orange_df.get('Possession', pd.Series([0.0])).sum()) if not orange_df.empty else 0.0
     total_poss = poss_blue + poss_orange
 
-    win_prob_df, wp = resolve_win_prob_series(win_prob_df)
+    wp = story_model.win_prob_series if story_model is not None else pd.Series(dtype=float)
     win_swing = float(wp.max() - wp.min()) if not wp.empty else 0.0
 
     if shot_df is not None and not shot_df.empty and COL_XG in shot_df.columns:
@@ -2885,17 +2964,34 @@ def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_
         left, right = st.columns([2.3, 1.0])
         with left:
             st.markdown("#### Narrative Arc · pressure, xG, and turning points")
-            if not wp.empty:
+            if story_model is not None and story_model.has_win_probability:
                 fig_arc = themed_figure(tier="support")
-                x_vals = np.arange(len(wp))
-                fig_arc.add_trace(go.Scatter(x=x_vals, y=wp, mode='lines', line=dict(color='#7fb5ff', width=3), showlegend=False))
-                fig_arc.add_trace(go.Scatter(x=x_vals, y=100 - wp, mode='lines', line=dict(color='#fb7f9b', width=2), showlegend=False))
+                wp_vals = story_model.win_prob_series.sort_index()
+                fig_arc.add_trace(go.Scatter(x=wp_vals.index, y=wp_vals.values, mode='lines', line=dict(color='#7fb5ff', width=3), name='Blue win %', showlegend=False))
+                fig_arc.add_trace(go.Scatter(x=wp_vals.index, y=100 - wp_vals.values, mode='lines', line=dict(color='#fb7f9b', width=2), name='Orange win %', showlegend=False))
                 fig_arc.update_layout(height=240, margin=dict(l=12, r=12, t=12, b=12))
                 fig_arc.update_xaxes(visible=False)
                 fig_arc.update_yaxes(visible=False)
                 st.plotly_chart(fig_arc, use_container_width=True)
+            elif story_model is not None and story_model.has_momentum:
+                fig_arc = themed_figure(tier="support")
+                momentum_vals = story_model.momentum_series.sort_index()
+                fig_arc.add_trace(go.Scatter(x=momentum_vals.index, y=momentum_vals.clip(lower=0), fill='tozeroy', mode='none', fillcolor=TEAM_COLORS["Blue"]["light"], name='Blue pressure', showlegend=False))
+                fig_arc.add_trace(go.Scatter(x=momentum_vals.index, y=momentum_vals.clip(upper=0), fill='tozeroy', mode='none', fillcolor=TEAM_COLORS["Orange"]["light"], name='Orange pressure', showlegend=False))
+                fig_arc.update_layout(height=240, margin=dict(l=12, r=12, t=12, b=12))
+                fig_arc.update_xaxes(visible=False)
+                fig_arc.update_yaxes(visible=False)
+                st.plotly_chart(fig_arc, use_container_width=True)
+                st.caption('Win probability unavailable; narrative arc is using momentum only.')
             else:
-                st.info('Narrative chart appears after replay parsing.')
+                st.info('Narrative Arc is unavailable: both win probability and momentum data are missing for this replay.')
+
+            if story_model is not None and story_model.turning_points:
+                with st.expander("Turning points", expanded=False):
+                    for point in story_model.turning_points[:8]:
+                        label = str(point.get('label', 'Turning point'))
+                        time_sec = float(point.get('time', 0.0))
+                        st.markdown(f"- **{fmt_time(time_sec)}** · {label}")
 
             with st.container(border=True):
                 st.markdown("#### Key Insight")
@@ -3164,7 +3260,11 @@ if app_mode == "🔍 Single Match Analysis":
             help="Shared player filter synced across related match tabs.",
         )
 
-        render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_df, focus_players)
+        max_frame = game_df.index.max() if game_df is not None and not game_df.empty else None
+        goal_events = extract_goal_events(proto, pid_team, pid_name_map=temp_map, max_frame=max_frame)
+        story_model = build_match_story_view_model(win_prob_df, momentum_series, goal_events)
+
+        render_elite_overview_shell(df, shot_df, pass_df, story_model, coach_report_df, focus_players)
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
@@ -3303,7 +3403,6 @@ if app_mode == "🔍 Single Match Analysis":
             try:
                 if not win_prob_df.empty:
                     win_prob_df_normalized, normalized_wp = resolve_win_prob_series(win_prob_df)
-                    goal_events = extract_goal_events(proto, pid_team, pid_name_map=temp_map, max_frame=game_df.index.max())
                     model_meta = {
                         "subtitle": "In-game win probability trend",
                     }
@@ -3324,7 +3423,7 @@ if app_mode == "🔍 Single Match Analysis":
                         title="Win Probability",
                         kpis=[
                             ("Final Match State", final_state, None),
-                            ("Goal Events", str(len(goal_events)), None),
+                            ("Goal Events", str(len([p for p in story_model.turning_points if p.get("type") == "goal"])), None),
                         ],
                         chart_fig=fig_prob,
                         narrative="The win-probability line highlights control swings; abrupt steps usually align with goals.",
@@ -3376,10 +3475,10 @@ if app_mode == "🔍 Single Match Analysis":
 
             # --- B. MOMENTUM CHART ---
             st.markdown("#### 🌊 Pressure Index")
-            if not momentum_series.empty:
+            if story_model.has_momentum:
                 fig = themed_figure(tier="detail")
-                x_time = momentum_series.index
-                y_values = momentum_series.values
+                x_time = story_model.momentum_series.index
+                y_values = story_model.momentum_series.values
                 fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(min=0), fill='tozeroy', mode='none', name='Blue Pressure', fillcolor=TEAM_COLORS["Blue"]["light"]))
                 fig.add_trace(go.Scatter(x=x_time, y=y_values.clip(max=0), fill='tozeroy', mode='none', name='Orange Pressure', fillcolor=TEAM_COLORS["Orange"]["light"]))
 
