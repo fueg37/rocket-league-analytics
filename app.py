@@ -543,6 +543,92 @@ def inject_ios_shell_theme() -> None:
             font-size: 0.78rem;
             padding: 0.28rem 0.65rem;
         }
+
+        .ios-score-shell {
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 22px;
+            background: linear-gradient(140deg, rgba(14, 28, 58, 0.72), rgba(11, 23, 46, 0.5));
+            padding: 0.9rem 1rem;
+            margin: 0.4rem 0 0.8rem 0;
+        }
+        .ios-scoreline {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            text-align: center;
+            gap: 0.6rem;
+        }
+        .ios-score {
+            font-size: 3rem;
+            font-weight: 750;
+            line-height: 1;
+            letter-spacing: -0.04em;
+        }
+        .ios-score.blue { color: #66a7ff; }
+        .ios-score.orange { color: #ffaf67; }
+        .ios-score-sep {
+            font-size: 1.8rem;
+            color: #d7e6ff;
+            opacity: 0.9;
+        }
+        .ios-ot-badge {
+            border-radius: 999px;
+            border: 1px solid rgba(250, 204, 21, 0.55);
+            color: #fde68a;
+            padding: 0.12rem 0.42rem;
+            font-size: 0.72rem;
+            margin-left: 0.4rem;
+            vertical-align: middle;
+        }
+        .ios-luck-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            text-align: center;
+            margin-top: 0.55rem;
+            color: #d6e5ff;
+            font-weight: 550;
+        }
+        .ios-luck-pos { color: #86efac; }
+        .ios-luck-mid { color: #fcd34d; }
+        .ios-luck-neg { color: #fda4af; }
+        .ios-team-label {
+            margin-top: 0.55rem;
+            font-size: 0.8rem;
+            color: #a7bddf;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .ios-possession-card {
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 18px;
+            background: rgba(12, 25, 52, 0.52);
+            padding: 0.7rem 0.9rem 0.85rem;
+            margin-bottom: 0.8rem;
+        }
+        .ios-possession-track {
+            width: 100%;
+            height: 14px;
+            border-radius: 999px;
+            overflow: hidden;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: rgba(15, 23, 42, 0.75);
+            display: flex;
+        }
+        .ios-possession-blue {
+            background: linear-gradient(90deg, #3b82f6, #60a5fa);
+            height: 100%;
+        }
+        .ios-possession-orange {
+            background: linear-gradient(90deg, #fb923c, #f59e0b);
+            height: 100%;
+        }
+        .ios-possession-meta {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 0.45rem;
+            font-size: 0.82rem;
+            font-weight: 650;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2570,25 +2656,50 @@ def build_export_pressure(momentum_series, proto, pid_team):
 # --- 11. UI COMPONENTS ---
 def render_scoreboard(df, shot_df=None, is_overtime=False):
     st.markdown("### 🏆 Final Scoreboard")
-    blue_goals = df[df['Team']=='Blue']['Goals'].sum()
-    orange_goals = df[df['Team']=='Orange']['Goals'].sum()
-    ot_badge = " <span style='font-size: 0.4em; color: #ffcc00;'>(OT)</span>" if is_overtime else ""
-    c1, c2, c3 = st.columns([1, 0.5, 1])
-    with c1: st.markdown(f"<h1 style='text-align: center; color: #007bff; margin: 0;'>{blue_goals}</h1>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<h1 style='text-align: center; color: white; margin: 0;'>-{ot_badge}</h1>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<h1 style='text-align: center; color: #ff9900; margin: 0;'>{orange_goals}</h1>", unsafe_allow_html=True)
-    # Luck % display
+    blue_goals = int(df[df['Team'] == 'Blue']['Goals'].sum())
+    orange_goals = int(df[df['Team'] == 'Orange']['Goals'].sum())
+    overtime_badge = '<span class="ios-ot-badge">OT</span>' if is_overtime else ''
+
+    st.markdown(
+        f"""
+        <div class="ios-score-shell">
+          <div class="ios-scoreline">
+            <div>
+              <div class="ios-score blue">{blue_goals}</div>
+              <div class="ios-team-label">Blue Team</div>
+            </div>
+            <div class="ios-score-sep">— {overtime_badge}</div>
+            <div>
+              <div class="ios-score orange">{orange_goals}</div>
+              <div class="ios-team-label">Orange Team</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if shot_df is not None and not shot_df.empty:
-        blue_luck = calculate_luck_percentage(shot_df, "Blue", int(blue_goals))
-        orange_luck = calculate_luck_percentage(shot_df, "Orange", int(orange_goals))
-        lc1, lc2 = st.columns(2)
-        with lc1:
-            luck_color = "#00cc96" if blue_luck > 50 else "#ff6b6b" if blue_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {blue_luck}%</span></div>", unsafe_allow_html=True)
-        with lc2:
-            luck_color = "#00cc96" if orange_luck > 50 else "#ff6b6b" if orange_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {orange_luck}%</span></div>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+        blue_luck = calculate_luck_percentage(shot_df, "Blue", blue_goals)
+        orange_luck = calculate_luck_percentage(shot_df, "Orange", orange_goals)
+
+        def _luck_class(value: float) -> str:
+            if value > 50:
+                return "ios-luck-pos"
+            if value < 30:
+                return "ios-luck-neg"
+            return "ios-luck-mid"
+
+        st.markdown(
+            f"""
+            <div class="ios-luck-row">
+              <div>Blue luck: <span class="{_luck_class(blue_luck)}">{blue_luck}%</span></div>
+              <div>Orange luck: <span class="{_luck_class(orange_luck)}">{orange_luck}%</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     cols = ['Name', 'Rating', 'Score', 'Goals', 'Assists', 'Saves', 'Shots']
     col_blue, col_orange = st.columns(2)
     with col_blue:
@@ -2609,17 +2720,22 @@ def render_dashboard(df, shot_df, pass_df):
     if total > 0:
         blue_pct = int((blue_poss / total) * 100)
         orange_pct = 100 - blue_pct
-        st.write(f"**Possession**")
-        st.markdown(f"""
-            <div style="display: flex; width: 100%; height: 20px; border-radius: 10px; overflow: hidden;">
-                <div style="background-color: #007bff; width: {blue_pct}%;"></div>
-                <div style="background-color: #ff9900; width: {orange_pct}%;"></div>
+        st.markdown(
+            f"""
+            <div class="ios-possession-card">
+              <div style="font-weight:650; margin-bottom:0.45rem;">Possession Split</div>
+              <div class="ios-possession-track">
+                <div class="ios-possession-blue" style="width: {blue_pct}%;"></div>
+                <div class="ios-possession-orange" style="width: {orange_pct}%;"></div>
+              </div>
+              <div class="ios-possession-meta">
+                <span style="color:#93c5fd;">Blue {blue_pct}%</span>
+                <span style="color:#fdba74;">Orange {orange_pct}%</span>
+              </div>
             </div>
-            <div style="display: flex; justify-content: space-between; margin-top: 5px;">
-                <span style="color: #007bff; font-weight: bold;">{blue_pct}%</span>
-                <span style="color: #ff9900; font-weight: bold;">{orange_pct}%</span>
-            </div>
-        """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
     st.divider()
     blue_df = df[df['Team']=='Blue']
     orange_df = df[df['Team']=='Orange']
