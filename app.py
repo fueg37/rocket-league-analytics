@@ -2693,9 +2693,37 @@ def build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime):
     )
     return fig
 
+
+
+def resolve_win_prob_series(win_prob_df):
+    """Normalize win-probability inputs to canonical ``WinProb`` in 0-100 scale."""
+    if win_prob_df is None:
+        return pd.DataFrame(), pd.Series(dtype=float)
+
+    normalized_df = win_prob_df.copy()
+    if normalized_df.empty:
+        if "WinProb" not in normalized_df.columns:
+            normalized_df["WinProb"] = pd.Series(dtype=float)
+        return normalized_df, pd.Series(dtype=float)
+
+    source_col = next((col for col in ("WinProb", "BlueWinProb", "Blue_Win_Prob", "win_prob_blue") if col in normalized_df.columns), None)
+    if source_col is None:
+        normalized_df["WinProb"] = pd.Series([np.nan] * len(normalized_df), index=normalized_df.index, dtype=float)
+        return normalized_df, pd.Series(dtype=float)
+
+    win_prob = pd.to_numeric(normalized_df[source_col], errors="coerce")
+    valid = win_prob.dropna()
+    if not valid.empty and valid.max() <= 1.0 and valid.min() >= 0.0:
+        win_prob = win_prob * 100.0
+
+    normalized_df["WinProb"] = win_prob.clip(lower=0.0, upper=100.0)
+    return normalized_df, normalized_df["WinProb"].dropna()
+
+
 def build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=None, wp_model_used=False, pid_name_map=None):
     """Win probability chart for export."""
     win_prob_df = win_prob_df if win_prob_df is not None else calculate_win_probability(proto, game_df, pid_team)
+    win_prob_df, _ = resolve_win_prob_series(win_prob_df)
     max_frame = game_df.index.max() if game_df is not None and not game_df.empty else None
     goal_events = extract_goal_events(proto, pid_team, pid_name_map=pid_name_map or {}, max_frame=max_frame)
     model_meta = {
@@ -2819,12 +2847,8 @@ def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_
     poss_orange = float(orange_df.get('Possession', pd.Series([0.0])).sum()) if not orange_df.empty else 0.0
     total_poss = poss_blue + poss_orange
 
-    wp = pd.Series(dtype=float)
-    if win_prob_df is not None and not win_prob_df.empty:
-        wp_col = next((c for c in ['BlueWinProb', 'Blue_Win_Prob', 'win_prob_blue'] if c in win_prob_df.columns), None)
-        if wp_col:
-            wp = pd.to_numeric(win_prob_df[wp_col], errors='coerce').dropna()
-    win_swing = float((wp.max() - wp.min()) * 100) if not wp.empty else 0.0
+    win_prob_df, wp = resolve_win_prob_series(win_prob_df)
+    win_swing = float(wp.max() - wp.min()) if not wp.empty else 0.0
 
     if shot_df is not None and not shot_df.empty and COL_XG in shot_df.columns:
         xg_benchmark = float(pd.to_numeric(shot_df[COL_XG], errors='coerce').fillna(0).mean() * 10)
@@ -2865,7 +2889,7 @@ def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_
                 fig_arc = themed_figure(tier="support")
                 x_vals = np.arange(len(wp))
                 fig_arc.add_trace(go.Scatter(x=x_vals, y=wp, mode='lines', line=dict(color='#7fb5ff', width=3), showlegend=False))
-                fig_arc.add_trace(go.Scatter(x=x_vals, y=1 - wp, mode='lines', line=dict(color='#fb7f9b', width=2), showlegend=False))
+                fig_arc.add_trace(go.Scatter(x=x_vals, y=100 - wp, mode='lines', line=dict(color='#fb7f9b', width=2), showlegend=False))
                 fig_arc.update_layout(height=240, margin=dict(l=12, r=12, t=12, b=12))
                 fig_arc.update_xaxes(visible=False)
                 fig_arc.update_yaxes(visible=False)
@@ -3278,25 +3302,19 @@ if app_mode == "🔍 Single Match Analysis":
             # --- A. WIN PROBABILITY CHART ---
             try:
                 if not win_prob_df.empty:
+                    win_prob_df_normalized, normalized_wp = resolve_win_prob_series(win_prob_df)
                     goal_events = extract_goal_events(proto, pid_team, pid_name_map=temp_map, max_frame=game_df.index.max())
                     model_meta = {
                         "subtitle": "In-game win probability trend",
                     }
                     fig_prob = build_win_probability_chart(
-                        win_prob_df=win_prob_df,
+                        win_prob_df=win_prob_df_normalized,
                         is_overtime=is_overtime,
                         model_meta=model_meta,
                         events=goal_events,
                         tier="detail",
                     )
-                    wp_col = next((c for c in ["BlueWinProb", "Blue_Win_Prob", "win_prob_blue", "WinProb"] if c in win_prob_df.columns), None)
-                    blue_last = 50.0
-                    if wp_col is not None:
-                        raw_last = pd.to_numeric(win_prob_df[wp_col], errors='coerce').dropna()
-                        if not raw_last.empty:
-                            blue_last = float(raw_last.iloc[-1])
-                            if blue_last <= 1.0:
-                                blue_last *= 100.0
+                    blue_last = float(normalized_wp.iloc[-1]) if not normalized_wp.empty else 50.0
                     blue_match_goals = int(df[df['Team'] == 'Blue']['Goals'].sum())
                     orange_match_goals = int(df[df['Team'] == 'Orange']['Goals'].sum())
                     if blue_match_goals != orange_match_goals:
