@@ -44,6 +44,12 @@ from charts.factory import (
     action_type_value_decomposition_chart,
     arena_3d_shot_chart,
     teammate_synergy_matrix,
+    add_boost_pad_overlay,
+    ball_carry_map,
+    demo_map,
+    vaep_waterfall_chart,
+    save_quality_scatter,
+    boost_economy_timeline,
 )
 from analytics.chemistry import build_season_chemistry_tables
 from analytics.partnership_recommendations import build_pair_recommendations
@@ -450,12 +456,19 @@ except ImportError:
 
 import json
 
-# Load pitch background image as base64 for Plotly
+# Load pitch background images as base64 for Plotly.
+# Prefer arena-aerial-bg.png (broadcast quality) if provided; fall back to simple-pitch.png.
 PITCH_IMAGE_B64 = None
+_aerial_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "arena-aerial-bg.png")
 _pitch_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "simple-pitch.png")
-if os.path.exists(_pitch_path):
+if os.path.exists(_aerial_path):
+    with open(_aerial_path, "rb") as _f:
+        PITCH_IMAGE_B64 = "data:image/png;base64," + base64.b64encode(_f.read()).decode()
+elif os.path.exists(_pitch_path):
     with open(_pitch_path, "rb") as _f:
         PITCH_IMAGE_B64 = "data:image/png;base64," + base64.b64encode(_f.read()).decode()
+# Aerial background is denser — lower opacity prevents washing out scatter points
+_FIELD_BG_OPACITY = 0.55 if os.path.exists(_aerial_path) else 1.0
 
 st.set_page_config(page_title="RL Analytics", layout="wide", page_icon="🚀")
 st.title("🚀 Rocket League Analytics")
@@ -572,7 +585,7 @@ def get_field_layout(title=""):
             x=-rx, y=ry,
             sizex=2 * rx, sizey=2 * ry,
             sizing="stretch",
-            opacity=1.0,
+            opacity=_FIELD_BG_OPACITY,
             layer="below"
         )]
     else:
@@ -2249,10 +2262,16 @@ def build_export_heatmap(game_df, player_name):
             sampled = valid_pos.iloc[::3]
             fig.add_trace(go.Histogram2dContour(
                 x=sampled['pos_x'], y=sampled['pos_y'],
-                colorscale=[[0, 'rgba(0,0,0,0)'], [0.15, 'rgba(0,80,0,0.25)'],
-                            [0.3, 'rgba(0,160,0,0.4)'], [0.5, 'rgba(80,200,0,0.5)'],
-                            [0.7, 'rgba(200,220,0,0.6)'], [0.85, 'rgba(255,200,0,0.65)'],
-                            [1.0, 'rgba(255,255,50,0.75)']],
+                colorscale=[
+                    [0.0,  'rgba(0,0,0,0)'],
+                    [0.15, 'rgba(60,0,0,0.4)'],
+                    [0.3,  'rgba(120,20,0,0.55)'],
+                    [0.45, 'rgba(180,40,0,0.65)'],
+                    [0.6,  'rgba(220,100,0,0.75)'],
+                    [0.75, 'rgba(240,200,20,0.85)'],
+                    [0.9,  'rgba(255,240,80,0.92)'],
+                    [1.0,  'rgba(255,255,200,0.98)'],
+                ],
                 contours=dict(coloring='fill', showlines=False),
                 ncontours=20, showscale=False, hoverinfo='skip'
             ))
@@ -2457,94 +2476,465 @@ def build_export_pressure(momentum_series, proto, pid_team):
     return fig
 
 # --- 11. UI COMPONENTS ---
-def render_scoreboard(df, shot_df=None, is_overtime=False):
-    st.markdown("### 🏆 Final Scoreboard")
-    blue_goals = df[df['Team']=='Blue']['Goals'].sum()
-    orange_goals = df[df['Team']=='Orange']['Goals'].sum()
-    ot_badge = " <span style='font-size: 0.4em; color: #ffcc00;'>(OT)</span>" if is_overtime else ""
-    c1, c2, c3 = st.columns([1, 0.5, 1])
-    with c1: st.markdown(f"<h1 style='text-align: center; color: #007bff; margin: 0;'>{blue_goals}</h1>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<h1 style='text-align: center; color: white; margin: 0;'>-{ot_badge}</h1>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<h1 style='text-align: center; color: #ff9900; margin: 0;'>{orange_goals}</h1>", unsafe_allow_html=True)
-    # Luck % display
-    if shot_df is not None and not shot_df.empty:
-        blue_luck = calculate_luck_percentage(shot_df, "Blue", int(blue_goals))
-        orange_luck = calculate_luck_percentage(shot_df, "Orange", int(orange_goals))
-        lc1, lc2 = st.columns(2)
-        with lc1:
-            luck_color = "#00cc96" if blue_luck > 50 else "#ff6b6b" if blue_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {blue_luck}%</span></div>", unsafe_allow_html=True)
-        with lc2:
-            luck_color = "#00cc96" if orange_luck > 50 else "#ff6b6b" if orange_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {orange_luck}%</span></div>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
-    cols = ['Name', 'Rating', 'Score', 'Goals', 'Assists', 'Saves', 'Shots']
-    col_blue, col_orange = st.columns(2)
-    with col_blue:
-        st.markdown("#### 🔵 Blue Team")
-        blue_rows = stable_sort(apply_categorical_order(df[df['Team']=='Blue'][cols], 'Team', TEAM_ORDER), by=['Score', 'Name'], ascending=[False, True])
-        render_dataframe(blue_rows, use_container_width=True, hide_index=True)
-    with col_orange:
-        st.markdown("#### 🟠 Orange Team")
-        orange_rows = stable_sort(apply_categorical_order(df[df['Team']=='Orange'][cols], 'Team', TEAM_ORDER), by=['Score', 'Name'], ascending=[False, True])
-        render_dataframe(orange_rows, use_container_width=True, hide_index=True)
-    st.divider()
 
-def render_dashboard(df, shot_df, pass_df):
-    st.markdown("### 📊 Match Performance")
-    blue_poss = df[df['Team']=='Blue']['Possession'].sum()
-    orange_poss = df[df['Team']=='Orange']['Possession'].sum()
-    total = blue_poss + orange_poss
-    if total > 0:
-        blue_pct = int((blue_poss / total) * 100)
-        orange_pct = 100 - blue_pct
-        st.write(f"**Possession**")
-        st.markdown(f"""
-            <div style="display: flex; width: 100%; height: 20px; border-radius: 10px; overflow: hidden;">
-                <div style="background-color: #007bff; width: {blue_pct}%;"></div>
-                <div style="background-color: #ff9900; width: {orange_pct}%;"></div>
-            </div>
-            <div style="display: flex; justify-content: space-between; margin-top: 5px;">
-                <span style="color: #007bff; font-weight: bold;">{blue_pct}%</span>
-                <span style="color: #ff9900; font-weight: bold;">{orange_pct}%</span>
-            </div>
-        """, unsafe_allow_html=True)
-    st.divider()
+def inject_broadcast_styles():
+    """Inject CSS for broadcast/esports aesthetic once at app load."""
+    st.markdown("""
+    <style>
+    /* === BROADCAST SCOREBOARD === */
+    .scoreboard-hero {
+        position: relative;
+        width: 100%;
+        border-radius: 12px;
+        overflow: hidden;
+        margin-bottom: 8px;
+        background: #111111;
+        box-shadow: 0 4px 24px rgba(0,0,0,0.6);
+    }
+    .scoreboard-score-row {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px 0 16px 0;
+        position: relative;
+        min-height: 100px;
+    }
+    .scoreboard-blue-half {
+        position: absolute;
+        left: 0; top: 0; bottom: 0;
+        width: 42%;
+        background: linear-gradient(to right, rgba(0,123,255,0.45) 0%, transparent 100%);
+        pointer-events: none;
+    }
+    .scoreboard-orange-half {
+        position: absolute;
+        right: 0; top: 0; bottom: 0;
+        width: 42%;
+        background: linear-gradient(to left, rgba(255,153,0,0.45) 0%, transparent 100%);
+        pointer-events: none;
+    }
+    .scoreboard-team-blue {
+        flex: 1;
+        text-align: center;
+        font-size: 1.05em;
+        font-weight: 700;
+        color: #60a5fa;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        position: relative;
+        z-index: 2;
+    }
+    .scoreboard-team-orange {
+        flex: 1;
+        text-align: center;
+        font-size: 1.05em;
+        font-weight: 700;
+        color: #fb923c;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        position: relative;
+        z-index: 2;
+    }
+    .scoreboard-score-center {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 12px;
+        position: relative;
+        z-index: 2;
+        min-width: 200px;
+    }
+    .scoreboard-score-num {
+        font-size: 5em;
+        font-weight: 900;
+        line-height: 1;
+        letter-spacing: -2px;
+        font-variant-numeric: tabular-nums;
+    }
+    .scoreboard-score-blue { color: #60a5fa; }
+    .scoreboard-score-orange { color: #fb923c; }
+    .scoreboard-score-dash {
+        font-size: 3em;
+        font-weight: 300;
+        color: #6b7280;
+        line-height: 1;
+    }
+    .scoreboard-ot-badge {
+        position: absolute;
+        top: -18px;
+        right: -30px;
+        background: #f59e0b;
+        color: #111;
+        font-size: 0.45em;
+        font-weight: 800;
+        padding: 2px 8px;
+        border-radius: 4px;
+        letter-spacing: 0.08em;
+    }
+    /* === KPI STRIP === */
+    .scoreboard-kpi-strip {
+        display: flex;
+        border-top: 1px solid rgba(255,255,255,0.07);
+        background: rgba(0,0,0,0.35);
+    }
+    .kpi-team-block {
+        display: flex;
+        flex: 1;
+        justify-content: space-around;
+        padding: 12px 16px;
+        gap: 8px;
+    }
+    .kpi-item {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        min-width: 0;
+    }
+    .kpi-value {
+        font-size: 1.35em;
+        font-weight: 700;
+        color: #f3f4f6;
+        line-height: 1;
+    }
+    .kpi-label {
+        font-size: 0.62em;
+        font-weight: 500;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        white-space: nowrap;
+    }
+    .kpi-divider {
+        width: 1px;
+        background: rgba(255,255,255,0.08);
+        margin: 8px 0;
+    }
+    /* === POSSESSION BAR === */
+    .possession-bar-wrap {
+        padding: 10px 20px 14px 20px;
+        background: rgba(0,0,0,0.2);
+        border-top: 1px solid rgba(255,255,255,0.05);
+    }
+    .possession-track {
+        display: flex;
+        width: 100%;
+        height: 8px;
+        border-radius: 4px;
+        overflow: hidden;
+        margin-top: 4px;
+    }
+    .possession-label-row {
+        display: flex;
+        justify-content: space-between;
+        margin-top: 4px;
+    }
+    /* === PLAYER CARDS === */
+    .player-cards-section {
+        margin-top: 16px;
+    }
+    .player-cards-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 12px;
+        margin-bottom: 16px;
+    }
+    .player-card {
+        background: #1e1e1e;
+        border-radius: 10px;
+        padding: 14px 16px;
+        border: 1px solid rgba(255,255,255,0.08);
+        transition: border-color 0.2s;
+    }
+    .player-card-blue { border-left: 3px solid #3b82f6; }
+    .player-card-orange { border-left: 3px solid #fb923c; }
+    .player-card-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        margin-bottom: 10px;
+    }
+    .player-name {
+        font-size: 1.05em;
+        font-weight: 700;
+        color: #f3f4f6;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 68%;
+    }
+    .player-rating {
+        font-size: 0.78em;
+        font-weight: 600;
+        color: #94a3b8;
+    }
+    .player-stats-grid {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px 12px;
+        margin-bottom: 10px;
+    }
+    .stat-item {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        border-bottom: 1px solid rgba(255,255,255,0.04);
+        padding-bottom: 4px;
+    }
+    .stat-name {
+        font-size: 0.68em;
+        color: #94a3b8;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+    .stat-val {
+        font-size: 0.82em;
+        font-weight: 700;
+        color: #e2e8f0;
+    }
+    .player-bar-row {
+        margin-top: 6px;
+    }
+    .player-bar-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.65em;
+        color: #94a3b8;
+        margin-bottom: 3px;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+    }
+    .player-bar-track {
+        width: 100%;
+        height: 5px;
+        background: rgba(255,255,255,0.08);
+        border-radius: 3px;
+        overflow: hidden;
+    }
+    .player-bar-fill-blue {
+        height: 100%;
+        background: #3b82f6;
+        border-radius: 3px;
+    }
+    .player-bar-fill-orange {
+        height: 100%;
+        background: #fb923c;
+        border-radius: 3px;
+    }
+    .team-section-label {
+        font-size: 0.75em;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        margin-bottom: 8px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid rgba(255,255,255,0.07);
+    }
+    .team-label-blue { color: #60a5fa; }
+    .team-label-orange { color: #fb923c; }
+    </style>
+    """, unsafe_allow_html=True)
+
+
+def render_scoreboard(df, shot_df=None, is_overtime=False):
+    """Broadcast-style hero scoreboard with team color gradients and KPI strip."""
+    blue_goals = int(df[df['Team']=='Blue']['Goals'].sum())
+    orange_goals = int(df[df['Team']=='Orange']['Goals'].sum())
     blue_df = df[df['Team']=='Blue']
     orange_df = df[df['Team']=='Orange']
-    col1, col2 = st.columns(2)
-    for col, team_df, team_name in [(col1, blue_df, "Blue"), (col2, orange_df, "Orange")]:
-        with col:
-            st.subheader(f"{'🔵' if team_name == 'Blue' else '🟠'} {team_name} Team")
-            for _, p in team_df.iterrows():
-                with st.expander(f"**{p['Name']}** (Rating: {p['Rating']})"):
-                    sc1, sc2, sc3, sc4 = st.columns(4)
-                    with sc1:
-                        st.caption("Attack")
-                        st.write(f"⚽ Goals: {p['Goals']}")
-                        st.write(f"🎯 xG: {p['xG']}")
-                        st.write(f"🥅 xGOT: {p.get('xGOT', 0)}")
-                        st.write(f"📈 xGOT-Goals: {p.get('xGOT - Goals', 0)}")
-                        st.write(f"🔥 Big Chances: {p['Big Chances']}")
-                    with sc2:
-                        st.caption("Playmaking")
-                        st.write(f"👟 Assists: {p['Assists']}")
-                        st.write(f"🧠 xA: {p['xA']}")
-                        st.write(f"🔑 Key Passes: {p['Key Passes']}")
-                    with sc3:
-                        st.caption("Defense")
-                        st.write(f"🛡️ Saves: {p['Saves']}")
-                        st.write(f"⏱️ Poss: {p['Possession']}%")
-                        st.write(f"🛡️ xGA: {p.get('xGA', 0)}")
-                        st.write(f"🧤 Goals Prevented: {p.get('Goals Prevented', 0)}")
-                        st.write(f"👤 Shadow: {p.get('Shadow %', 0)}%")
-                    with sc4:
-                        st.caption("Mechanics")
-                        st.write(f"✈️ Aerials: {p.get('Aerial Hits', 0)}")
-                        st.write(f"⬆️ Airborne: {p.get('Time Airborne (s)', 0)}s")
-                        st.write(f"⚡ Recovery: {p.get('Avg Recovery (s)', 0)}s")
+
+    # Compute team-level KPIs
+    blue_xg = round(blue_df['xG'].sum(), 2) if 'xG' in blue_df.columns else 0
+    orange_xg = round(orange_df['xG'].sum(), 2) if 'xG' in orange_df.columns else 0
+    blue_saves = int(blue_df['Saves'].sum())
+    orange_saves = int(orange_df['Saves'].sum())
+    blue_shots = int(blue_df['Shots'].sum())
+    orange_shots = int(orange_df['Shots'].sum())
+    blue_aerials = int(blue_df['Aerial Hits'].sum()) if 'Aerial Hits' in blue_df.columns else 0
+    orange_aerials = int(orange_df['Aerial Hits'].sum()) if 'Aerial Hits' in orange_df.columns else 0
+
+    blue_luck, orange_luck = 50, 50
+    if shot_df is not None and not shot_df.empty:
+        blue_luck = calculate_luck_percentage(shot_df, "Blue", blue_goals)
+        orange_luck = calculate_luck_percentage(shot_df, "Orange", orange_goals)
+
+    def luck_color(pct):
+        if pct > 55: return "#22c55e"
+        if pct < 35: return "#ef4444"
+        return "#f59e0b"
+
+    ot_html = "<span class='scoreboard-ot-badge'>OT</span>" if is_overtime else ""
+
+    blue_names = " · ".join(blue_df.sort_values('Score', ascending=False)['Name'].tolist())
+    orange_names = " · ".join(orange_df.sort_values('Score', ascending=False)['Name'].tolist())
+
+    st.markdown(f"""
+    <div class="scoreboard-hero">
+      <div class="scoreboard-score-row">
+        <div class="scoreboard-blue-half"></div>
+        <div class="scoreboard-orange-half"></div>
+        <div class="scoreboard-team-blue">{blue_names}</div>
+        <div class="scoreboard-score-center">
+          <span class="scoreboard-score-num scoreboard-score-blue">{blue_goals}</span>
+          <span class="scoreboard-score-dash">—</span>
+          <div style="position:relative">
+            <span class="scoreboard-score-num scoreboard-score-orange">{orange_goals}</span>
+            {ot_html}
+          </div>
+        </div>
+        <div class="scoreboard-team-orange">{orange_names}</div>
+      </div>
+      <div class="scoreboard-kpi-strip">
+        <div class="kpi-team-block">
+          <div class="kpi-item">
+            <span class="kpi-value">{blue_xg}</span>
+            <span class="kpi-label">xG</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value">{blue_shots}</span>
+            <span class="kpi-label">Shots</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value">{blue_saves}</span>
+            <span class="kpi-label">Saves</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value">{blue_aerials}</span>
+            <span class="kpi-label">Aerials</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value" style="color:{luck_color(blue_luck)}">{blue_luck}%</span>
+            <span class="kpi-label">Luck</span>
+          </div>
+        </div>
+        <div class="kpi-divider"></div>
+        <div class="kpi-team-block">
+          <div class="kpi-item">
+            <span class="kpi-value">{orange_xg}</span>
+            <span class="kpi-label">xG</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value">{orange_shots}</span>
+            <span class="kpi-label">Shots</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value">{orange_saves}</span>
+            <span class="kpi-label">Saves</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value">{orange_aerials}</span>
+            <span class="kpi-label">Aerials</span>
+          </div>
+          <div class="kpi-item">
+            <span class="kpi-value" style="color:{luck_color(orange_luck)}">{orange_luck}%</span>
+            <span class="kpi-label">Luck</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def _render_player_card(p, team_color_class, bar_fill_class):
+    """Render a single broadcast-style player stat card as HTML."""
+    poss = float(p.get('Possession', 0))
+    aerials = int(p.get('Aerial Hits', 0))
+    aerial_pct_raw = float(p.get('Aerial %', 0))
+
+    stats_html = f"""
+      <div class="stat-item"><span class="stat-name">Goals</span><span class="stat-val">{p['Goals']}</span></div>
+      <div class="stat-item"><span class="stat-name">xG</span><span class="stat-val">{p['xG']:.2f}</span></div>
+      <div class="stat-item"><span class="stat-name">Assists</span><span class="stat-val">{p['Assists']}</span></div>
+      <div class="stat-item"><span class="stat-name">xGOT</span><span class="stat-val">{float(p.get('xGOT', 0)):.2f}</span></div>
+      <div class="stat-item"><span class="stat-name">Saves</span><span class="stat-val">{p['Saves']}</span></div>
+      <div class="stat-item"><span class="stat-name">xGA</span><span class="stat-val">{float(p.get('xGA', 0)):.2f}</span></div>
+      <div class="stat-item"><span class="stat-name">Shots</span><span class="stat-val">{p['Shots']}</span></div>
+      <div class="stat-item"><span class="stat-name">VAEP</span><span class="stat-val">{float(p.get('Total_VAEP', 0)):+.2f}</span></div>
+    """
+
+    return f"""
+    <div class="player-card {team_color_class}">
+      <div class="player-card-header">
+        <span class="player-name">{p['Name']}</span>
+        <span class="player-rating">Rating {p['Rating']}</span>
+      </div>
+      <div class="player-stats-grid">
+        {stats_html}
+      </div>
+      <div class="player-bar-row">
+        <div class="player-bar-label">
+          <span>Possession</span><span>{poss:.0f}%</span>
+        </div>
+        <div class="player-bar-track">
+          <div class="{bar_fill_class}" style="width:{min(poss, 100):.0f}%"></div>
+        </div>
+      </div>
+      <div class="player-bar-row" style="margin-top:6px">
+        <div class="player-bar-label">
+          <span>Aerials</span><span>{aerials}</span>
+        </div>
+        <div class="player-bar-track">
+          <div class="{bar_fill_class}" style="width:{min(aerial_pct_raw, 100):.0f}%"></div>
+        </div>
+      </div>
+    </div>
+    """
+
+
+def render_dashboard(df, shot_df, pass_df):
+    """Broadcast-style match performance with possession bar and player cards."""
+    blue_df = df[df['Team']=='Blue']
+    orange_df = df[df['Team']=='Orange']
+
+    # Possession bar
+    blue_poss = blue_df['Possession'].sum()
+    orange_poss = orange_df['Possession'].sum()
+    total_poss = blue_poss + orange_poss
+    blue_pct = int((blue_poss / total_poss) * 100) if total_poss > 0 else 50
+    orange_pct = 100 - blue_pct
+
+    st.markdown(f"""
+    <div class="scoreboard-hero" style="margin-top:6px; border-radius:8px;">
+      <div class="possession-bar-wrap">
+        <div class="possession-label-row">
+          <span style="font-size:0.72em;color:#60a5fa;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;">Ball Possession</span>
+        </div>
+        <div class="possession-track" style="margin-top:6px;">
+          <div style="background:#3b82f6;width:{blue_pct}%;"></div>
+          <div style="background:#fb923c;width:{orange_pct}%;"></div>
+        </div>
+        <div class="possession-label-row">
+          <span style="color:#60a5fa;font-size:0.8em;font-weight:700;">{blue_pct}%</span>
+          <span style="color:#fb923c;font-size:0.8em;font-weight:700;">{orange_pct}%</span>
+        </div>
+      </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Player cards — two columns (Blue left, Orange right)
+    col_b, col_o = st.columns(2)
+
+    with col_b:
+        st.markdown("<div class='team-section-label team-label-blue'>Blue Team</div>", unsafe_allow_html=True)
+        blue_sorted = stable_sort(blue_df, by=['Score', 'Name'], ascending=[False, True])
+        cards_html = '<div class="player-cards-grid">'
+        for _, p in blue_sorted.iterrows():
+            cards_html += _render_player_card(p, "player-card-blue", "player-bar-fill-blue")
+        cards_html += '</div>'
+        st.markdown(cards_html, unsafe_allow_html=True)
+
+    with col_o:
+        st.markdown("<div class='team-section-label team-label-orange'>Orange Team</div>", unsafe_allow_html=True)
+        orange_sorted = stable_sort(orange_df, by=['Score', 'Name'], ascending=[False, True])
+        cards_html = '<div class="player-cards-grid">'
+        for _, p in orange_sorted.iterrows():
+            cards_html += _render_player_card(p, "player-card-orange", "player-bar-fill-orange")
+        cards_html += '</div>'
+        st.markdown(cards_html, unsafe_allow_html=True)
+
+    st.divider()
 
 # --- 12. MAIN APP FLOW ---
+inject_broadcast_styles()
 st.sidebar.header("Settings")
 app_mode = st.sidebar.radio("Mode:", ["🔍 Single Match Analysis", "📈 Season Batch Processor"])
 filter_ghosts = st.sidebar.checkbox("Hide Bots", value=True)
@@ -2658,9 +3048,16 @@ if app_mode == "🔍 Single Match Analysis":
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
-        t2, t1, t3, t3b, t4, t5, t8, t9, t10, t11, t7 = st.tabs(["🌊 Match Narrative", "🚀 Kickoffs", "🎯 Shot Map", "🎬 Shot Viewer", "🕸️ Pass Map", "🔥 Heatmaps", "🛡️ Advanced", "🔄 Rotation", "🗺️ Tactical", "🧑‍🏫 Coach Report", "📸 Export"])
+        tf1, tf2, tf3, tf4, tf5, tf6 = st.tabs([
+            "🌊 Game Flow",
+            "🎯 Shot Intelligence",
+            "🏃 Movement",
+            "🛡️ Defense & Mechanics",
+            "🧑‍🏫 Coach Report",
+            "📸 Export",
+        ])
             
-        with t1:
+        with tf1:
             st.subheader("Kickoff Analysis")
             if not kickoff_df.empty:
                 disp_kickoff = kickoff_df.copy()
@@ -2687,6 +3084,7 @@ if app_mode == "🔍 Single Match Analysis":
                             variant="neutral",
                         )
                         fig.update_layout(get_field_layout("Kickoff Outcomes"))
+                        add_boost_pad_overlay(fig)
                         fig.update_layout(legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5, font=dict(color='white')))
                         st.plotly_chart(fig, use_container_width=True)
                     st.markdown("#### Kickoff Log")
@@ -2703,7 +3101,8 @@ if app_mode == "🔍 Single Match Analysis":
                 else: st.info("No kickoffs found for selected players.")
             else: st.info("No kickoff data found.")
 
-        with t2:
+        with tf1:
+            st.divider()
             st.subheader("Match Narrative")
 
             with st.expander("🧠 Narrative Studio", expanded=True):
@@ -2960,7 +3359,7 @@ if app_mode == "🔍 Single Match Analysis":
             shot_schema_ok, shot_schema_missing = validate_shot_metric_columns(shot_df.columns, required=BASIC_SHOT_METRIC_COLUMNS)
             _, shot_uncertainty_missing = validate_shot_metric_columns(shot_df.columns, required=UNCERTAINTY_SHOT_METRIC_COLUMNS)
 
-        with t3:
+        with tf2:
             if not shot_df.empty:
                 if not shot_schema_ok:
                     st.warning(f"Shot metrics unavailable for shot map: missing columns {', '.join(shot_schema_missing)}")
@@ -3049,7 +3448,8 @@ if app_mode == "🔍 Single Match Analysis":
                         )
                         st.plotly_chart(arena_fig, use_container_width=True)
 
-        with t3b:
+        with tf2:
+            st.divider()
             st.subheader("Frozen Frame Shot Viewer")
             if not shot_df.empty:
                 sorted_shots_ff = shot_df.sort_values(SHOT_COL_FRAME).reset_index(drop=True)
@@ -3114,7 +3514,9 @@ if app_mode == "🔍 Single Match Analysis":
             else:
                 st.info("No shots detected in this match.")
 
-        with t4:
+        with tf1:
+            st.divider()
+            st.subheader("Pass Map")
             if not pass_df.empty:
                 col_a, col_b = st.columns([1, 2])
                 with col_a:
@@ -3143,10 +3545,20 @@ if app_mode == "🔍 Single Match Analysis":
                             xs.extend([row['x1'], row['x2'], None])
                             ys.extend([row['y1'], row['y2'], None])
                         fig.add_trace(go.Scatter(x=xs, y=ys, mode='lines', line=dict(color='gold', width=3), name='Key Pass'))
+                    add_boost_pad_overlay(fig, show_large=True, show_small=False)
                     fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
                     st.plotly_chart(fig, use_container_width=True)
 
-        with t5:
+            st.divider()
+            st.subheader("Ball Carry Map")
+            st.caption("Consecutive frames where a player was in contact with the ball. Line color = team. Hover for duration.")
+            carry_fig = ball_carry_map(game_df, temp_map, pid_team, min_carry_frames=12)
+            carry_fig.update_layout(get_field_layout("Ball Carry Map"))
+            add_boost_pad_overlay(carry_fig, show_large=True, show_small=False)
+            st.plotly_chart(carry_fig, use_container_width=True)
+
+        with tf3:
+            st.subheader("Heatmaps")
             if isinstance(game_df.columns, pd.MultiIndex): all_cols = game_df.columns.levels[0].tolist()
             else: all_cols = game_df.columns.tolist()
             valid_players = [p for p in all_cols if p in df['Name'].values]
@@ -3156,15 +3568,16 @@ if app_mode == "🔍 Single Match Analysis":
                 if 'pos_z' in p_frames.columns:
                     valid_pos = p_frames[p_frames['pos_z'] > 0].dropna(subset=['pos_x', 'pos_y'])
                     sampled = valid_pos.iloc[::3]
+                    # Infrared colorscale: transparent → dark red → yellow → white
                     sofascore_scale = [
-                        [0.0, 'rgba(0,0,0,0)'],
-                        [0.15, 'rgba(20,60,0,0.35)'],
-                        [0.3, 'rgba(60,100,0,0.5)'],
-                        [0.45, 'rgba(120,140,0,0.6)'],
-                        [0.6, 'rgba(180,180,0,0.65)'],
-                        [0.75, 'rgba(220,210,0,0.75)'],
-                        [0.9, 'rgba(255,240,50,0.85)'],
-                        [1.0, 'rgba(255,255,120,0.95)'],
+                        [0.0,  'rgba(0,0,0,0)'],
+                        [0.15, 'rgba(60,0,0,0.4)'],
+                        [0.3,  'rgba(120,20,0,0.55)'],
+                        [0.45, 'rgba(180,40,0,0.65)'],
+                        [0.6,  'rgba(220,100,0,0.75)'],
+                        [0.75, 'rgba(240,200,20,0.85)'],
+                        [0.9,  'rgba(255,240,80,0.92)'],
+                        [1.0,  'rgba(255,255,200,0.98)'],
                     ]
                     fig = themed_figure()
                     fig.add_trace(go.Histogram2dContour(
@@ -3178,8 +3591,22 @@ if app_mode == "🔍 Single Match Analysis":
                     fig.update_layout(get_field_layout(f"{target} Heatmap"))
                     st.plotly_chart(fig, use_container_width=True)
 
-        with t8:
-            st.subheader("Advanced Analytics")
+        with tf3:
+            st.divider()
+            st.subheader("Boost Economy Timeline")
+            st.caption("Per-player boost level over match time. Green bands mark shot events (intensity = xG). Red dashed line = low-boost threshold (20).")
+            show_boost_pads_toggle = st.checkbox("Overlay shot xG bands", value=True, key="boost_econ_show_shots")
+            fig_boost = boost_economy_timeline(
+                game_df,
+                temp_map,
+                pid_team,
+                shot_df=shot_df if show_boost_pads_toggle else None,
+                fps=float(REPLAY_FPS),
+            )
+            st.plotly_chart(fig_boost, use_container_width=True)
+
+        with tf4:
+            st.subheader("Defense & Mechanics")
 
             # --- SECTION 1: Aerial Stats ---
             if not aerial_df.empty:
@@ -3228,52 +3655,6 @@ if app_mode == "🔍 Single Match Analysis":
                     render_dataframe(recovery_ranked, use_container_width=True, hide_index=True)
             st.divider()
 
-            # --- SECTION 3: xA Sankey Flow ---
-            st.markdown("#### Pass Chain Flow (xA Sankey)")
-            if not pass_df.empty:
-                # Build Sankey from pass chains: Sender -> Receiver, weighted by count or xA
-                chain_df = pass_df.groupby(['Sender', 'Receiver', 'Team']).agg(
-                    count=('xA', 'size'), total_xA=('xA', 'sum'),
-                    key_passes=('KeyPass', 'sum')
-                ).reset_index()
-                chain_df = chain_df[chain_df['count'] >= 2]  # filter noise
-                if not chain_df.empty:
-                    all_names = sorted(set(chain_df['Sender'].tolist() + chain_df['Receiver'].tolist()))
-                    name_to_idx = {n: i for i, n in enumerate(all_names)}
-                    node_colors = []
-                    for n in all_names:
-                        team = chain_df[chain_df['Sender'] == n]['Team'].values
-                        if len(team) == 0:
-                            team = chain_df[chain_df['Receiver'] == n]['Team'].values
-                        node_colors.append(TEAM_COLORS["Blue"]["primary"] if (len(team) > 0 and team[0] == 'Blue') else TEAM_COLORS["Orange"]["primary"])
-                    link_colors = []
-                    for _, row in chain_df.iterrows():
-                        if row['Team'] == 'Blue':
-                            link_colors.append(TEAM_COLORS["Blue"]["trail"])
-                        else:
-                            link_colors.append(TEAM_COLORS["Orange"]["trail"])
-                    fig_sankey = themed_figure(go.Sankey(
-                        node=dict(pad=15, thickness=20, line=dict(color='white', width=0.5),
-                                  label=all_names, color=node_colors),
-                        link=dict(
-                            source=[name_to_idx[r['Sender']] for _, r in chain_df.iterrows()],
-                            target=[name_to_idx[r['Receiver']] for _, r in chain_df.iterrows()],
-                            value=chain_df['count'].tolist(),
-                            color=link_colors,
-                            customdata=np.stack([chain_df['total_xA'].round(2), chain_df['key_passes'].astype(int)], axis=-1),
-                            hovertemplate='%{source.label} → %{target.label}<br>Passes: %{value}<br>xA: %{customdata[0]}<br>Key Passes: %{customdata[1]}<extra></extra>',
-                        )
-                    ))
-                    fig_sankey.update_layout(title="Pass Flow Network",
-                        height=400)
-                    st.plotly_chart(fig_sankey, use_container_width=True)
-                    st.caption("Thicker links indicate repeat passing lanes that generated team xA.")
-                else:
-                    st.info("Not enough passing connections to build Sankey diagram.")
-            else:
-                st.info("No pass data available.")
-            st.divider()
-
             # --- SECTION 4: Defensive Pressure / Shadow Defense ---
             st.markdown("#### Defensive Pressure (Shadow Defense)")
             if not defense_df.empty:
@@ -3318,44 +3699,6 @@ if app_mode == "🔍 Single Match Analysis":
                 st.caption("xG-Against: cumulative xG of shots where this player was the nearest defender.")
             st.divider()
 
-            # --- SECTION 6: Action Value (VAEP) ---
-            st.markdown("#### Action Value (VAEP)")
-            if not vaep_summary.empty:
-                vc1, vc2 = st.columns(2)
-                with vc1:
-                    fig_vaep_bar = themed_px(px.bar, vaep_summary.sort_values('Total_VAEP', ascending=False),
-                        x='Name', y='Total_VAEP', color='Team',
-                        title="Total VAEP per Player",
-                        color_discrete_map=TEAM_COLOR_MAP)
-                    st.plotly_chart(fig_vaep_bar, use_container_width=True)
-                    st.caption("Total VAEP summarizes each player's net impact on scoring threat.")
-                with vc2:
-                    st.plotly_chart(value_timeline_chart(vaep_df), use_container_width=True)
-
-                vd1, vd2 = st.columns(2)
-                with vd1:
-                    event_source = vaep_df.copy()
-                    event_source['EventType'] = event_source.get('EventType', 'touch')
-                    st.plotly_chart(action_type_value_decomposition_chart(event_source), use_container_width=True)
-                with vd2:
-                    synergy_input = vaep_df[['Player', 'VAEP']].copy() if not vaep_df.empty else pd.DataFrame(columns=['Player', 'VAEP'])
-                    if not synergy_input.empty:
-                        synergy_input['Player1'] = synergy_input['Player']
-                        synergy_input['Player2'] = synergy_input['Player']
-                    st.plotly_chart(teammate_synergy_matrix(synergy_input), use_container_width=True)
-
-                vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
-                vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
-                with st.expander("Data details"):
-                    render_dataframe(vaep_ranked, use_container_width=True, hide_index=True)
-                if not value_reports_df.empty:
-                    with st.expander("Data details: Season-style Value Profile"):
-                        render_dataframe(value_reports_df, use_container_width=True, hide_index=True)
-                st.caption("VAEP now uses transition-value deltas from canonical possession states.")
-            else:
-                st.info("No VAEP data available.")
-            st.divider()
-
             # --- SECTION 7: Save Impact (SDI + Expected Save Probability) ---
             st.markdown("#### Save Impact")
             if not xs_summary.empty and xs_summary['SaveEvents'].sum() > 0:
@@ -3398,10 +3741,24 @@ if app_mode == "🔍 Single Match Analysis":
                     f"Save analytics model: {SAVE_METRIC_MODEL_VERSION}. SDI is a heuristic difficulty index (0-1). "
                     "ExpectedSaveProb estimates chance the defense saves. SaveImpact = 1 - ExpectedSaveProb for completed saves."
                 )
+                # Save Quality Matrix: SDI vs ExpectedSaveProb scatter
+                st.markdown("#### Save Quality Matrix")
+                st.caption("X = Save Difficulty Index · Y = Expected Save Probability · Size = Save Impact. Upper-right = elite saves.")
+                fig_sq = save_quality_scatter(xs_events_df, xs_summary)
+                st.plotly_chart(fig_sq, use_container_width=True)
             else:
                 st.info("No save events to analyze.")
 
-        with t9:
+            # --- Demolition Map ---
+            st.divider()
+            st.markdown("#### Demolition Map")
+            demo_fig = demo_map(game_df, proto, temp_map, pid_team)
+            demo_fig.update_layout(get_field_layout("Demolition Map"))
+            add_boost_pad_overlay(demo_fig, show_large=True, show_small=False)
+            st.plotly_chart(demo_fig, use_container_width=True)
+
+        with tf3:
+            st.divider()
             st.subheader("Rotation Analysis")
             if not rotation_summary.empty:
                 # Role time distribution stacked bar
@@ -3537,7 +3894,8 @@ if app_mode == "🔍 Single Match Analysis":
             else:
                 st.info("No rotation data available.")
 
-        with t10:
+        with tf3:
+            st.divider()
             st.subheader("Tactical Replay Viewer")
             try:
                 max_frame = game_df.index.max()
@@ -3772,7 +4130,95 @@ if app_mode == "🔍 Single Match Analysis":
                 st.error(f"Could not render tactical view: {e}")
 
 
-        with t11:
+        with tf5:
+            # --- Pass Chain Flow (xA Sankey) ---
+            st.subheader("Pass Flow Intelligence")
+            if not pass_df.empty:
+                chain_df = pass_df.groupby(['Sender', 'Receiver', 'Team']).agg(
+                    count=('xA', 'size'), total_xA=('xA', 'sum'),
+                    key_passes=('KeyPass', 'sum')
+                ).reset_index()
+                chain_df = chain_df[chain_df['count'] >= 2]
+                if not chain_df.empty:
+                    all_names = sorted(set(chain_df['Sender'].tolist() + chain_df['Receiver'].tolist()))
+                    name_to_idx = {n: i for i, n in enumerate(all_names)}
+                    node_colors = []
+                    for n in all_names:
+                        team = chain_df[chain_df['Sender'] == n]['Team'].values
+                        if len(team) == 0:
+                            team = chain_df[chain_df['Receiver'] == n]['Team'].values
+                        node_colors.append(TEAM_COLORS["Blue"]["primary"] if (len(team) > 0 and team[0] == 'Blue') else TEAM_COLORS["Orange"]["primary"])
+                    link_colors = []
+                    for _, row in chain_df.iterrows():
+                        if row['Team'] == 'Blue':
+                            link_colors.append(TEAM_COLORS["Blue"]["trail"])
+                        else:
+                            link_colors.append(TEAM_COLORS["Orange"]["trail"])
+                    fig_sankey = themed_figure(go.Sankey(
+                        node=dict(pad=15, thickness=20, line=dict(color='white', width=0.5),
+                                  label=all_names, color=node_colors),
+                        link=dict(
+                            source=[name_to_idx[r['Sender']] for _, r in chain_df.iterrows()],
+                            target=[name_to_idx[r['Receiver']] for _, r in chain_df.iterrows()],
+                            value=chain_df['count'].tolist(),
+                            color=link_colors,
+                            customdata=np.stack([chain_df['total_xA'].round(2), chain_df['key_passes'].astype(int)], axis=-1),
+                            hovertemplate='%{source.label} → %{target.label}<br>Passes: %{value}<br>xA: %{customdata[0]}<br>Key Passes: %{customdata[1]}<extra></extra>',
+                        )
+                    ))
+                    fig_sankey.update_layout(title="Pass Flow Network", height=400)
+                    st.plotly_chart(fig_sankey, use_container_width=True)
+                    st.caption("Thicker links indicate repeat passing lanes that generated team xA.")
+                else:
+                    st.info("Not enough passing connections to build Sankey diagram.")
+            else:
+                st.info("No pass data available.")
+
+            st.divider()
+
+            # --- Action Value (VAEP) ---
+            st.subheader("Action Value (VAEP)")
+            if not vaep_summary.empty:
+                # Waterfall: cumulative contribution view (primary hero chart)
+                st.plotly_chart(vaep_waterfall_chart(vaep_summary), use_container_width=True)
+                st.caption("Each bar extends the running total by that player's net VAEP. The final bar shows team total.")
+
+                vc1, vc2 = st.columns(2)
+                with vc1:
+                    fig_vaep_bar = themed_px(px.bar, vaep_summary.sort_values('Total_VAEP', ascending=False),
+                        x='Name', y='Total_VAEP', color='Team',
+                        title="Total VAEP per Player",
+                        color_discrete_map=TEAM_COLOR_MAP)
+                    st.plotly_chart(fig_vaep_bar, use_container_width=True)
+                    st.caption("Total VAEP summarizes each player's net impact on scoring threat.")
+                with vc2:
+                    st.plotly_chart(value_timeline_chart(vaep_df), use_container_width=True)
+
+                vd1, vd2 = st.columns(2)
+                with vd1:
+                    event_source = vaep_df.copy()
+                    event_source['EventType'] = event_source.get('EventType', 'touch')
+                    st.plotly_chart(action_type_value_decomposition_chart(event_source), use_container_width=True)
+                with vd2:
+                    synergy_input = vaep_df[['Player', 'VAEP']].copy() if not vaep_df.empty else pd.DataFrame(columns=['Player', 'VAEP'])
+                    if not synergy_input.empty:
+                        synergy_input['Player1'] = synergy_input['Player']
+                        synergy_input['Player2'] = synergy_input['Player']
+                    st.plotly_chart(teammate_synergy_matrix(synergy_input), use_container_width=True)
+
+                vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
+                vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
+                with st.expander("Data details"):
+                    render_dataframe(vaep_ranked, use_container_width=True, hide_index=True)
+                if not value_reports_df.empty:
+                    with st.expander("Data details: Season-style Value Profile"):
+                        render_dataframe(value_reports_df, use_container_width=True, hide_index=True)
+                st.caption("VAEP now uses transition-value deltas from canonical possession states.")
+            else:
+                st.info("No VAEP data available.")
+
+            st.divider()
+
             st.subheader("Coach Report")
             if coach_report_df is None or coach_report_df.empty:
                 st.info("No high-leverage decision windows were detected for this match.")
@@ -3915,7 +4361,7 @@ if app_mode == "🔍 Single Match Analysis":
                         "Snapshot is static and scoped to selected row only to keep initial Coach Report load fast."
                     )
 
-        with t7:
+        with tf6:
             st.subheader("Composite Dashboard Export")
             can_export = KALEIDO_AVAILABLE and PIL_AVAILABLE
             if not KALEIDO_AVAILABLE:
@@ -3923,101 +4369,217 @@ if app_mode == "🔍 Single Match Analysis":
             if not PIL_AVAILABLE:
                 st.warning("Install `Pillow` for image export: `pip install Pillow`")
             if can_export:
-                # Let user pick heatmap player
-                heatmap_player_opts = sorted(list(temp_map.values()))
-                default_hp = focus_players[0] if focus_players else (heatmap_player_opts[0] if heatmap_player_opts else None)
-                hp_idx = heatmap_player_opts.index(default_hp) if default_hp in heatmap_player_opts else 0
-                heatmap_player = st.selectbox("Heatmap Player:", heatmap_player_opts, index=hp_idx, key="export_hp")
-                export_goal_mouth = st.checkbox("Include compact goal-mouth panel in shot map", value=True)
-                if st.button("Generate Dashboard Image"):
-                    with st.spinner("Rendering 7 panels... this may take a moment"):
-                        try:
-                            # All dimensions in LOGICAL pixels. scale=2 gives us 2x resolution.
-                            # We render each panel at scale=2, then resize back to logical px for stitching.
-                            S = 2  # scale factor for quality
-                            PAD = 8
-                            TITLE_H = 50
-                            ROW1_H = 480
-                            ROW2_H = 300
-                            ROW3_H = 220
-                            PITCH_W = 380
-                            CANVAS_W = 1800
-                            SCORE_W = CANVAS_W - 2 * PITCH_W - 2 * PAD
-                            COL3_W = (CANVAS_W - 2 * PAD) // 3
-                            CANVAS_H = TITLE_H + ROW1_H + ROW2_H + ROW3_H + 3 * PAD
+                export_mode = st.radio(
+                    "Export Mode",
+                    ["Full Dashboard", "Share Card (1080×1080)"],
+                    horizontal=True,
+                    key="export_mode_selector",
+                )
 
-                            # --- Build all 7 panels ---
-                            fig_shotmap = build_export_shot_map(shot_df, proto, include_goal_mouth=export_goal_mouth)
-                            fig_heatmap = build_export_heatmap(game_df, heatmap_player)
-                            fig_scoreboard = build_export_scoreboard(df, shot_df, is_overtime)
-                            fig_xg = build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime)
-                            fig_winprob = build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=win_prob_df, wp_model_used=wp_model_used, pid_name_map=temp_map)
-                            fig_zones = build_export_zones(df, focus_players)
-                            fig_pressure = build_export_pressure(momentum_series, proto, pid_team)
-
-                            # --- Render each to PIL Image at scale, then resize to logical ---
-                            def _render(fig, w, h):
-                                img = render_panel_to_image(fig, w, h, scale=S)
-                                return img.resize((w, h), PILImage.LANCZOS)
-
-                            img_shotmap = _render(fig_shotmap, PITCH_W, ROW1_H)
-                            img_heatmap = _render(fig_heatmap, PITCH_W, ROW1_H)
-                            img_scoreboard = _render(fig_scoreboard, SCORE_W, ROW1_H)
-                            img_xg = _render(fig_xg, COL3_W, ROW2_H)
-                            img_winprob = _render(fig_winprob, COL3_W, ROW2_H)
-                            img_zones = _render(fig_zones, COL3_W, ROW2_H)
-                            img_pressure = _render(fig_pressure, CANVAS_W, ROW3_H)
-
-                            # --- Composite onto dark canvas ---
-                            canvas = PILImage.new('RGB', (CANVAS_W, CANVAS_H), color=(30, 30, 30))
-
-                            # Title bar
-                            blue_goals_exp = int(df[df['Team']=='Blue']['Goals'].sum())
-                            orange_goals_exp = int(df[df['Team']=='Orange']['Goals'].sum())
-                            ot_label = " (OT)" if is_overtime else ""
-                            draw = ImageDraw.Draw(canvas)
+                if export_mode == "Share Card (1080×1080)":
+                    st.caption("Social-media-friendly square card: score, xG, shot map, possession bar, and top performers.")
+                    if st.button("Generate Share Card"):
+                        with st.spinner("Rendering share card..."):
                             try:
-                                title_font = ImageFont.truetype("arial.ttf", 24)
-                                sub_font = ImageFont.truetype("arial.ttf", 14)
-                            except:
-                                title_font = ImageFont.load_default()
-                                sub_font = title_font
-                            title_text = f"Match Dashboard  |  Blue {blue_goals_exp} - {orange_goals_exp} Orange{ot_label}"
-                            bbox = draw.textbbox((0, 0), title_text, font=title_font)
-                            tw = bbox[2] - bbox[0]
-                            draw.text(((CANVAS_W - tw) // 2, 6), title_text, fill=(255, 255, 255), font=title_font)
-                            subtitle = "RL Pro Analytics"
-                            bbox2 = draw.textbbox((0, 0), subtitle, font=sub_font)
-                            sw = bbox2[2] - bbox2[0]
-                            draw.text(((CANVAS_W - sw) // 2, 34), subtitle, fill=(136, 136, 136), font=sub_font)
+                                CARD_W, CARD_H = 1080, 1080
+                                BG = (15, 15, 20)
+                                canvas_sc = PILImage.new("RGB", (CARD_W, CARD_H), color=BG)
+                                draw_sc = ImageDraw.Draw(canvas_sc)
+                                try:
+                                    fnt_big = ImageFont.truetype("arial.ttf", 96)
+                                    fnt_med = ImageFont.truetype("arial.ttf", 36)
+                                    fnt_sm = ImageFont.truetype("arial.ttf", 22)
+                                except Exception:
+                                    fnt_big = fnt_med = fnt_sm = ImageFont.load_default()
 
-                            # Row 1: Shot Map | Scoreboard | Heatmap
-                            y1 = TITLE_H
-                            canvas.paste(img_shotmap, (0, y1))
-                            canvas.paste(img_scoreboard, (PITCH_W + PAD, y1))
-                            canvas.paste(img_heatmap, (PITCH_W + SCORE_W + 2 * PAD, y1))
+                                blue_g = int(df[df["Team"] == "Blue"]["Goals"].sum())
+                                orange_g = int(df[df["Team"] == "Orange"]["Goals"].sum())
+                                ot_lbl = " · OT" if is_overtime else ""
 
-                            # Row 2: xG Timeline | Win Prob | Zones
-                            y2 = y1 + ROW1_H + PAD
-                            canvas.paste(img_xg, (0, y2))
-                            canvas.paste(img_winprob, (COL3_W + PAD, y2))
-                            canvas.paste(img_zones, (2 * COL3_W + 2 * PAD, y2))
+                                # Background gradient-like split: left blue tint, right orange tint
+                                for xi in range(CARD_W):
+                                    t = xi / CARD_W
+                                    if t < 0.5:
+                                        alpha = int((0.5 - t) * 2 * 35)
+                                        draw_sc.line([(xi, 0), (xi, CARD_H)], fill=(30, 80, 180, alpha))
+                                    else:
+                                        alpha = int((t - 0.5) * 2 * 35)
+                                        draw_sc.line([(xi, 0), (xi, CARD_H)], fill=(180, 80, 20, alpha))
 
-                            # Row 3: Pressure Index (full width)
-                            y3 = y2 + ROW2_H + PAD
-                            canvas.paste(img_pressure, (0, y3))
+                                # Score line
+                                score_txt = f"{blue_g}  —  {orange_g}{ot_lbl}"
+                                bb = draw_sc.textbbox((0, 0), score_txt, font=fnt_big)
+                                sw = bb[2] - bb[0]
+                                draw_sc.text(((CARD_W - sw) // 2, 60), score_txt, font=fnt_big, fill=(240, 240, 240))
 
-                            # --- Upscale final canvas for quality, then export ---
-                            final_canvas = canvas.resize((CANVAS_W * 2, CANVAS_H * 2), PILImage.LANCZOS)
-                            buf = io.BytesIO()
-                            final_canvas.save(buf, format='PNG', optimize=True)
-                            final_bytes = buf.getvalue()
-                            st.image(final_bytes, caption="Match Dashboard", use_container_width=True)
-                            st.download_button("Download Dashboard PNG", data=final_bytes, file_name="match_dashboard.png", mime="image/png")
-                        except Exception as e:
-                            st.error(f"Export failed: {e}")
-                            import traceback
-                            st.code(traceback.format_exc())
+                                # Team names
+                                blue_names_sc = " · ".join(
+                                    df[df["Team"] == "Blue"].sort_values("Score", ascending=False)["Name"].tolist()
+                                )
+                                orange_names_sc = " · ".join(
+                                    df[df["Team"] == "Orange"].sort_values("Score", ascending=False)["Name"].tolist()
+                                )
+                                draw_sc.text((40, 175), blue_names_sc[:28], font=fnt_sm, fill=(100, 160, 255))
+                                bb_o = draw_sc.textbbox((0, 0), orange_names_sc[:28], font=fnt_sm)
+                                draw_sc.text((CARD_W - bb_o[2] + bb_o[0] - 40, 175), orange_names_sc[:28], font=fnt_sm, fill=(255, 160, 80))
+
+                                # xG strip
+                                blue_xg_sc = round(df[df["Team"] == "Blue"]["xG"].sum(), 2) if "xG" in df.columns else 0
+                                orange_xg_sc = round(df[df["Team"] == "Orange"]["xG"].sum(), 2) if "xG" in df.columns else 0
+                                draw_sc.text((40, 220), f"xG: {blue_xg_sc}", font=fnt_med, fill=(100, 160, 255))
+                                bb_xgo = draw_sc.textbbox((0, 0), f"xG: {orange_xg_sc}", font=fnt_med)
+                                draw_sc.text((CARD_W - bb_xgo[2] + bb_xgo[0] - 40, 220), f"xG: {orange_xg_sc}", font=fnt_med, fill=(255, 160, 80))
+
+                                # Possession bar
+                                blue_poss_sc = df[df["Team"] == "Blue"]["Possession"].sum()
+                                orange_poss_sc = df[df["Team"] == "Orange"]["Possession"].sum()
+                                total_poss_sc = blue_poss_sc + orange_poss_sc
+                                blue_pct_sc = int((blue_poss_sc / total_poss_sc * 100)) if total_poss_sc > 0 else 50
+                                orange_pct_sc = 100 - blue_pct_sc
+                                bar_y = 280
+                                bar_h = 16
+                                bar_x0, bar_x1 = 40, CARD_W - 40
+                                split_x = bar_x0 + int((bar_x1 - bar_x0) * blue_pct_sc / 100)
+                                draw_sc.rounded_rectangle([bar_x0, bar_y, split_x, bar_y + bar_h], radius=8, fill=(59, 130, 246))
+                                draw_sc.rounded_rectangle([split_x, bar_y, bar_x1, bar_y + bar_h], radius=8, fill=(251, 146, 60))
+                                draw_sc.text((bar_x0, bar_y + bar_h + 4), f"Possession  {blue_pct_sc}%", font=fnt_sm, fill=(160, 200, 255))
+                                bb_po = draw_sc.textbbox((0, 0), f"{orange_pct_sc}%", font=fnt_sm)
+                                draw_sc.text((bar_x1 - bb_po[2] + bb_po[0], bar_y + bar_h + 4), f"{orange_pct_sc}%", font=fnt_sm, fill=(255, 200, 130))
+
+                                # Shot map panel
+                                fig_sc_shot = build_export_shot_map(shot_df, proto, include_goal_mouth=False)
+                                img_sc_shot = render_panel_to_image(fig_sc_shot, CARD_W - 80, 380, scale=2)
+                                img_sc_shot = img_sc_shot.resize((CARD_W - 80, 380), PILImage.LANCZOS)
+                                canvas_sc.paste(img_sc_shot, (40, 330))
+
+                                # Branding footer
+                                footer_txt = "Rocket League Analytics"
+                                bb_ft = draw_sc.textbbox((0, 0), footer_txt, font=fnt_sm)
+                                draw_sc.text(((CARD_W - (bb_ft[2] - bb_ft[0])) // 2, CARD_H - 42), footer_txt, font=fnt_sm, fill=(80, 80, 100))
+
+                                # Top performers strip
+                                perf_y = 740
+                                draw_sc.text((40, perf_y), "Top Performers", font=fnt_sm, fill=(200, 200, 200))
+                                top_players_sc = df.nlargest(3, "Score") if "Score" in df.columns else df.head(3)
+                                for i_p, (_, pp) in enumerate(top_players_sc.iterrows()):
+                                    col_x = 40 + i_p * 330
+                                    p_color = (100, 160, 255) if pp.get("Team") == "Blue" else (255, 160, 80)
+                                    draw_sc.text((col_x, perf_y + 30), str(pp.get("Name", ""))[:14], font=fnt_med, fill=p_color)
+                                    goals_v = int(pp.get("Goals", 0))
+                                    xg_v = float(pp.get("xG", 0))
+                                    draw_sc.text((col_x, perf_y + 72), f"{goals_v}G  xG {xg_v:.2f}", font=fnt_sm, fill=(200, 200, 200))
+
+                                # Serialize and offer download
+                                import io as _io_sc
+                                buf_sc = _io_sc.BytesIO()
+                                canvas_sc.save(buf_sc, format="PNG")
+                                buf_sc.seek(0)
+                                st.image(canvas_sc, caption="Share Card Preview", use_container_width=True)
+                                st.download_button(
+                                    "Download Share Card (PNG)",
+                                    data=buf_sc.getvalue(),
+                                    file_name="rl_share_card.png",
+                                    mime="image/png",
+                                )
+                            except Exception as e_sc:
+                                st.error(f"Share card render failed: {e_sc}")
+
+                else:
+                    # Let user pick heatmap player
+                    heatmap_player_opts = sorted(list(temp_map.values()))
+                    default_hp = focus_players[0] if focus_players else (heatmap_player_opts[0] if heatmap_player_opts else None)
+                    hp_idx = heatmap_player_opts.index(default_hp) if default_hp in heatmap_player_opts else 0
+                    heatmap_player = st.selectbox("Heatmap Player:", heatmap_player_opts, index=hp_idx, key="export_hp")
+                    export_goal_mouth = st.checkbox("Include compact goal-mouth panel in shot map", value=True)
+                    if st.button("Generate Dashboard Image"):
+                        with st.spinner("Rendering 7 panels... this may take a moment"):
+                            try:
+                                # All dimensions in LOGICAL pixels. scale=2 gives us 2x resolution.
+                                # We render each panel at scale=2, then resize back to logical px for stitching.
+                                S = 2  # scale factor for quality
+                                PAD = 8
+                                TITLE_H = 50
+                                ROW1_H = 480
+                                ROW2_H = 300
+                                ROW3_H = 220
+                                PITCH_W = 380
+                                CANVAS_W = 1800
+                                SCORE_W = CANVAS_W - 2 * PITCH_W - 2 * PAD
+                                COL3_W = (CANVAS_W - 2 * PAD) // 3
+                                CANVAS_H = TITLE_H + ROW1_H + ROW2_H + ROW3_H + 3 * PAD
+    
+                                # --- Build all 7 panels ---
+                                fig_shotmap = build_export_shot_map(shot_df, proto, include_goal_mouth=export_goal_mouth)
+                                fig_heatmap = build_export_heatmap(game_df, heatmap_player)
+                                fig_scoreboard = build_export_scoreboard(df, shot_df, is_overtime)
+                                fig_xg = build_export_xg_timeline(shot_df, game_df, proto, pid_team, is_overtime)
+                                fig_winprob = build_export_win_prob(proto, game_df, pid_team, is_overtime, win_prob_df=win_prob_df, wp_model_used=wp_model_used, pid_name_map=temp_map)
+                                fig_zones = build_export_zones(df, focus_players)
+                                fig_pressure = build_export_pressure(momentum_series, proto, pid_team)
+    
+                                # --- Render each to PIL Image at scale, then resize to logical ---
+                                def _render(fig, w, h):
+                                    img = render_panel_to_image(fig, w, h, scale=S)
+                                    return img.resize((w, h), PILImage.LANCZOS)
+    
+                                img_shotmap = _render(fig_shotmap, PITCH_W, ROW1_H)
+                                img_heatmap = _render(fig_heatmap, PITCH_W, ROW1_H)
+                                img_scoreboard = _render(fig_scoreboard, SCORE_W, ROW1_H)
+                                img_xg = _render(fig_xg, COL3_W, ROW2_H)
+                                img_winprob = _render(fig_winprob, COL3_W, ROW2_H)
+                                img_zones = _render(fig_zones, COL3_W, ROW2_H)
+                                img_pressure = _render(fig_pressure, CANVAS_W, ROW3_H)
+    
+                                # --- Composite onto dark canvas ---
+                                canvas = PILImage.new('RGB', (CANVAS_W, CANVAS_H), color=(30, 30, 30))
+    
+                                # Title bar
+                                blue_goals_exp = int(df[df['Team']=='Blue']['Goals'].sum())
+                                orange_goals_exp = int(df[df['Team']=='Orange']['Goals'].sum())
+                                ot_label = " (OT)" if is_overtime else ""
+                                draw = ImageDraw.Draw(canvas)
+                                try:
+                                    title_font = ImageFont.truetype("arial.ttf", 24)
+                                    sub_font = ImageFont.truetype("arial.ttf", 14)
+                                except:
+                                    title_font = ImageFont.load_default()
+                                    sub_font = title_font
+                                title_text = f"Match Dashboard  |  Blue {blue_goals_exp} - {orange_goals_exp} Orange{ot_label}"
+                                bbox = draw.textbbox((0, 0), title_text, font=title_font)
+                                tw = bbox[2] - bbox[0]
+                                draw.text(((CANVAS_W - tw) // 2, 6), title_text, fill=(255, 255, 255), font=title_font)
+                                subtitle = "RL Pro Analytics"
+                                bbox2 = draw.textbbox((0, 0), subtitle, font=sub_font)
+                                sw = bbox2[2] - bbox2[0]
+                                draw.text(((CANVAS_W - sw) // 2, 34), subtitle, fill=(136, 136, 136), font=sub_font)
+    
+                                # Row 1: Shot Map | Scoreboard | Heatmap
+                                y1 = TITLE_H
+                                canvas.paste(img_shotmap, (0, y1))
+                                canvas.paste(img_scoreboard, (PITCH_W + PAD, y1))
+                                canvas.paste(img_heatmap, (PITCH_W + SCORE_W + 2 * PAD, y1))
+    
+                                # Row 2: xG Timeline | Win Prob | Zones
+                                y2 = y1 + ROW1_H + PAD
+                                canvas.paste(img_xg, (0, y2))
+                                canvas.paste(img_winprob, (COL3_W + PAD, y2))
+                                canvas.paste(img_zones, (2 * COL3_W + 2 * PAD, y2))
+    
+                                # Row 3: Pressure Index (full width)
+                                y3 = y2 + ROW2_H + PAD
+                                canvas.paste(img_pressure, (0, y3))
+    
+                                # --- Upscale final canvas for quality, then export ---
+                                final_canvas = canvas.resize((CANVAS_W * 2, CANVAS_H * 2), PILImage.LANCZOS)
+                                buf = io.BytesIO()
+                                final_canvas.save(buf, format='PNG', optimize=True)
+                                final_bytes = buf.getvalue()
+                                st.image(final_bytes, caption="Match Dashboard", use_container_width=True)
+                                st.download_button("Download Dashboard PNG", data=final_bytes, file_name="match_dashboard.png", mime="image/png")
+                            except Exception as e:
+                                st.error(f"Export failed: {e}")
+                                import traceback
+                                st.code(traceback.format_exc())
     else:
         if not st.session_state.match_order:
             st.info("Upload a .replay file to begin analysis.")
