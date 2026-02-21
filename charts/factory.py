@@ -8,8 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 from constants import GOAL_HALF_W, GOAL_HEIGHT, REPLAY_FPS, TEAM_COLORS
-from charts.theme import apply_chart_theme, semantic_color, add_glow_layer
-from charts.tokens import GLOW, TYPOGRAPHY
+from charts.theme import apply_chart_theme, semantic_color
 from charts.formatters import (
     format_metric_series,
     format_metric_value,
@@ -403,7 +402,6 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
         team = row[team_col]
         stem_color = _STEM_COLOR.get(team, "rgba(165, 171, 184, 0.35)")
         accent = _TEAM_ACCENT.get(team, semantic_color("threshold", "neutral"))
-        glow_color = GLOW.blue if team == "Blue" else (GLOW.orange if team == "Orange" else GLOW.neutral)
         val = float(row[metric_col])
 
         fig.add_shape(
@@ -414,36 +412,15 @@ def player_rank_lollipop(df, metric_col, name_col="Name", team_col="Team"):
             y1=i,
             line=dict(color=stem_color, width=2),
         )
-        # Glow halo behind the marker dot.
-        fig.add_trace(
-            go.Scatter(
-                x=[val],
-                y=[i],
-                mode="markers",
-                marker=dict(size=22, color=glow_color, line=dict(width=0)),
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
-        # Rank-1 gold star badge.
-        if i == 0:
-            fig.add_annotation(
-                x=val,
-                y=i,
-                text="★",
-                showarrow=False,
-                xshift=-18,
-                font=dict(size=13, color=GLOW.gold.replace("0.28", "0.95")),
-            )
         fig.add_trace(
             go.Scatter(
                 x=[val],
                 y=[i],
                 mode="markers+text",
-                marker=dict(size=11, color="rgba(255,255,255,0.92)", line=dict(color=accent, width=2.5)),
+                marker=dict(size=11, color="rgba(255,255,255,0.9)", line=dict(color=accent, width=2.5)),
                 text=[labels[i]],
                 textposition="middle right",
-                textfont=dict(color=accent, size=11, family=TYPOGRAPHY.family),
+                textfont=dict(color=accent, size=11),
                 hovertemplate=f"Player: {row[name_col]}<br>Team: {team}<br>Metric: {title_case_label(metric_col)}: {format_metric_value(row[metric_col], metric_col)}<extra></extra>",
                 showlegend=False,
             )
@@ -516,18 +493,6 @@ def comparison_dumbbell(
             line=dict(color=connector_color, width=2.5),
             layer="below",
         )
-
-        # Glow halos behind each endpoint.
-        fig.add_trace(go.Scatter(
-            x=[left_val], y=[i], mode="markers",
-            marker=dict(size=22, color=GLOW.neutral, line=dict(width=0)),
-            hoverinfo="skip", showlegend=False,
-        ))
-        fig.add_trace(go.Scatter(
-            x=[right_val], y=[i], mode="markers",
-            marker=dict(size=22, color=GLOW.win, line=dict(width=0)),
-            hoverinfo="skip", showlegend=False,
-        ))
 
         fig.add_trace(
             go.Scatter(
