@@ -4766,45 +4766,55 @@ elif app_mode == "📈 Season Batch Processor":
         with t4:
             st.subheader("Player Comparison")
             categories = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', SPEED_METRIC_DISPLAY, 'Aerial %', 'Total_VAEP']
+            category_labels = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', SPEED_METRIC_DISPLAY, 'Aerial %', 'Total VAEP']
             season_display = with_dashboard_speed_display(season)
-            all_avgs = season_display.groupby('Name')[categories].mean()
-            cat_max = all_avgs.max().replace(0, 1)
-            hero_avg = hero_display_df[categories].mean()
-            hero_norm = (hero_avg / cat_max * 100).fillna(0)
+            all_avgs = season_display.groupby('Name')[categories].mean().apply(pd.to_numeric, errors='coerce')
+            percentile_scores = all_avgs.rank(pct=True, method='average').mul(100).fillna(0)
 
-            compare_df = pd.DataFrame({'Metric': categories, hero: hero_norm.values})
+            if hero in percentile_scores.index:
+                hero_norm = percentile_scores.loc[hero]
+            else:
+                hero_norm = pd.Series(0.0, index=categories)
+
+            compare_df = pd.DataFrame({'Metric': category_labels, hero: hero_norm.values})
             if teammate != "None":
-                mate_df = season_display[season_display['Name'] == teammate]
-                mate_avg = mate_df[categories].mean()
-                mate_norm = (mate_avg / cat_max * 100).fillna(0)
+                if teammate in percentile_scores.index:
+                    mate_norm = percentile_scores.loc[teammate]
+                else:
+                    mate_norm = pd.Series(0.0, index=categories)
                 compare_df[teammate] = mate_norm.values
 
             mode = st.toggle("Show radar chart", value=False, help="Default view is normalized grouped bars for readability.")
             if mode:
                 fig = themed_figure()
-                fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
+                fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=category_labels, fill='toself', name=hero, line=dict(color='#007bff')))
                 if teammate != "None":
-                    fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
-                fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=500)
+                    fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=category_labels, fill='toself', name=teammate, line=dict(color='#ff9900')))
+                fig.update_layout(
+                    title="Player Comparison Radar (Percentile)",
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 100], ticksuffix="th pct")),
+                    showlegend=True,
+                    height=500,
+                )
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                comp_long = compare_df.melt(id_vars='Metric', var_name='Player', value_name='Normalized Score')
+                comp_long = compare_df.melt(id_vars='Metric', var_name='Player', value_name='Percentile Score')
                 fig_bar = themed_px(
                     px.bar,
                     comp_long,
                     x='Metric',
-                    y='Normalized Score',
+                    y='Percentile Score',
                     color='Player',
                     barmode='group',
-                    title='Normalized Stat Comparison (0-100)',
-                    text='Normalized Score',
+                    title='Percentile Stat Comparison (0-100)',
+                    text='Percentile Score',
                 )
                 fig_bar.update_traces(texttemplate='%{y:.0f}', textposition='outside')
-                fig_bar.update_yaxes(range=[0, 110], title='Normalized Score')
+                fig_bar.update_yaxes(range=[0, 110], title='Percentile Score')
                 st.plotly_chart(fig_bar, use_container_width=True)
                 top_metric = compare_df.set_index('Metric')[hero].sort_values(ascending=False).index[0]
                 top_val = float(compare_df.set_index('Metric').loc[top_metric, hero])
-                render_chart_signal_summary(f"Strongest normalized metric: {top_metric}", 'positive', top_val, unit=' score')
+                render_chart_signal_summary(f"Strongest percentile metric: {top_metric}", 'positive', top_val, unit='th pct')
 
             st.markdown("#### Best Partner Profile")
             hero_pairs = pair_chemistry_df[(pair_chemistry_df['Player1'] == hero) | (pair_chemistry_df['Player2'] == hero)] if not pair_chemistry_df.empty else pd.DataFrame()
