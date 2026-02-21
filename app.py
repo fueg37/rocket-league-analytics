@@ -74,7 +74,7 @@ from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_V
 from analytics.spatial_index import PlayerFrameAccessor
 from analytics.possession_value import compute_action_value_deltas, encode_replay_states
 from analytics.aggregations.value_reports import build_player_value_reports
-from analytics.counterfactuals import build_coach_report
+from analytics.counterfactuals import build_coach_report, extract_decision_moments
 from analytics.insights import build_key_insight
 
 logger = logging.getLogger(__name__)
@@ -300,6 +300,105 @@ def _build_coach_action_mix_chart(report_df: pd.DataFrame) -> go.Figure:
         showlegend=False,
     )
     return fig
+
+
+def _role_hint_from_timeline(rotation_timeline: pd.DataFrame, frame: int, team: str = "Blue") -> str:
+    if rotation_timeline is None or rotation_timeline.empty or "Frame" not in rotation_timeline.columns:
+        return "third man"
+    frame_series = pd.to_numeric(rotation_timeline["Frame"], errors="coerce")
+    window = rotation_timeline.loc[
+        (rotation_timeline.get("Team", "") == team)
+        & frame_series.notna()
+        & (frame_series.sub(float(frame)).abs() <= float(2 * REPLAY_FPS))
+    ]
+    if window.empty or "Role" not in window.columns:
+        return "third man"
+    role_mode = window["Role"].astype(str).mode()
+    role = role_mode.iloc[0] if not role_mode.empty else "3rd"
+    role_text = str(role).strip().lower()
+    if role_text in {"1st", "first", "first man"}:
+        return "first man"
+    if role_text in {"2nd", "second", "second man"}:
+        return "second man"
+    return "third man"
+
+
+def _tactical_hint_from_pressure(role: str, pressure_signal: float) -> str:
+    if pressure_signal >= 0.08:
+        return "challenge_now" if role == "first man" else "fake_challenge"
+    if pressure_signal <= -0.08:
+        return "rotate_backpost" if role != "first man" else "shadow_defend"
+    return "third_man_hold" if role == "third man" else "shadow_defend"
+
+
+def _build_layered_opportunity_distribution(
+    coach_report_df: pd.DataFrame,
+    replay_states: pd.DataFrame,
+    momentum_series: pd.Series,
+    win_prob_df: pd.DataFrame,
+    rotation_timeline: pd.DataFrame,
+    *,
+    top_n: int = 8,
+) -> pd.DataFrame:
+    required_primary = {"MissedSwing", "Role", "RecommendedAction"}
+    if coach_report_df is not None and not coach_report_df.empty and required_primary.issubset(coach_report_df.columns):
+        primary = coach_report_df.copy()
+        primary["MissedSwing"] = pd.to_numeric(primary["MissedSwing"], errors="coerce")
+        primary = primary.dropna(subset=["MissedSwing", "Role", "RecommendedAction"])
+        if not primary.empty:
+            primary["Layer"] = "Primary"
+            return primary
+
+    if replay_states is not None and not replay_states.empty and momentum_series is not None and not momentum_series.empty:
+        leverage_windows = extract_decision_moments(momentum_series, win_prob_df, top_n=max(top_n, 6))
+        if not leverage_windows.empty:
+            rows = []
+            mom_times = momentum_series.index.to_numpy(dtype=float)
+            mom_values = pd.to_numeric(momentum_series, errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            for row in leverage_windows.head(top_n).itertuples(index=False):
+                frame = int(getattr(row, "Frame", 0))
+                time_s = float(getattr(row, "Time", 0.0))
+                leverage = float(getattr(row, "Leverage", 0.0))
+                pressure = float(np.interp(time_s, mom_times, mom_values)) if len(mom_times) else 0.0
+                role = _role_hint_from_timeline(rotation_timeline, frame)
+                action = _tactical_hint_from_pressure(role, pressure)
+                rows.append(
+                    {
+                        "Frame": frame,
+                        "Time": time_s,
+                        "Role": role,
+                        "RecommendedAction": action,
+                        "MissedSwing": float(np.sign(pressure if pressure != 0 else leverage) * max(abs(pressure), leverage * 0.05)),
+                        "Layer": "Secondary",
+                    }
+                )
+            secondary = pd.DataFrame(rows)
+            if not secondary.empty:
+                return secondary
+
+        turns = pd.to_numeric(momentum_series, errors="coerce").dropna().sort_index()
+        if not turns.empty:
+            pressure_turn = turns.diff().abs().fillna(0.0).sort_values(ascending=False).head(top_n)
+            rows = []
+            for t, delta in pressure_turn.items():
+                time_s = float(t)
+                frame = int(round(time_s * REPLAY_FPS))
+                current_pressure = float(turns.loc[t])
+                role = _role_hint_from_timeline(rotation_timeline, frame)
+                rows.append(
+                    {
+                        "Frame": frame,
+                        "Time": time_s,
+                        "Role": role,
+                        "RecommendedAction": _tactical_hint_from_pressure(role, current_pressure),
+                        "MissedSwing": float(np.sign(current_pressure if current_pressure != 0 else 1.0) * delta * 0.05),
+                        "Layer": "Tertiary",
+                    }
+                )
+            tertiary = pd.DataFrame(rows)
+            if not tertiary.empty:
+                return tertiary
+    return pd.DataFrame(columns=["Role", "RecommendedAction", "MissedSwing", "Layer"])
 
 
 def _parse_clip_window(clip_key: str, fallback_frame: int) -> tuple[int, int, int]:
@@ -2513,6 +2612,13 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         team="Blue",
         top_n=5,
     )
+    opportunity_distribution_df = _build_layered_opportunity_distribution(
+        coach_report_df,
+        replay_states,
+        momentum_series,
+        win_prob_df,
+        rotation_timeline,
+    )
     logger.info("Pipeline timing | stage=coach_report | duration_s=%.3f | match_id=%s", perf_counter() - coach_report_start, match_id)
     return {
         "manager": manager, "game": game, "game_df": game_df, "proto": proto,
@@ -2531,6 +2637,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         "pid_team": pid_team, "player_team": player_team,
         "player_pos": player_pos,
         "coach_report_df": coach_report_df,
+        "opportunity_distribution_df": opportunity_distribution_df,
         "all_players": sorted(list(temp_map.values())),
     }
 
@@ -3019,6 +3126,7 @@ def render_elite_overview_shell(
     pass_df,
     story_model,
     coach_report_df,
+    opportunity_distribution_df,
     focus_players,
     rotation_summary=None,
     double_commits_df=None,
@@ -3138,13 +3246,23 @@ def render_elite_overview_shell(
 
             with st.container(border=True):
                 st.markdown("#### Coach Impact Opportunities")
-                if coach_report_df is not None and not coach_report_df.empty and 'MissedSwing' in coach_report_df.columns:
-                    impact = coach_report_df.groupby('Role', as_index=False).agg(MissedSwing=('MissedSwing', 'sum')).sort_values('MissedSwing', ascending=False).head(4)
-                    fig_impact = themed_px(px.bar, impact, x='Role', y='MissedSwing', tier='detail', intent='outcome', variant='negative')
+                opportunity_df = opportunity_distribution_df if opportunity_distribution_df is not None else pd.DataFrame()
+                if opportunity_df is not None and not opportunity_df.empty and {'Role', 'MissedSwing'}.issubset(opportunity_df.columns):
+                    impact = (
+                        opportunity_df.assign(MissedSwing=pd.to_numeric(opportunity_df['MissedSwing'], errors='coerce'))
+                        .dropna(subset=['Role', 'MissedSwing'])
+                        .groupby('Role', as_index=False)
+                        .agg(MissedSwing=('MissedSwing', 'sum'), Opportunities=('Role', 'size'))
+                        .sort_values('MissedSwing', ascending=False)
+                        .head(4)
+                    )
+                    fig_impact = themed_px(px.bar, impact, x='Role', y='MissedSwing', color='Opportunities', tier='detail', intent='outcome', variant='negative')
                     fig_impact.update_layout(height=190, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
                     st.plotly_chart(fig_impact, use_container_width=True)
+                    source_layer = str(opportunity_df.get('Layer', pd.Series(['Primary'])).iloc[0])
+                    st.caption(f'Opportunity distribution ({source_layer.lower()} layer) is available for this replay.')
                 else:
-                    st.caption('Coach opportunities populate once contextual role data is available.')
+                    st.caption('Opportunity distribution is unavailable because replay state or momentum context is missing.')
 
 
 def render_scoreboard(df, shot_df=None, is_overtime=False):
@@ -3360,6 +3478,7 @@ if app_mode == "🔍 Single Match Analysis":
         win_prob_df = _m["win_prob_df"]
         wp_model_used = _m["wp_model_used"]
         coach_report_df = _m.get("coach_report_df", pd.DataFrame())
+        opportunity_distribution_df = _m.get("opportunity_distribution_df", pd.DataFrame())
         is_overtime = _m["is_overtime"]
         temp_map = _m["temp_map"]
         pid_team = _m["pid_team"]
@@ -3386,6 +3505,7 @@ if app_mode == "🔍 Single Match Analysis":
             pass_df,
             story_model,
             coach_report_df,
+            opportunity_distribution_df,
             focus_players,
             rotation_summary=rotation_summary,
             double_commits_df=double_commits_df,
@@ -4429,10 +4549,11 @@ if app_mode == "🔍 Single Match Analysis":
 
         with t11:
             st.subheader("Coach Report")
-            if coach_report_df is None or coach_report_df.empty:
+            report_for_render = coach_report_df if coach_report_df is not None and not coach_report_df.empty else opportunity_distribution_df
+            if report_for_render is None or report_for_render.empty:
                 st.info("No high-leverage decision windows were detected for this match.")
             else:
-                timeline_report_df = coach_report_df.copy()
+                timeline_report_df = report_for_render.copy()
                 for uncertainty_col in [
                     "ExpectedSwingMean",
                     "ExpectedSwingP10",
@@ -4445,8 +4566,8 @@ if app_mode == "🔍 Single Match Analysis":
                 st.plotly_chart(timeline_fig, use_container_width=True)
                 st.caption("Timeline aligns win probability and momentum with missed-opportunity markers so you can scan context before reviewing clips.")
 
-                role_impact_fig = _build_coach_role_impact_chart(coach_report_df)
-                action_mix_fig = _build_coach_action_mix_chart(coach_report_df)
+                role_impact_fig = _build_coach_role_impact_chart(report_for_render)
+                action_mix_fig = _build_coach_action_mix_chart(report_for_render)
                 chart_col_1, chart_col_2 = st.columns(2)
                 with chart_col_1:
                     st.plotly_chart(role_impact_fig, use_container_width=True)
@@ -4454,7 +4575,7 @@ if app_mode == "🔍 Single Match Analysis":
                     st.plotly_chart(action_mix_fig, use_container_width=True)
 
                 role_context = (
-                    coach_report_df.assign(MissedSwing=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce"))
+                    report_for_render.assign(MissedSwing=pd.to_numeric(report_for_render["MissedSwing"], errors="coerce"))
                     .dropna(subset=["Role", "MissedSwing"])
                     .groupby("Role", as_index=False)
                     .agg(TotalMissedSwing=("MissedSwing", "sum"), OpportunityCount=("Role", "size"))
@@ -4462,9 +4583,9 @@ if app_mode == "🔍 Single Match Analysis":
                     .head(1)
                 )
                 action_context = (
-                    coach_report_df.assign(
-                        MissedSwing=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce"),
-                        SwingWeight=pd.to_numeric(coach_report_df["MissedSwing"], errors="coerce").abs(),
+                    report_for_render.assign(
+                        MissedSwing=pd.to_numeric(report_for_render["MissedSwing"], errors="coerce"),
+                        SwingWeight=pd.to_numeric(report_for_render["MissedSwing"], errors="coerce").abs(),
                     )
                     .dropna(subset=["RecommendedAction", "SwingWeight"])
                     .groupby("RecommendedAction", as_index=False)
@@ -4491,7 +4612,16 @@ if app_mode == "🔍 Single Match Analysis":
                             f"across {int(top_action['OpportunityCount'])} opportunities."
                         )
 
-                top_report = coach_report_df.head(5).copy()
+                top_report = report_for_render.head(5).copy()
+                for required_col, default_value in [
+                    ("ExpectedSwing", np.nan),
+                    ("Confidence", np.nan),
+                    ("RecommendationText", "Layered fallback opportunity"),
+                    ("ClipKey", ""),
+                    ("Frame", 0),
+                ]:
+                    if required_col not in top_report.columns:
+                        top_report[required_col] = default_value
                 top_report["ExpectedSwing"] = pd.to_numeric(top_report["ExpectedSwing"], errors="coerce").round(3)
                 top_report["MissedSwing"] = pd.to_numeric(top_report["MissedSwing"], errors="coerce").round(3)
                 top_report["Confidence"] = (pd.to_numeric(top_report["Confidence"], errors="coerce") * 100.0).round(1)
