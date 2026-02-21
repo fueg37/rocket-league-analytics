@@ -2477,6 +2477,18 @@ def build_export_pressure(momentum_series, proto, pid_team):
 
 # --- 11. UI COMPONENTS ---
 
+def _safe_html(html: str) -> str:
+    """Remove whitespace-only lines from an HTML string.
+
+    Streamlit's st.markdown() uses the mistune markdown parser, which follows
+    the CommonMark spec: an HTML block ends at the first blank line (a line
+    containing only whitespace).  Triple-quote f-strings with embedded
+    sub-templates often produce such lines (e.g. '{ot_html}' when ot_html='').
+    Stripping those lines keeps the parser in HTML-block mode for the full block.
+    """
+    return "\n".join(line for line in html.split("\n") if line.strip())
+
+
 def inject_broadcast_styles():
     """Inject CSS for broadcast/esports aesthetic once at app load."""
     st.markdown("""
@@ -2768,7 +2780,7 @@ def render_scoreboard(df, shot_df=None, is_overtime=False):
     blue_names = " · ".join(blue_df.sort_values('Score', ascending=False)['Name'].tolist())
     orange_names = " · ".join(orange_df.sort_values('Score', ascending=False)['Name'].tolist())
 
-    st.markdown(f"""
+    _scoreboard_html = f"""
     <div class="scoreboard-hero">
       <div class="scoreboard-score-row">
         <div class="scoreboard-blue-half"></div>
@@ -2776,63 +2788,33 @@ def render_scoreboard(df, shot_df=None, is_overtime=False):
         <div class="scoreboard-team-blue">{blue_names}</div>
         <div class="scoreboard-score-center">
           <span class="scoreboard-score-num scoreboard-score-blue">{blue_goals}</span>
-          <span class="scoreboard-score-dash">—</span>
-          <div style="position:relative">
-            <span class="scoreboard-score-num scoreboard-score-orange">{orange_goals}</span>
-            {ot_html}
-          </div>
+          <span class="scoreboard-score-dash">&#8212;</span>
+          <div style="position:relative"
+          ><span class="scoreboard-score-num scoreboard-score-orange">{orange_goals}</span
+          >{ot_html}</div>
         </div>
         <div class="scoreboard-team-orange">{orange_names}</div>
       </div>
       <div class="scoreboard-kpi-strip">
         <div class="kpi-team-block">
-          <div class="kpi-item">
-            <span class="kpi-value">{blue_xg}</span>
-            <span class="kpi-label">xG</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value">{blue_shots}</span>
-            <span class="kpi-label">Shots</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value">{blue_saves}</span>
-            <span class="kpi-label">Saves</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value">{blue_aerials}</span>
-            <span class="kpi-label">Aerials</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value" style="color:{luck_color(blue_luck)}">{blue_luck}%</span>
-            <span class="kpi-label">Luck</span>
-          </div>
+          <div class="kpi-item"><span class="kpi-value">{blue_xg}</span><span class="kpi-label">xG</span></div>
+          <div class="kpi-item"><span class="kpi-value">{blue_shots}</span><span class="kpi-label">Shots</span></div>
+          <div class="kpi-item"><span class="kpi-value">{blue_saves}</span><span class="kpi-label">Saves</span></div>
+          <div class="kpi-item"><span class="kpi-value">{blue_aerials}</span><span class="kpi-label">Aerials</span></div>
+          <div class="kpi-item"><span class="kpi-value" style="color:{luck_color(blue_luck)}">{blue_luck}%</span><span class="kpi-label">Luck</span></div>
         </div>
         <div class="kpi-divider"></div>
         <div class="kpi-team-block">
-          <div class="kpi-item">
-            <span class="kpi-value">{orange_xg}</span>
-            <span class="kpi-label">xG</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value">{orange_shots}</span>
-            <span class="kpi-label">Shots</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value">{orange_saves}</span>
-            <span class="kpi-label">Saves</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value">{orange_aerials}</span>
-            <span class="kpi-label">Aerials</span>
-          </div>
-          <div class="kpi-item">
-            <span class="kpi-value" style="color:{luck_color(orange_luck)}">{orange_luck}%</span>
-            <span class="kpi-label">Luck</span>
-          </div>
+          <div class="kpi-item"><span class="kpi-value">{orange_xg}</span><span class="kpi-label">xG</span></div>
+          <div class="kpi-item"><span class="kpi-value">{orange_shots}</span><span class="kpi-label">Shots</span></div>
+          <div class="kpi-item"><span class="kpi-value">{orange_saves}</span><span class="kpi-label">Saves</span></div>
+          <div class="kpi-item"><span class="kpi-value">{orange_aerials}</span><span class="kpi-label">Aerials</span></div>
+          <div class="kpi-item"><span class="kpi-value" style="color:{luck_color(orange_luck)}">{orange_luck}%</span><span class="kpi-label">Luck</span></div>
         </div>
       </div>
     </div>
-    """, unsafe_allow_html=True)
+    """
+    st.markdown(_safe_html(_scoreboard_html), unsafe_allow_html=True)
 
 def _render_player_card(p, team_color_class, bar_fill_class):
     """Render a single broadcast-style player stat card as HTML."""
@@ -2840,44 +2822,35 @@ def _render_player_card(p, team_color_class, bar_fill_class):
     aerials = int(p.get('Aerial Hits', 0))
     aerial_pct_raw = float(p.get('Aerial %', 0))
 
-    stats_html = f"""
-      <div class="stat-item"><span class="stat-name">Goals</span><span class="stat-val">{p['Goals']}</span></div>
-      <div class="stat-item"><span class="stat-name">xG</span><span class="stat-val">{p['xG']:.2f}</span></div>
-      <div class="stat-item"><span class="stat-name">Assists</span><span class="stat-val">{p['Assists']}</span></div>
-      <div class="stat-item"><span class="stat-name">xGOT</span><span class="stat-val">{float(p.get('xGOT', 0)):.2f}</span></div>
-      <div class="stat-item"><span class="stat-name">Saves</span><span class="stat-val">{p['Saves']}</span></div>
-      <div class="stat-item"><span class="stat-name">xGA</span><span class="stat-val">{float(p.get('xGA', 0)):.2f}</span></div>
-      <div class="stat-item"><span class="stat-name">Shots</span><span class="stat-val">{p['Shots']}</span></div>
-      <div class="stat-item"><span class="stat-name">VAEP</span><span class="stat-val">{float(p.get('Total_VAEP', 0)):+.2f}</span></div>
-    """
-
-    return f"""
-    <div class="player-card {team_color_class}">
-      <div class="player-card-header">
-        <span class="player-name">{p['Name']}</span>
-        <span class="player-rating">Rating {p['Rating']}</span>
-      </div>
-      <div class="player-stats-grid">
-        {stats_html}
-      </div>
-      <div class="player-bar-row">
-        <div class="player-bar-label">
-          <span>Possession</span><span>{poss:.0f}%</span>
-        </div>
-        <div class="player-bar-track">
-          <div class="{bar_fill_class}" style="width:{min(poss, 100):.0f}%"></div>
-        </div>
-      </div>
-      <div class="player-bar-row" style="margin-top:6px">
-        <div class="player-bar-label">
-          <span>Aerials</span><span>{aerials}</span>
-        </div>
-        <div class="player-bar-track">
-          <div class="{bar_fill_class}" style="width:{min(aerial_pct_raw, 100):.0f}%"></div>
-        </div>
-      </div>
-    </div>
-    """
+    # Build stats as a single compact string — no blank lines to avoid markdown parser breakage
+    stats_html = (
+        f'<div class="stat-item"><span class="stat-name">Goals</span><span class="stat-val">{p["Goals"]}</span></div>'
+        f'<div class="stat-item"><span class="stat-name">xG</span><span class="stat-val">{p["xG"]:.2f}</span></div>'
+        f'<div class="stat-item"><span class="stat-name">Assists</span><span class="stat-val">{p["Assists"]}</span></div>'
+        f'<div class="stat-item"><span class="stat-name">xGOT</span><span class="stat-val">{float(p.get("xGOT", 0)):.2f}</span></div>'
+        f'<div class="stat-item"><span class="stat-name">Saves</span><span class="stat-val">{p["Saves"]}</span></div>'
+        f'<div class="stat-item"><span class="stat-name">xGA</span><span class="stat-val">{float(p.get("xGA", 0)):.2f}</span></div>'
+        f'<div class="stat-item"><span class="stat-name">Shots</span><span class="stat-val">{p["Shots"]}</span></div>'
+        f'<div class="stat-item"><span class="stat-name">VAEP</span><span class="stat-val">{float(p.get("Total_VAEP", 0)):+.2f}</span></div>'
+    )
+    _card = (
+        f'<div class="player-card {team_color_class}">'
+        f'<div class="player-card-header">'
+        f'<span class="player-name">{p["Name"]}</span>'
+        f'<span class="player-rating">Rating {p["Rating"]}</span>'
+        f'</div>'
+        f'<div class="player-stats-grid">{stats_html}</div>'
+        f'<div class="player-bar-row">'
+        f'<div class="player-bar-label"><span>Possession</span><span>{poss:.0f}%</span></div>'
+        f'<div class="player-bar-track"><div class="{bar_fill_class}" style="width:{min(poss, 100):.0f}%"></div></div>'
+        f'</div>'
+        f'<div class="player-bar-row" style="margin-top:6px">'
+        f'<div class="player-bar-label"><span>Aerials</span><span>{aerials}</span></div>'
+        f'<div class="player-bar-track"><div class="{bar_fill_class}" style="width:{min(aerial_pct_raw, 100):.0f}%"></div></div>'
+        f'</div>'
+        f'</div>'
+    )
+    return _card
 
 
 def render_dashboard(df, shot_df, pass_df):
@@ -2892,23 +2865,24 @@ def render_dashboard(df, shot_df, pass_df):
     blue_pct = int((blue_poss / total_poss) * 100) if total_poss > 0 else 50
     orange_pct = 100 - blue_pct
 
-    st.markdown(f"""
-    <div class="scoreboard-hero" style="margin-top:6px; border-radius:8px;">
-      <div class="possession-bar-wrap">
-        <div class="possession-label-row">
-          <span style="font-size:0.72em;color:#60a5fa;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;">Ball Possession</span>
-        </div>
-        <div class="possession-track" style="margin-top:6px;">
-          <div style="background:#3b82f6;width:{blue_pct}%;"></div>
-          <div style="background:#fb923c;width:{orange_pct}%;"></div>
-        </div>
-        <div class="possession-label-row">
-          <span style="color:#60a5fa;font-size:0.8em;font-weight:700;">{blue_pct}%</span>
-          <span style="color:#fb923c;font-size:0.8em;font-weight:700;">{orange_pct}%</span>
-        </div>
-      </div>
-    </div>
-    """, unsafe_allow_html=True)
+    _poss_html = (
+        '<div class="scoreboard-hero" style="margin-top:6px; border-radius:8px;">'
+        '<div class="possession-bar-wrap">'
+        '<div class="possession-label-row">'
+        '<span style="font-size:0.72em;color:#60a5fa;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;">Ball Possession</span>'
+        '</div>'
+        f'<div class="possession-track" style="margin-top:6px;">'
+        f'<div style="background:#3b82f6;width:{blue_pct}%;"></div>'
+        f'<div style="background:#fb923c;width:{orange_pct}%;"></div>'
+        '</div>'
+        '<div class="possession-label-row">'
+        f'<span style="color:#60a5fa;font-size:0.8em;font-weight:700;">{blue_pct}%</span>'
+        f'<span style="color:#fb923c;font-size:0.8em;font-weight:700;">{orange_pct}%</span>'
+        '</div>'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(_poss_html, unsafe_allow_html=True)
 
     # Player cards — two columns (Blue left, Orange right)
     col_b, col_o = st.columns(2)
