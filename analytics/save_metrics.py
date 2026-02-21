@@ -17,6 +17,7 @@ import pandas as pd
 
 from analytics.contracts import flatten_metric_contract, metric_contract
 from analytics.stats_uncertainty import bootstrap_mean_interval, deterministic_seed, reliability_from_sample_size
+from analytics.spatial_index import PlayerFrameAccessor
 from constants import FIELD_HALF_Y, REPLAY_FPS
 from analytics.shot_quality import (
     COL_DIST_TO_GOAL,
@@ -126,26 +127,17 @@ def build_save_touch_index(proto, player_map: Dict[str, str], pid_team: Dict[str
     return touch_index
 
 
-def find_nearest_defender(frame: int, defending_team: str, shot_x: float, shot_y: float, player_pos: Dict):
-    nearest_defender: Optional[str] = None
-    nearest_dist = np.inf
-    for pname, pd_info in player_pos.items():
-        if pd_info.get("team") != defending_team:
-            continue
-        frames = pd_info.get("frames")
-        xs = pd_info.get("x")
-        ys = pd_info.get("y")
-        if frames is None or xs is None or ys is None or len(xs) == 0:
-            continue
-        pi = min(np.searchsorted(frames, frame), len(xs) - 1)
-        if pi < 0:
-            continue
-        px, py = xs[pi], ys[pi]
-        dist = float(np.sqrt((px - shot_x) ** 2 + (py - shot_y) ** 2))
-        if dist < nearest_dist:
-            nearest_dist = dist
-            nearest_defender = pname
-    return nearest_defender, float(nearest_dist) if np.isfinite(nearest_dist) else np.nan
+def find_nearest_defender(
+    frame: int,
+    defending_team: str,
+    shot_x: float,
+    shot_y: float,
+    player_pos: Optional[Dict] = None,
+    accessor: Optional[PlayerFrameAccessor] = None,
+):
+    """Compatibility shim around the shared spatial accessor."""
+    resolved_accessor = accessor or PlayerFrameAccessor.from_player_positions(player_pos or {})
+    return resolved_accessor.nearest_defender(frame=frame, team=defending_team, x=shot_x, y=shot_y)
 
 
 def resolve_saver_for_shot(
@@ -153,9 +145,10 @@ def resolve_saver_for_shot(
     defending_team: str,
     shot_x: float,
     shot_y: float,
-    player_pos: Dict,
+    player_pos: Optional[Dict],
     save_touch_index: Dict[Tuple[int, str], list],
     search_window_frames: int = 12,
+    accessor: Optional[PlayerFrameAccessor] = None,
 ):
     """Resolve saver with explicit save-touch attribution first, nearest fallback second."""
     for delta in range(search_window_frames + 1):
@@ -164,7 +157,14 @@ def resolve_saver_for_shot(
             if savers:
                 return savers[0], np.nan, "explicit_save_touch", 1.0
 
-    nearest_defender, nearest_dist = find_nearest_defender(frame, defending_team, shot_x, shot_y, player_pos)
+    nearest_defender, nearest_dist = find_nearest_defender(
+        frame,
+        defending_team,
+        shot_x,
+        shot_y,
+        player_pos=player_pos,
+        accessor=accessor,
+    )
     if nearest_defender:
         return nearest_defender, nearest_dist, "nearest_defender_fallback", 0.5
     return None, np.nan, "unresolved", 0.0
@@ -253,6 +253,7 @@ def build_save_events(
         return pd.DataFrame(columns=CANONICAL_EVENT_COLUMNS)
 
     save_touch_index = build_save_touch_index(proto, player_map, pid_team)
+    accessor = PlayerFrameAccessor.from_player_positions(player_pos)
     events = []
 
     for _, shot in saved_shots.iterrows():
@@ -268,6 +269,7 @@ def build_save_events(
             shot_y=float(shot[SHOT_COL_Y]),
             player_pos=player_pos,
             save_touch_index=save_touch_index,
+            accessor=accessor,
         )
         if not saver:
             continue
