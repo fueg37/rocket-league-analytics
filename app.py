@@ -2711,11 +2711,12 @@ def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_
     poss_orange = float(orange_df.get('Possession', pd.Series([0.0])).sum()) if not orange_df.empty else 0.0
     total_poss = poss_blue + poss_orange
 
-    if win_prob_df is not None and not win_prob_df.empty and 'BlueWinProb' in win_prob_df.columns:
-        wp = pd.to_numeric(win_prob_df['BlueWinProb'], errors='coerce').dropna()
-        win_swing = float((wp.max() - wp.min()) * 100) if not wp.empty else 0.0
-    else:
-        win_swing = 0.0
+    wp = pd.Series(dtype=float)
+    if win_prob_df is not None and not win_prob_df.empty:
+        wp_col = next((c for c in ['BlueWinProb', 'Blue_Win_Prob', 'win_prob_blue'] if c in win_prob_df.columns), None)
+        if wp_col:
+            wp = pd.to_numeric(win_prob_df[wp_col], errors='coerce').dropna()
+    win_swing = float((wp.max() - wp.min()) * 100) if not wp.empty else 0.0
 
     if shot_df is not None and not shot_df.empty and COL_XG in shot_df.columns:
         xg_benchmark = float(pd.to_numeric(shot_df[COL_XG], errors='coerce').fillna(0).mean() * 10)
@@ -2726,86 +2727,80 @@ def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_
     possession_value = ((poss_blue - poss_orange) / total_poss) if total_poss > 0 else 0.0
     chemistry_index = 0.0
     if pass_df is not None and not pass_df.empty:
-        chemistry_index = min(100.0, float(pass_df.groupby('Sender').size().sum()) * 2.2)
+        chemistry_index = min(100.0, float(len(pass_df)) * 2.2)
 
     chips = ["Single Match", f"Blue {blue_goals} - {orange_goals} Orange", "Ranked 3v3"]
-    st.markdown('<div class="elite-shell">', unsafe_allow_html=True)
-    h1, h2 = st.columns([3.0, 1.4])
-    with h1:
-        st.markdown('<h2 class="elite-title">Elite Match Command Center</h2>', unsafe_allow_html=True)
-        st.markdown('<p class="elite-subtitle">A calm, Apple-grade analytics surface: story first, depth on demand.</p>', unsafe_allow_html=True)
-    with h2:
-        st.markdown('<div class="elite-chip-wrap">' + ''.join([f'<span class="ios-chip">{c}</span>' for c in chips]) + '</div>', unsafe_allow_html=True)
 
-    k1, k2, k3, k4 = st.columns(4)
-    kpis = [
-        ("Win Probability Swing", f"{win_swing:+.1f}%", "▲ Positive momentum" if win_swing > 0 else "• Stable"),
-        ("Expected Goals (xG)", f"{total_xg:.2f}", f"{xg_delta:+.2f} vs baseline"),
-        ("Possession Value", f"{possession_value:+.2f}", "Control edge" if possession_value > 0 else "Pressure against"),
-        ("Chemistry Index", f"{chemistry_index:.0f}", "Strong passing lanes" if chemistry_index > 50 else "Build passing rhythm"),
-    ]
-    for col, (label, value, delta) in zip([k1, k2, k3, k4], kpis):
-        with col:
-            st.markdown(f'<div class="elite-kpi"><div class="elite-kpi-label">{label}</div><div class="elite-kpi-value">{value}</div><div class="elite-kpi-delta">{delta}</div></div>', unsafe_allow_html=True)
+    with st.container(border=True):
+        top_left, top_right = st.columns([3.0, 1.4])
+        with top_left:
+            st.markdown("## Elite Match Command Center")
+            st.caption("A calm, Apple-grade analytics surface: story first, depth on demand.")
+        with top_right:
+            st.markdown('<div class="elite-chip-wrap">' + ''.join([f'<span class="ios-chip">{c}</span>' for c in chips]) + '</div>', unsafe_allow_html=True)
 
-    left, right = st.columns([2.3, 1.0])
-    with left:
-        st.markdown('<div class="elite-panel"><div class="elite-panel-title">Narrative Arc · pressure, xG, and turning points</div>', unsafe_allow_html=True)
-        if win_prob_df is not None and not win_prob_df.empty:
-            fig_arc = themed_figure(tier="support")
-            time_col = 'TimeSeconds' if 'TimeSeconds' in win_prob_df.columns else win_prob_df.columns[0]
-            x_vals = pd.to_numeric(win_prob_df[time_col], errors='coerce').fillna(0)
-            y_wp = pd.to_numeric(win_prob_df.get('BlueWinProb', pd.Series([0.5] * len(win_prob_df))), errors='coerce').fillna(0.5)
-            fig_arc.add_trace(go.Scatter(x=x_vals, y=y_wp, mode='lines', name='Blue Win Prob', line=dict(color='#7fb5ff', width=3)))
-            fig_arc.add_trace(go.Scatter(x=x_vals, y=1 - y_wp, mode='lines', name='Orange Win Prob', line=dict(color='#fb7f9b', width=2)))
-            fig_arc.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
-            fig_arc.update_xaxes(visible=False)
-            fig_arc.update_yaxes(visible=False)
-            st.plotly_chart(fig_arc, use_container_width=True)
-        else:
-            st.info('Narrative chart appears after replay parsing.')
-        st.markdown('</div>', unsafe_allow_html=True)
+        k1, k2, k3, k4 = st.columns(4)
+        kpis = [
+            ("Win Probability Swing", f"{win_swing:+.1f}%", "▲ Positive momentum" if win_swing > 0 else "• Stable"),
+            ("Expected Goals (xG)", f"{total_xg:.2f}", f"{xg_delta:+.2f} vs baseline"),
+            ("Possession Value", f"{possession_value:+.2f}", "Control edge" if possession_value > 0 else "Pressure against"),
+            ("Chemistry Index", f"{chemistry_index:.0f}", "Strong passing lanes" if chemistry_index > 50 else "Build passing rhythm"),
+        ]
+        for col, (label, value, delta) in zip([k1, k2, k3, k4], kpis):
+            with col:
+                st.markdown(f'<div class="elite-kpi"><div class="elite-kpi-label">{label}</div><div class="elite-kpi-value">{value}</div><div class="elite-kpi-delta">{delta}</div></div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="elite-insight"><div class="elite-panel-title">Key Insight</div>', unsafe_allow_html=True)
-        top_edge = 'midfield pressure conversion'
-        if not df.empty and 'Saves' in df.columns:
-            if blue_df['Saves'].sum() + orange_df['Saves'].sum() > 12:
-                top_edge = 'defensive save quality under pressure'
-        st.markdown(f"<div style='font-size:2rem;font-weight:760;line-height:1.08;margin-bottom:0.55rem;'>Your strongest edge was<br>{top_edge}.</div>", unsafe_allow_html=True)
-        st.markdown("<div style='color:#c5d6f3;'>When second-man challenge timing tightened, expected possession value increased and unlocked higher-quality shots.</div>", unsafe_allow_html=True)
-        st.markdown("<div style='margin-top:0.65rem; display:inline-block; border:1px solid rgba(134,239,172,.45); color:#9af5b8; padding:.25rem .45rem; border-radius:8px; background:rgba(22,163,74,.18);'>Recommended: Preserve rotation spacing + early midfield challenge</div>", unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+        left, right = st.columns([2.3, 1.0])
+        with left:
+            st.markdown("#### Narrative Arc · pressure, xG, and turning points")
+            if not wp.empty:
+                fig_arc = themed_figure(tier="support")
+                x_vals = np.arange(len(wp))
+                fig_arc.add_trace(go.Scatter(x=x_vals, y=wp, mode='lines', line=dict(color='#7fb5ff', width=3), showlegend=False))
+                fig_arc.add_trace(go.Scatter(x=x_vals, y=1 - wp, mode='lines', line=dict(color='#fb7f9b', width=2), showlegend=False))
+                fig_arc.update_layout(height=240, margin=dict(l=12, r=12, t=12, b=12))
+                fig_arc.update_xaxes(visible=False)
+                fig_arc.update_yaxes(visible=False)
+                st.plotly_chart(fig_arc, use_container_width=True)
+            else:
+                st.info('Narrative chart appears after replay parsing.')
 
-    with right:
-        st.markdown('<div class="elite-panel"><div class="elite-panel-title">Priority Actions</div>', unsafe_allow_html=True)
-        actions = []
-        if coach_report_df is not None and not coach_report_df.empty and 'Role' in coach_report_df.columns:
-            role_counts = coach_report_df['Role'].value_counts().head(4)
-            for role, count in role_counts.items():
-                actions.append((title_case_label(str(role)), 'Improve' if count >= 2 else 'Stable'))
-        if not actions:
-            actions = [
-                ('Defensive Third exits', 'Improve'),
-                ('Backboard coverage', 'Stable'),
-                ('Kickoff conversion', 'Strong'),
-                ('Third-man spacing', 'Improve'),
-            ]
-        for label, status in actions[:4]:
-            st.markdown(f'<div class="elite-list-row"><span>{label}</span><strong>{status}</strong></div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
+            with st.container(border=True):
+                st.markdown("#### Key Insight")
+                top_edge = 'midfield pressure conversion'
+                if not df.empty and 'Saves' in df.columns and (blue_df['Saves'].sum() + orange_df['Saves'].sum()) > 12:
+                    top_edge = 'defensive save quality under pressure'
+                st.markdown(f"### Your strongest edge was {top_edge}.")
+                st.caption("When second-man challenge timing tightened, expected possession value increased and unlocked higher-quality shots.")
+                st.success("Recommended: Preserve rotation spacing + early midfield challenge")
 
-        st.markdown('<div class="elite-panel" style="margin-top:0.9rem;"><div class="elite-panel-title">Coach Impact Opportunities</div>', unsafe_allow_html=True)
-        if coach_report_df is not None and not coach_report_df.empty and 'MissedSwing' in coach_report_df.columns:
-            impact = coach_report_df.groupby('Role', as_index=False).agg(MissedSwing=('MissedSwing', 'sum')).sort_values('MissedSwing', ascending=False).head(4)
-            fig_impact = themed_px(px.bar, impact, x='Role', y='MissedSwing', tier='detail', intent='outcome', variant='negative')
-            fig_impact.update_layout(height=165, margin=dict(l=8, r=8, t=8, b=8), showlegend=False)
-            fig_impact.update_xaxes(visible=False)
-            fig_impact.update_yaxes(visible=False)
-            st.plotly_chart(fig_impact, use_container_width=True)
-        else:
-            st.markdown('<div style="height:140px;border:1px solid rgba(148,163,184,.24);border-radius:14px;background:rgba(8,16,32,.45);"></div>', unsafe_allow_html=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+        with right:
+            with st.container(border=True):
+                st.markdown("#### Priority Actions")
+                actions = []
+                if coach_report_df is not None and not coach_report_df.empty and 'Role' in coach_report_df.columns:
+                    role_counts = coach_report_df['Role'].value_counts().head(4)
+                    for role, count in role_counts.items():
+                        actions.append((title_case_label(str(role)), 'Improve' if count >= 2 else 'Stable'))
+                if not actions:
+                    actions = [
+                        ('Defensive Third exits', 'Improve'),
+                        ('Backboard coverage', 'Stable'),
+                        ('Kickoff conversion', 'Strong'),
+                        ('Third-man spacing', 'Improve'),
+                    ]
+                for label, status in actions[:4]:
+                    st.markdown(f'<div class="elite-list-row"><span>{label}</span><strong>{status}</strong></div>', unsafe_allow_html=True)
+
+            with st.container(border=True):
+                st.markdown("#### Coach Impact Opportunities")
+                if coach_report_df is not None and not coach_report_df.empty and 'MissedSwing' in coach_report_df.columns:
+                    impact = coach_report_df.groupby('Role', as_index=False).agg(MissedSwing=('MissedSwing', 'sum')).sort_values('MissedSwing', ascending=False).head(4)
+                    fig_impact = themed_px(px.bar, impact, x='Role', y='MissedSwing', tier='detail', intent='outcome', variant='negative')
+                    fig_impact.update_layout(height=190, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+                    st.plotly_chart(fig_impact, use_container_width=True)
+                else:
+                    st.caption('Coach opportunities populate once contextual role data is available.')
 
 
 def render_scoreboard(df, shot_df=None, is_overtime=False):
