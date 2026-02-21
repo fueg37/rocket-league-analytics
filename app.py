@@ -456,7 +456,206 @@ if os.path.exists(_pitch_path):
         PITCH_IMAGE_B64 = "data:image/png;base64," + base64.b64encode(_f.read()).decode()
 
 st.set_page_config(page_title="RL Analytics", layout="wide", page_icon="🚀")
-st.title("🚀 Rocket League Analytics")
+
+
+def inject_ios_shell_theme() -> None:
+    """Apply an iOS-inspired glassmorphism shell across the Streamlit surface."""
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background:
+                radial-gradient(1100px 420px at 8% -5%, rgba(59, 130, 246, 0.28), transparent 65%),
+                radial-gradient(900px 380px at 95% 0%, rgba(139, 92, 246, 0.24), transparent 65%),
+                linear-gradient(165deg, #0a1226 0%, #111c38 55%, #0e1a34 100%);
+            color: #f8fbff;
+        }
+        .main .block-container {
+            padding-top: 1.4rem;
+            padding-bottom: 1.4rem;
+            max-width: 96rem;
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.05));
+            border-right: 1px solid rgba(148, 163, 184, 0.22);
+            backdrop-filter: blur(16px);
+        }
+        [data-testid="stSidebar"] * {
+            color: #e6eefc;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.4rem;
+            background: rgba(16, 30, 58, 0.5);
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            border-radius: 999px;
+            padding: 0.24rem;
+            backdrop-filter: blur(12px);
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            height: 2.3rem;
+            color: #cbd5e1;
+            font-weight: 600;
+            padding: 0 1rem;
+        }
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(180deg, rgba(77, 163, 255, 0.35), rgba(77, 163, 255, 0.15));
+            color: #f8fbff;
+        }
+        [data-testid="stMetric"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.13), rgba(255,255,255,0.06));
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 18px;
+            padding: 0.8rem 1rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+        }
+        .stPlotlyChart, [data-testid="stDataFrame"], .stExpander {
+            background: rgba(9, 17, 34, 0.52);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 18px;
+            padding: 0.3rem;
+            backdrop-filter: blur(10px);
+        }
+        .stButton > button,
+        [data-testid="stDownloadButton"] button {
+            border-radius: 999px;
+            border: 1px solid rgba(125, 211, 252, 0.4);
+            background: linear-gradient(180deg, rgba(56, 189, 248, 0.28), rgba(56, 189, 248, 0.14));
+            color: #e0f2fe;
+            font-weight: 600;
+        }
+        .ios-hero {
+            border-radius: 24px;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: linear-gradient(130deg, rgba(255,255,255,0.13), rgba(255,255,255,0.05));
+            padding: 1rem 1.2rem;
+            margin-bottom: 0.9rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
+        }
+        .ios-hero h1 { margin: 0; font-size: 1.9rem; line-height: 1.2; }
+        .ios-hero p { margin: 0.35rem 0 0.7rem 0; color: #d0ddf8; }
+        .ios-chip-row { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+        .ios-chip {
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: rgba(15, 23, 42, 0.5);
+            color: #e2e8f0;
+            font-size: 0.78rem;
+            padding: 0.28rem 0.65rem;
+        }
+
+        .ios-score-shell {
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 22px;
+            background: linear-gradient(140deg, rgba(14, 28, 58, 0.72), rgba(11, 23, 46, 0.5));
+            padding: 0.9rem 1rem;
+            margin: 0.4rem 0 0.8rem 0;
+        }
+        .ios-scoreline {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            text-align: center;
+            gap: 0.6rem;
+        }
+        .ios-score {
+            font-size: 3rem;
+            font-weight: 750;
+            line-height: 1;
+            letter-spacing: -0.04em;
+        }
+        .ios-score.blue { color: #66a7ff; }
+        .ios-score.orange { color: #ffaf67; }
+        .ios-score-sep {
+            font-size: 1.8rem;
+            color: #d7e6ff;
+            opacity: 0.9;
+        }
+        .ios-ot-badge {
+            border-radius: 999px;
+            border: 1px solid rgba(250, 204, 21, 0.55);
+            color: #fde68a;
+            padding: 0.12rem 0.42rem;
+            font-size: 0.72rem;
+            margin-left: 0.4rem;
+            vertical-align: middle;
+        }
+        .ios-luck-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            text-align: center;
+            margin-top: 0.55rem;
+            color: #d6e5ff;
+            font-weight: 550;
+        }
+        .ios-luck-pos { color: #86efac; }
+        .ios-luck-mid { color: #fcd34d; }
+        .ios-luck-neg { color: #fda4af; }
+        .ios-team-label {
+            margin-top: 0.55rem;
+            font-size: 0.8rem;
+            color: #a7bddf;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .ios-possession-card {
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 18px;
+            background: rgba(12, 25, 52, 0.52);
+            padding: 0.7rem 0.9rem 0.85rem;
+            margin-bottom: 0.8rem;
+        }
+        .ios-possession-track {
+            width: 100%;
+            height: 14px;
+            border-radius: 999px;
+            overflow: hidden;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: rgba(15, 23, 42, 0.75);
+            display: flex;
+        }
+        .ios-possession-blue {
+            background: linear-gradient(90deg, #3b82f6, #60a5fa);
+            height: 100%;
+        }
+        .ios-possession-orange {
+            background: linear-gradient(90deg, #fb923c, #f59e0b);
+            height: 100%;
+        }
+        .ios-possession-meta {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 0.45rem;
+            font-size: 0.82rem;
+            font-weight: 650;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_ios_hero_banner() -> None:
+    """Top-level product framing for a premium, narrative-first experience."""
+    st.markdown(
+        """
+        <div class="ios-hero">
+          <h1>🚀 Elite Match Command Center</h1>
+          <p>Apple-grade visual clarity for replay intelligence: story first, deep analytics on demand.</p>
+          <div class="ios-chip-row">
+            <span class="ios-chip">Overview-first IA</span>
+            <span class="ios-chip">Narrative + action cards</span>
+            <span class="ios-chip">Glass KPI surfaces</span>
+            <span class="ios-chip">High-contrast pro charts</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_ios_shell_theme()
+render_ios_hero_banner()
 
 # --- SESSION STATE INITIALIZATION ---
 if "match_store" not in st.session_state:
@@ -2457,25 +2656,50 @@ def build_export_pressure(momentum_series, proto, pid_team):
 # --- 11. UI COMPONENTS ---
 def render_scoreboard(df, shot_df=None, is_overtime=False):
     st.markdown("### 🏆 Final Scoreboard")
-    blue_goals = df[df['Team']=='Blue']['Goals'].sum()
-    orange_goals = df[df['Team']=='Orange']['Goals'].sum()
-    ot_badge = " <span style='font-size: 0.4em; color: #ffcc00;'>(OT)</span>" if is_overtime else ""
-    c1, c2, c3 = st.columns([1, 0.5, 1])
-    with c1: st.markdown(f"<h1 style='text-align: center; color: #007bff; margin: 0;'>{blue_goals}</h1>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<h1 style='text-align: center; color: white; margin: 0;'>-{ot_badge}</h1>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<h1 style='text-align: center; color: #ff9900; margin: 0;'>{orange_goals}</h1>", unsafe_allow_html=True)
-    # Luck % display
+    blue_goals = int(df[df['Team'] == 'Blue']['Goals'].sum())
+    orange_goals = int(df[df['Team'] == 'Orange']['Goals'].sum())
+    overtime_badge = '<span class="ios-ot-badge">OT</span>' if is_overtime else ''
+
+    st.markdown(
+        f"""
+        <div class="ios-score-shell">
+          <div class="ios-scoreline">
+            <div>
+              <div class="ios-score blue">{blue_goals}</div>
+              <div class="ios-team-label">Blue Team</div>
+            </div>
+            <div class="ios-score-sep">— {overtime_badge}</div>
+            <div>
+              <div class="ios-score orange">{orange_goals}</div>
+              <div class="ios-team-label">Orange Team</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if shot_df is not None and not shot_df.empty:
-        blue_luck = calculate_luck_percentage(shot_df, "Blue", int(blue_goals))
-        orange_luck = calculate_luck_percentage(shot_df, "Orange", int(orange_goals))
-        lc1, lc2 = st.columns(2)
-        with lc1:
-            luck_color = "#00cc96" if blue_luck > 50 else "#ff6b6b" if blue_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {blue_luck}%</span></div>", unsafe_allow_html=True)
-        with lc2:
-            luck_color = "#00cc96" if orange_luck > 50 else "#ff6b6b" if orange_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {orange_luck}%</span></div>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+        blue_luck = calculate_luck_percentage(shot_df, "Blue", blue_goals)
+        orange_luck = calculate_luck_percentage(shot_df, "Orange", orange_goals)
+
+        def _luck_class(value: float) -> str:
+            if value > 50:
+                return "ios-luck-pos"
+            if value < 30:
+                return "ios-luck-neg"
+            return "ios-luck-mid"
+
+        st.markdown(
+            f"""
+            <div class="ios-luck-row">
+              <div>Blue luck: <span class="{_luck_class(blue_luck)}">{blue_luck}%</span></div>
+              <div>Orange luck: <span class="{_luck_class(orange_luck)}">{orange_luck}%</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     cols = ['Name', 'Rating', 'Score', 'Goals', 'Assists', 'Saves', 'Shots']
     col_blue, col_orange = st.columns(2)
     with col_blue:
@@ -2496,17 +2720,22 @@ def render_dashboard(df, shot_df, pass_df):
     if total > 0:
         blue_pct = int((blue_poss / total) * 100)
         orange_pct = 100 - blue_pct
-        st.write(f"**Possession**")
-        st.markdown(f"""
-            <div style="display: flex; width: 100%; height: 20px; border-radius: 10px; overflow: hidden;">
-                <div style="background-color: #007bff; width: {blue_pct}%;"></div>
-                <div style="background-color: #ff9900; width: {orange_pct}%;"></div>
+        st.markdown(
+            f"""
+            <div class="ios-possession-card">
+              <div style="font-weight:650; margin-bottom:0.45rem;">Possession Split</div>
+              <div class="ios-possession-track">
+                <div class="ios-possession-blue" style="width: {blue_pct}%;"></div>
+                <div class="ios-possession-orange" style="width: {orange_pct}%;"></div>
+              </div>
+              <div class="ios-possession-meta">
+                <span style="color:#93c5fd;">Blue {blue_pct}%</span>
+                <span style="color:#fdba74;">Orange {orange_pct}%</span>
+              </div>
             </div>
-            <div style="display: flex; justify-content: space-between; margin-top: 5px;">
-                <span style="color: #007bff; font-weight: bold;">{blue_pct}%</span>
-                <span style="color: #ff9900; font-weight: bold;">{orange_pct}%</span>
-            </div>
-        """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
     st.divider()
     blue_df = df[df['Team']=='Blue']
     orange_df = df[df['Team']=='Orange']

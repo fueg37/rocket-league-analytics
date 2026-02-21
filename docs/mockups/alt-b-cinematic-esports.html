@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Rocket League Analytics · Cinematic Esports</title>
+<style>
+  :root{--bg:#070b17;--bg2:#0f172a;--text:#f8fafc;--muted:#9fb0cf;--card:#0b1224cc;--stroke:#7dd3fc3a;--cyan:#22d3ee;--violet:#8b5cf6;--orange:#fb923c;--green:#4ade80}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:Inter,-apple-system,BlinkMacSystemFont,"SF Pro Display",sans-serif;color:var(--text);background:radial-gradient(1100px 420px at 10% -10%, #1d4ed866 0%, transparent 60%),radial-gradient(900px 360px at 95% 5%, #7c3aed55 0%, transparent 65%),linear-gradient(160deg,var(--bg),var(--bg2));}
+  .app{width:1500px;height:920px;margin:20px auto;border-radius:30px;overflow:hidden;border:1px solid #38bdf833;background:linear-gradient(180deg,#0b1224c0,#0b122496);box-shadow:0 30px 90px #00000099}
+  .top{height:86px;padding:18px 24px;border-bottom:1px solid #7dd3fc2e;display:flex;justify-content:space-between;align-items:center;background:linear-gradient(90deg,#0ea5e91f,#8b5cf61f)}
+  .title{font-size:28px;font-weight:800;letter-spacing:.2px}
+  .subtitle{font-size:13px;color:var(--muted);margin-top:4px}
+  .chips{display:flex;gap:8px}.chip{padding:8px 12px;border-radius:999px;border:1px solid #67e8f933;background:#0f172ab0;font-size:12px;color:#bae6fd}
+  .body{display:grid;grid-template-columns:220px 1fr 340px;height:calc(100% - 86px)}
+  .left{padding:16px;border-right:1px solid #7dd3fc22}.nav{display:flex;flex-direction:column;gap:9px;margin-top:6px}.item{padding:11px;border-radius:12px;color:var(--muted);font-size:13px}.item.active{background:#06b6d422;color:#e0f2fe;border:1px solid #67e8f955}
+  .center{padding:16px;display:grid;grid-template-rows:130px 270px 1fr;gap:12px}
+  .panel{border:1px solid var(--stroke);border-radius:18px;background:var(--card);padding:14px;box-shadow:inset 0 1px 0 #ffffff14}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  .k{border-radius:14px;padding:12px;background:linear-gradient(180deg,#0ea5e91a,#0b122400);border:1px solid #38bdf833}
+  .k .l{font-size:11px;color:var(--muted)} .k .v{font-size:26px;font-weight:800;margin-top:6px} .k .d{font-size:12px;color:#86efac}
+  .hero .h{font-size:13px;color:#c7d2fe;margin-bottom:10px}
+  .plot{height:210px;border-radius:14px;background:linear-gradient(180deg,#0ea5e91a,#8b5cf614,#0000);border:1px solid #67e8f933;position:relative;overflow:hidden}
+  svg{width:100%;height:100%}
+  .bottom{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  .mini{height:220px;border-radius:12px;border:1px solid #67e8f933;background:#02061766}
+  .right{padding:16px;border-left:1px solid #7dd3fc22;display:flex;flex-direction:column;gap:12px}
+  .insight{font-size:24px;font-weight:800;line-height:1.15}
+  .copy{font-size:13px;color:var(--muted);line-height:1.45}
+  .row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #67e8f924;font-size:13px}
+  .up{color:var(--green)} .warn{color:var(--orange)}
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div><div class="title">Cinematic Match Operations</div><div class="subtitle">High-drama visuals with disciplined information hierarchy.</div></div>
+    <div class="chips"><div class="chip">Blue 4 - 2 Orange</div><div class="chip">3v3 Ranked</div><div class="chip">Coach Mode</div></div>
+  </header>
+  <div class="body">
+    <aside class="left"><div style="font-weight:700">Navigation</div><div class="nav"><div class="item active">Overview</div><div class="item">Narrative</div><div class="item">Rotations</div><div class="item">Shot IQ</div><div class="item">Synergy</div><div class="item">Counterfactuals</div><div class="item">Export</div></div></aside>
+    <main class="center">
+      <section class="panel kpis"><div class="k"><div class="l">Momentum Swing</div><div class="v">+21%</div><div class="d">▲ dominant phase</div></div><div class="k"><div class="l">Expected Goals</div><div class="v">4.08</div><div class="d">+1.02 baseline</div></div><div class="k"><div class="l">Pressure Wins</div><div class="v">67</div><div class="d">▲ clutch</div></div><div class="k"><div class="l">Risk Exposure</div><div class="v">Low</div><div class="d">controlled</div></div></section>
+      <section class="panel hero"><div class="h">Narrative Graph · pressure conversion + xG velocity</div><div class="plot"><svg viewBox="0 0 1000 300" preserveAspectRatio="none"><polyline fill="none" stroke="#22d3ee" stroke-width="6" points="0,235 110,225 190,200 280,180 350,165 430,140 520,150 610,118 700,102 780,88 870,73 1000,66"/><polyline fill="none" stroke="#8b5cf6" stroke-width="4" opacity=".9" points="0,250 120,246 200,228 290,208 360,192 440,176 520,164 620,146 700,141 800,132 880,122 1000,112"/></svg></div></section>
+      <section class="bottom"><div class="panel"><div style="font-size:13px;color:#cbd5e1">Shot Threat Map</div><div class="mini"></div></div><div class="panel"><div style="font-size:13px;color:#cbd5e1">Passing Web</div><div class="mini"></div></div></section>
+    </main>
+    <aside class="right">
+      <section class="panel"><div style="font-size:13px;color:#cbd5e1">Primary Insight</div><div class="insight">Second-man pressure timing was your match-winning lever.</div><p class="copy">If this behavior is codified as the default tactical assumption, your possession value profile projects sustainably positive over longer sessions.</p></section>
+      <section class="panel"><div style="font-size:13px;color:#cbd5e1">Action Priorities</div><div class="row"><span>Defensive clear quality</span><strong class="warn">Needs work</strong></div><div class="row"><span>Midfield intercepts</span><strong class="up">Excellent</strong></div><div class="row"><span>Backpost recoveries</span><strong>Stable</strong></div><div class="row"><span>Kickoff follow-up</span><strong class="up">Strong</strong></div></section>
+    </aside>
+  </div>
+</div>
+</body>
+</html>
