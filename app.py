@@ -683,7 +683,8 @@ def render_ios_hero_banner() -> None:
     st.markdown(
         """
         <div class="ios-hero">
-          <h1>Match Command Center</h1>
+          <h1>🚀 Elite Match Command Center</h1>
+          <p>Apple-grade visual clarity for replay intelligence: story first, deep analytics on demand.</p>
           <div class="ios-chip-row">
             <span class="ios-chip">Overview-first IA</span>
             <span class="ios-chip">Narrative + action cards</span>
@@ -1078,8 +1079,13 @@ def calculate_contextual_momentum(game_df, proto):
     return pd.Series(final_threat * 100, index=time_seconds).rolling(window=10, center=True).mean().fillna(0)
 
 def calculate_win_probability(proto, game_df, pid_team):
-    """Calculates win probability for Blue Team over time. Overtime-aware.
-    Uses a moderate logistic model so the line actually swings with goals."""
+    """Hand-tuned, continuously updating Blue win probability (0-100).
+
+    Foundational assumptions:
+    - Score/time should dominate late-game certainty.
+    - Ball territory, ball velocity, and boost economy should add continuous nuance between goals.
+    - Final resolved game state should end at deterministic 100/0 when winner is known.
+    """
     max_frame = game_df.index.max()
     match_duration_s = max_frame / float(REPLAY_FPS)
     is_ot = match_duration_s > 305
@@ -1091,40 +1097,83 @@ def calculate_win_probability(proto, game_df, pid_team):
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
-            scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-            team = pid_team.get(scorer_pid, "Orange" if getattr(g.player_id, 'is_orange', False) else "Blue")
+            scorer_pid = str(g.player_id.id) if hasattr(g, 'player_id') and hasattr(g.player_id, 'id') else ""
+            team = pid_team.get(scorer_pid, "Orange" if getattr(getattr(g, 'player_id', None), 'is_orange', False) else "Blue")
             frame = min(frame, max_frame)
-            if team == "Blue": blue_goals.append(frame)
-            else: orange_goals.append(frame)
+            if team == "Blue":
+                blue_goals.append(frame)
+            else:
+                orange_goals.append(frame)
 
     blue_goals.sort()
     orange_goals.sort()
-    probs = []
-    score_diffs = []
 
-    match_length = 300.0  # standard match length in seconds
+    ball_df = game_df['ball'] if 'ball' in game_df else None
+    ball_idx = ball_df.index.values if ball_df is not None else np.array([])
+    ball_y_arr = ball_df['pos_y'].values if ball_df is not None and 'pos_y' in ball_df.columns else np.array([])
+    ball_vy_arr = ball_df['vel_y'].values if ball_df is not None and 'vel_y' in ball_df.columns else np.array([])
 
-    for f, t in zip(frames, seconds):
-        b_score = sum(1 for gf in blue_goals if gf <= f)
-        o_score = sum(1 for gf in orange_goals if gf <= f)
+    def _boost_diff(frame: int) -> float:
+        blue_boosts, orange_boosts = [], []
+        for player in proto.players:
+            if player.name in game_df and 'boost' in game_df[player.name].columns:
+                pdf = game_df[player.name]
+                if len(pdf) == 0:
+                    continue
+                idx = min(np.searchsorted(pdf.index.values, frame), len(pdf) - 1)
+                if idx >= 0:
+                    value = pd.to_numeric(pdf.iloc[idx].get('boost', np.nan), errors='coerce')
+                    if pd.notna(value):
+                        (orange_boosts if player.is_orange else blue_boosts).append(float(value))
+        if blue_boosts and orange_boosts:
+            return float(np.mean(blue_boosts) - np.mean(orange_boosts))
+        return 0.0
+
+    probs: list[float] = []
+    score_diffs: list[int] = []
+
+    for frame, t in zip(frames, seconds):
+        b_score = sum(1 for gf in blue_goals if gf <= frame)
+        o_score = sum(1 for gf in orange_goals if gf <= frame)
         diff = b_score - o_score
         score_diffs.append(diff)
 
-        if t >= match_length and diff == 0:
-            p = 0.5
+        time_remaining = max(300 - t, 0.0)
+        time_fraction = np.clip(time_remaining / 300.0, 0.0, 1.0)
+
+        ball_y_norm = 0.0
+        ball_vy_norm = 0.0
+        if len(ball_idx) > 0:
+            bi = min(np.searchsorted(ball_idx, frame), len(ball_idx) - 1)
+            if len(ball_y_arr) > bi:
+                ball_y_norm = float(np.clip(ball_y_arr[bi] / 5120.0, -1.0, 1.0))
+            if len(ball_vy_arr) > bi:
+                ball_vy_norm = float(np.clip(ball_vy_arr[bi] / 6000.0, -1.0, 1.0))
+
+        boost_diff_norm = float(np.clip(_boost_diff(int(frame)) / 100.0, -1.0, 1.0))
+
+        score_weight = 0.9 + 2.4 * (1.0 - time_fraction)
+        context_weight = 0.95 * (0.55 + 0.45 * time_fraction)
+        control_signal = (0.52 * ball_y_norm) + (0.23 * ball_vy_norm) + (0.25 * boost_diff_norm)
+
+        if t >= 300 and diff == 0:
+            # Overtime before the deciding goal: still nuanced around toss-up.
+            x = control_signal * 0.85
         elif t >= 300 and diff != 0:
-            # Overtime with a lead — game is essentially over
-            p = 0.95 if diff > 0 else 0.05
+            # Overtime is sudden death; once goal lands, outcome is resolved.
+            probs.append(100.0 if diff > 0 else 0.0)
+            continue
         else:
-            time_remaining = max(300 - t, 1.0)
-            time_fraction = time_remaining / 300.0  # 1.0 at start, 0.0 at end
-            # Moderate scaling: bigger swings as time runs out, but not absurdly so
-            # At start (time_fraction=1): k ~= 0.8 per goal diff
-            # At end (time_fraction~0.01): k ~= 3.0 per goal diff
-            k = 0.8 + 2.2 * (1.0 - time_fraction)
-            x = diff * k
-            p = 1 / (1 + np.exp(-x))
-        probs.append(p * 100)
+            x = (diff * score_weight) + (control_signal * context_weight)
+
+        p = 1.0 / (1.0 + np.exp(-x))
+        probs.append(float(np.clip(p * 100.0, 0.0, 100.0)))
+
+    # Ensure final state reflects resolved match outcome.
+    blue_final = len(blue_goals)
+    orange_final = len(orange_goals)
+    if probs and blue_final != orange_final:
+        probs[-1] = 100.0 if blue_final > orange_final else 0.0
 
     return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'ScoreDiff': score_diffs, 'IsOT': is_ot})
 
@@ -1259,10 +1308,10 @@ def calculate_win_probability_trained(proto, game_df, pid_team, model, scaler):
         diff = b_score - o_score
         score_diffs.append(diff)
         if t >= 300 and diff == 0:
-            probs.append(50.0)
-            continue
-        if t >= 300 and diff != 0:
-            probs.append(95.0 if diff > 0 else 5.0)
+            # OT tie remains dynamic via model + context instead of a hard flatline.
+            pass
+        elif t >= 300 and diff != 0:
+            probs.append(100.0 if diff > 0 else 0.0)
             continue
         time_remaining = max(300 - t, 1.0)
         ball_y_norm = 0.0
@@ -1288,6 +1337,12 @@ def calculate_win_probability_trained(proto, game_df, pid_team, model, scaler):
         X_scaled = scaler.transform(X)
         p = model.predict_proba(X_scaled)[0][1] * 100
         probs.append(p)
+
+    if probs and score_diffs:
+        if score_diffs[-1] > 0:
+            probs[-1] = 100.0
+        elif score_diffs[-1] < 0:
+            probs[-1] = 0.0
 
     return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'ScoreDiff': score_diffs, 'IsOT': is_ot}), True
 
@@ -3180,11 +3235,23 @@ if app_mode == "🔍 Single Match Analysis":
                         events=goal_events,
                         tier="detail",
                     )
-                    blue_last = float(win_prob_df['BlueWinProb'].iloc[-1] * 100) if 'BlueWinProb' in win_prob_df.columns else 0.0
+                    wp_col = next((c for c in ["BlueWinProb", "Blue_Win_Prob", "win_prob_blue", "WinProb"] if c in win_prob_df.columns), None)
+                    blue_last = 50.0
+                    if wp_col is not None:
+                        raw_last = pd.to_numeric(win_prob_df[wp_col], errors='coerce').dropna()
+                        if not raw_last.empty:
+                            blue_last = float(raw_last.iloc[-1])
+                            if blue_last <= 1.0:
+                                blue_last *= 100.0
+                    blue_match_goals = int(df[df['Team'] == 'Blue']['Goals'].sum())
+                    orange_match_goals = int(df[df['Team'] == 'Orange']['Goals'].sum())
+                    if blue_match_goals != orange_match_goals:
+                        blue_last = 100.0 if blue_match_goals > orange_match_goals else 0.0
+                    final_state = "Blue Won" if blue_last >= 99.5 else ("Orange Won" if blue_last <= 0.5 else "In Progress")
                     render_section_pattern(
                         title="Win Probability",
                         kpis=[
-                            ("Final Blue Win %", f"{blue_last:.1f}%", None),
+                            ("Final Match State", final_state, None),
                             ("Goal Events", str(len(goal_events)), None),
                         ],
                         chart_fig=fig_prob,
