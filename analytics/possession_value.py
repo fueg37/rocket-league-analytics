@@ -142,50 +142,106 @@ def encode_replay_states(match_id: str, game_df: pd.DataFrame, player_pos: Mappi
     if ball_df is None or ball_df.empty:
         return pd.DataFrame(columns=CANONICAL_STATE_COLUMNS)
 
+    ball_frames = ball_df.index.to_numpy(dtype=int)
+
+    def _numeric_column(df: pd.DataFrame, col: str, length: int) -> np.ndarray:
+        if col not in df.columns:
+            return np.zeros(length, dtype=float)
+        return pd.to_numeric(df[col], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+
+    bx = _numeric_column(ball_df, "pos_x", len(ball_frames))
+    by = _numeric_column(ball_df, "pos_y", len(ball_frames))
+    bz = _numeric_column(ball_df, "pos_z", len(ball_frames))
+    bvx = _numeric_column(ball_df, "vel_x", len(ball_frames))
+    bvy = _numeric_column(ball_df, "vel_y", len(ball_frames))
+    bvz = _numeric_column(ball_df, "vel_z", len(ball_frames))
+
+    aligned_dists: list[np.ndarray] = []
+    dist_is_blue: list[bool] = []
+    aligned_boosts: list[np.ndarray] = []
+    boost_is_blue: list[bool] = []
+
+    for name, pdata in player_pos.items():
+        team = pdata.get("team")
+        player_frames = pdata.get("frames")
+        player_x = pdata.get("x")
+        player_y = pdata.get("y")
+
+        if player_frames is not None and player_x is not None and player_y is not None and len(player_frames) > 0:
+            player_frames_arr = np.asarray(player_frames, dtype=int)
+            idx_per_frame = np.searchsorted(player_frames_arr, ball_frames, side="left").clip(0, len(player_frames_arr) - 1)
+
+            x_arr = np.asarray(player_x, dtype=float)
+            y_arr = np.asarray(player_y, dtype=float)
+            valid_len = min(len(x_arr), len(y_arr), len(player_frames_arr))
+            if valid_len > 0:
+                aligned_idx = idx_per_frame.clip(0, valid_len - 1)
+                dists = np.sqrt((x_arr[:valid_len][aligned_idx] - bx) ** 2 + (y_arr[:valid_len][aligned_idx] - by) ** 2)
+                aligned_dists.append(dists)
+                dist_is_blue.append(team == "Blue")
+
+        player_df = game_df.get(name)
+        if player_df is not None and "boost" in player_df.columns and not player_df.empty:
+            boost_frames = player_df.index.to_numpy(dtype=int)
+            boost_idx = np.searchsorted(boost_frames, ball_frames, side="left").clip(0, len(boost_frames) - 1)
+            boost_vals = pd.to_numeric(player_df["boost"], errors="coerce").fillna(0.0).to_numpy(dtype=float)
+            aligned_boosts.append(boost_vals[boost_idx])
+            boost_is_blue.append(pdata.get("team", "Blue") == "Blue")
+
+    if aligned_dists:
+        dist_stack = np.vstack(aligned_dists)
+        blue_mask = np.asarray(dist_is_blue, dtype=bool)
+        orange_mask = ~blue_mask
+        nearest_blue = np.min(np.where(blue_mask[:, None], dist_stack, 10000.0), axis=0)
+        nearest_orange = np.min(np.where(orange_mask[:, None], dist_stack, 10000.0), axis=0)
+    else:
+        nearest_blue = np.full(len(ball_frames), 10000.0)
+        nearest_orange = np.full(len(ball_frames), 10000.0)
+
+    if aligned_boosts:
+        boost_stack = np.vstack(aligned_boosts)
+        blue_boost_mask = np.asarray(boost_is_blue, dtype=bool)
+        orange_boost_mask = ~blue_boost_mask
+        blue_boost_values = np.where(blue_boost_mask[:, None], boost_stack, np.nan)
+        orange_boost_values = np.where(orange_boost_mask[:, None], boost_stack, np.nan)
+        boost_blue = np.nan_to_num(np.nanmean(blue_boost_values, axis=0), nan=0.0)
+        boost_orange = np.nan_to_num(np.nanmean(orange_boost_values, axis=0), nan=0.0)
+    else:
+        boost_blue = np.zeros(len(ball_frames), dtype=float)
+        boost_orange = np.zeros(len(ball_frames), dtype=float)
+
+    blue_belief = 1.0 / (1.0 + np.exp(-((nearest_orange - nearest_blue) / 450.0 + np.tanh(by / 3500.0) * 0.35)))
+    orange_belief = 1.0 - blue_belief
+    pressure_blue = np.maximum(0.0, 1.0 - (nearest_blue / 2000.0))
+    pressure_orange = np.maximum(0.0, 1.0 - (nearest_orange / 2000.0))
+
     max_frame = int(game_df.index.max()) if len(game_df.index) else 0
-    rows: list[dict[str, float | int | str]] = []
-    for frame in ball_df.index.astype(int):
-        b_row = ball_df.loc[frame]
-        bx = float(b_row.get("pos_x", 0.0) or 0.0)
-        by = float(b_row.get("pos_y", 0.0) or 0.0)
-        bz = float(b_row.get("pos_z", 0.0) or 0.0)
-        bvx = float(b_row.get("vel_x", 0.0) or 0.0)
-        bvy = float(b_row.get("vel_y", 0.0) or 0.0)
-        bvz = float(b_row.get("vel_z", 0.0) or 0.0)
-        nearest_blue, nearest_orange = _nearest_team_distances(frame, bx, by, player_pos)
-        boost_blue, boost_orange = _team_boost_context(frame, game_df, player_pos)
-
-        blue_belief = _poss_belief(nearest_blue, nearest_orange, by, "Blue")
-        orange_belief = 1.0 - blue_belief
-        pressure_blue = float(max(0.0, 1.0 - (nearest_blue / 2000.0)))
-        pressure_orange = float(max(0.0, 1.0 - (nearest_orange / 2000.0)))
-
-        rows.append(
-            {
-                "MatchID": match_id,
-                "Frame": int(frame),
-                "BluePossessionBelief": blue_belief,
-                "OrangePossessionBelief": orange_belief,
-                "BallPosX": bx,
-                "BallPosY": by,
-                "BallPosZ": bz,
-                "BallVelX": bvx,
-                "BallVelY": bvy,
-                "BallVelZ": bvz,
-                "BallSpeedUUPerSec": float(np.sqrt(bvx**2 + bvy**2 + bvz**2)),
-                "NearestBlueDist": nearest_blue,
-                "NearestOrangeDist": nearest_orange,
-                "TeamBoostAvgBlue": boost_blue,
-                "TeamBoostAvgOrange": boost_orange,
-                "PressureBlue": pressure_blue,
-                "PressureOrange": pressure_orange,
-                "BlueAttacking": float(by > 0.0),
-                "OrangeAttacking": float(by < 0.0),
-                "SecondsRemaining": max(0.0, (max_frame - int(frame)) / float(REPLAY_FPS)),
-            }
-        )
-
-    return pd.DataFrame(rows, columns=CANONICAL_STATE_COLUMNS)
+    states = pd.DataFrame(
+        {
+            "MatchID": np.full(len(ball_frames), match_id, dtype=object),
+            "Frame": ball_frames,
+            "BluePossessionBelief": blue_belief,
+            "OrangePossessionBelief": orange_belief,
+            "BallPosX": bx,
+            "BallPosY": by,
+            "BallPosZ": bz,
+            "BallVelX": bvx,
+            "BallVelY": bvy,
+            "BallVelZ": bvz,
+            "BallSpeedUUPerSec": np.sqrt(bvx**2 + bvy**2 + bvz**2),
+            "NearestBlueDist": nearest_blue,
+            "NearestOrangeDist": nearest_orange,
+            "TeamBoostAvgBlue": boost_blue,
+            "TeamBoostAvgOrange": boost_orange,
+            "PressureBlue": pressure_blue,
+            "PressureOrange": pressure_orange,
+            "BlueAttacking": (by > 0.0).astype(float),
+            "OrangeAttacking": (by < 0.0).astype(float),
+            "SecondsRemaining": np.maximum(0.0, (max_frame - ball_frames) / float(REPLAY_FPS)),
+        },
+        columns=CANONICAL_STATE_COLUMNS,
+    )
+    return states
 
 
 def _nearest_team_distances(frame: int, bx: float, by: float, player_pos: Mapping[str, dict]) -> tuple[float, float]:
@@ -274,4 +330,3 @@ def _get_state(state_lookup: pd.DataFrame, match_id: str, frame: int) -> pd.Seri
         return pd.Series(dtype=float)
     nearest_idx = int(np.argmin(np.abs(match_states["Frame"].to_numpy(dtype=int) - frame)))
     return match_states.iloc[nearest_idx]
-
