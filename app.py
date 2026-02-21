@@ -425,6 +425,10 @@ try:
 except ImportError as e:
     SPROCKET_AVAILABLE = False
     IMPORT_ERROR = str(e)
+    IMPORT_GUIDANCE = (
+        "Install the Sprocket carball fork in requirements.txt: "
+        "git+https://github.com/SprocketBot/carball.git#egg=carball"
+    )
 
 KALEIDO_AVAILABLE = False
 try:
@@ -3033,6 +3037,7 @@ pass_threshold = st.sidebar.slider("Pass Window (Seconds)", 1.0, 5.0, 2.0, 0.5)
 
 if not SPROCKET_AVAILABLE:
     st.error(f"⚠️ Library Error: {IMPORT_ERROR}")
+    st.info(IMPORT_GUIDANCE if "IMPORT_GUIDANCE" in globals() else "Install the Sprocket carball fork in requirements.txt.")
     st.stop()
 
 # 

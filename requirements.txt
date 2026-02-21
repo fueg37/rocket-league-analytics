@@ -4,5 +4,5 @@ plotly
 numpy
 Pillow
 protobuf<4.0.0
-Pillow
 scikit-learn  # optional: enables trained win probability model
+git+https://github.com/SprocketBot/carball.git#egg=carball  # Sprocket carball fork
