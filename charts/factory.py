@@ -124,6 +124,94 @@ def spatial_outcome_scatter(df, x_col: str, y_col: str, outcome_col: str, label_
     return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
 
 
+def kickoff_outcome_map(
+    df: pd.DataFrame,
+    *,
+    perspective: str = "canonical",
+    x_col: str = "End_X",
+    y_col: str = "End_Y",
+    team_col: str = "Team",
+    outcome_col: str = "Result",
+    label_col: str | None = "Player",
+    title: str = "Kickoff Outcomes",
+    tier: str = "support",
+    intent: str = "outcome",
+    variant: str = "neutral",
+):
+    """Render kickoff outcomes with a consistent canonical/raw orientation contract."""
+    fig = go.Figure()
+    if df is None or df.empty:
+        fig.update_layout(title=title)
+        return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
+
+    perspective_key = str(perspective).strip().lower()
+    if perspective_key not in {"canonical", "raw"}:
+        raise ValueError("perspective must be either 'canonical' or 'raw'")
+
+    frame = df.copy()
+    has_canonical = {"Canon_End_X", "Canon_End_Y"}.issubset(frame.columns)
+    use_canonical = perspective_key == "canonical" and has_canonical
+    plot_x_col = "Canon_End_X" if use_canonical else x_col
+    plot_y_col = "Canon_End_Y" if use_canonical else y_col
+
+    frame[plot_x_col] = pd.to_numeric(frame.get(plot_x_col, 0.0), errors="coerce")
+    frame[plot_y_col] = pd.to_numeric(frame.get(plot_y_col, 0.0), errors="coerce")
+    frame = frame.dropna(subset=[plot_x_col, plot_y_col])
+    if frame.empty:
+        fig.update_layout(title=title)
+        return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
+
+    if team_col in frame.columns:
+        frame[team_col] = frame[team_col].fillna("Unknown").astype(str)
+    else:
+        frame[team_col] = "Unknown"
+
+    if outcome_col in frame.columns:
+        frame[outcome_col] = frame[outcome_col].fillna("Neutral").astype(str)
+    else:
+        frame[outcome_col] = "Neutral"
+
+    if label_col and label_col in frame.columns:
+        frame[label_col] = frame[label_col].fillna("Unknown").astype(str)
+
+    outcomes = [
+        ("Win", semantic_color("outcome", "win"), "triangle-up"),
+        ("Loss", semantic_color("outcome", "loss"), "triangle-down"),
+        ("Neutral", semantic_color("outcome", "neutral"), "diamond"),
+    ]
+    total = len(frame)
+    for outcome, color, symbol in outcomes:
+        subset = frame[frame[outcome_col] == outcome]
+        if subset.empty:
+            continue
+
+        hovertemplate = (
+            "Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Result: %{customdata[2]}"
+            "<br>X: %{x:.0f}<br>Y: %{y:.0f}<extra></extra>"
+            if label_col
+            else "Team: %{customdata[0]}<br>Result: %{customdata[1]}<br>X: %{x:.0f}<br>Y: %{y:.0f}<extra></extra>"
+        )
+        customdata = (
+            np.column_stack([subset[label_col], subset[team_col], subset[outcome_col]])
+            if label_col
+            else np.column_stack([subset[team_col], subset[outcome_col]])
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=subset[plot_x_col],
+                y=subset[plot_y_col],
+                mode="markers",
+                marker=dict(size=11, color=color, symbol=symbol, line=dict(width=1, color="white"), opacity=0.82),
+                name=f"{outcome} ({len(subset)}/{total})",
+                customdata=customdata,
+                hovertemplate=hovertemplate,
+            )
+        )
+
+    fig.update_layout(title=title)
+    return apply_chart_theme(fig, tier=tier, intent=intent, variant=variant)
+
+
 def rolling_trend_with_wl_markers(hero_df, hero_display_df, metric: str, hero: str, rolling_window: int, show_wl_markers: bool = True, teammate_df=None, teammate_name: str | None = None):
     """Build rolling trend chart with semantic dual-series and W/L marker colors."""
     fig = go.Figure()

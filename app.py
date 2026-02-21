@@ -37,10 +37,10 @@ from charts.factory import (
     comparison_dumbbell,
     goal_mouth_scatter,
     kickoff_kpi_indicator,
+    kickoff_outcome_map,
     player_rank_lollipop,
     rolling_trend_with_wl_markers,
     session_composite_chart,
-    spatial_outcome_scatter,
     value_timeline_chart,
     action_type_value_decomposition_chart,
     teammate_synergy_matrix,
@@ -3157,10 +3157,9 @@ if app_mode == "🔍 Single Match Analysis":
                         fig = kickoff_kpi_indicator(win_rate=win_rate, title="Kickoff Win Rate (Selected)")
                         st.plotly_chart(fig, use_container_width=True)
                     with col_k2:
-                        fig = spatial_outcome_scatter(
+                        fig = kickoff_outcome_map(
                             disp_kickoff,
-                            x_col="Canon_End_X",
-                            y_col="Canon_End_Y",
+                            perspective="canonical",
                             outcome_col="Result",
                             label_col="Player",
                             title="Kickoff Outcomes (Canonical Field Frame)",
@@ -4708,22 +4707,28 @@ elif app_mode == "📈 Season Batch Processor":
                     st.plotly_chart(fig, use_container_width=True)
 
                 st.write("#### Season Kickoff Outcome Map")
-                result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
-                result_symbols = {"Win": "triangle-up", "Loss": "triangle-down", "Neutral": "diamond"}
-                fig = themed_figure()
-                for result, color in result_colors.items():
-                    subset = hero_k[hero_k['Result'] == result]
-                    if not subset.empty:
-                        fig.add_trace(go.Scatter(
-                            x=subset['Canon_End_X'], y=subset['Canon_End_Y'],
-                            mode='markers',
-                            marker=dict(size=11, color=color, symbol=result_symbols.get(result, 'circle'), line=dict(width=1, color='white'), opacity=0.8),
-                            name=f"{result} ({len(subset)})",
-                            hovertemplate="Result: " + result + "<extra></extra>",
-                        ))
-                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View, Canonical)"))
+                kickoff_perspective_label = st.radio(
+                    "Map orientation",
+                    options=["Canonical (single-side)", "Raw (team-relative)"],
+                    index=0,
+                    horizontal=True,
+                    help="Canonical mirrors teams into one attacking direction; Raw keeps original team-relative coordinates.",
+                )
+                kickoff_perspective = "canonical" if kickoff_perspective_label == "Canonical (single-side)" else "raw"
+                map_title_suffix = "Canonical" if kickoff_perspective == "canonical" else "Raw"
+
+                fig = kickoff_outcome_map(
+                    hero_k,
+                    perspective=kickoff_perspective,
+                    outcome_col="Result",
+                    label_col="Player",
+                    title=f"Where {hero}'s Kickoffs Go (Season View, {map_title_suffix})",
+                    intent="outcome",
+                    variant="neutral",
+                )
+                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View, {map_title_suffix})"))
                 fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
- 
+
                 st.plotly_chart(fig, use_container_width=True)
                 if total_kickoffs > 0:
                     direction = "positive" if win_rate >= 50 else "negative"
