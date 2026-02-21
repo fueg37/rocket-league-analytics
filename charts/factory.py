@@ -279,6 +279,18 @@ def coach_report_timeline_chart(
         series = pd.to_numeric(pd.Series(values), errors="coerce")
         return series.reindex(df.index)
 
+    def _numeric_report_series(df: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+        """Return a numeric Series for a coach-report column with safe scalar fallback."""
+        if column not in df.columns:
+            return pd.Series(default, index=df.index, dtype=float)
+
+        values = df[column]
+        if np.isscalar(values):
+            return pd.Series(values, index=df.index, dtype=float)
+
+        series = pd.to_numeric(pd.Series(values), errors="coerce")
+        return series.reindex(df.index).fillna(default)
+
     fig = make_subplots(specs=[[{"secondary_y": True}]])
 
     wp = win_prob_df.copy() if win_prob_df is not None else pd.DataFrame()
@@ -324,8 +336,8 @@ def coach_report_timeline_chart(
     report = coach_report_df.copy() if coach_report_df is not None else pd.DataFrame()
     if not report.empty and "Time" in report.columns:
         report["Time"] = pd.to_numeric(report["Time"], errors="coerce")
-        report["MissedSwing"] = pd.to_numeric(report.get("MissedSwing", 0.0), errors="coerce").fillna(0.0)
-        report["Confidence"] = pd.to_numeric(report.get("Confidence", 0.0), errors="coerce").fillna(0.0)
+        report["MissedSwing"] = _numeric_report_series(report, "MissedSwing", default=0.0)
+        report["Confidence"] = _numeric_report_series(report, "Confidence", default=0.0)
         report = report.dropna(subset=["Time"]).sort_values("Time")
         if not report.empty:
             max_missed = max(float(report["MissedSwing"].abs().max()), 1e-6)

@@ -56,6 +56,23 @@ class CoachReportTimelineChartTests(unittest.TestCase):
         self.assertEqual(fig.data[2].customdata[0][2], "[0.01, 0.08]")
         self.assertEqual(fig.data[2].customdata[1][2], "[0.01, 0.08]")
 
+
+    def test_chart_handles_missing_numeric_columns_with_defaults(self):
+        win_prob_df = pd.DataFrame({"Time": [0, 10], "WinProb": [50.0, 50.5]})
+        momentum_series = pd.Series([0.01, -0.02], index=[0, 10])
+        coach_report_df = pd.DataFrame(
+            {
+                "Time": [4.0],
+                "RecommendedAction": ["shadow_defend"],
+                "Role": ["second man"],
+            }
+        )
+
+        fig = coach_report_timeline_chart(win_prob_df, momentum_series, coach_report_df)
+        self.assertEqual(fig.data[2].name, "Missed opportunities")
+        self.assertEqual(fig.data[2].customdata[0][3], 0.0)
+        self.assertEqual(float(fig.data[2].marker.color[0]), 0.0)
+
     def test_chart_handles_missing_interval_columns_without_crashing(self):
         win_prob_df = pd.DataFrame({"Time": [0, 10], "WinProb": [49.0, 52.0]})
         momentum_series = pd.Series([0.0, 0.04], index=[0, 10])
