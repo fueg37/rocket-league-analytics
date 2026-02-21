@@ -10,6 +10,7 @@ import tempfile
 import logging
 import numpy as np
 from datetime import datetime, timedelta
+from time import perf_counter
 
 from constants import (
     REPLAY_FPS, DB_FILE, KICKOFF_DB_FILE, WIN_PROB_MODEL_FILE,
@@ -36,10 +37,10 @@ from charts.factory import (
     comparison_dumbbell,
     goal_mouth_scatter,
     kickoff_kpi_indicator,
+    kickoff_outcome_map,
     player_rank_lollipop,
     rolling_trend_with_wl_markers,
     session_composite_chart,
-    spatial_outcome_scatter,
     value_timeline_chart,
     action_type_value_decomposition_chart,
     teammate_synergy_matrix,
@@ -69,6 +70,7 @@ from analytics.shot_quality import (
     validate_shot_metric_columns,
 )
 from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_VERSION
+from analytics.spatial_index import PlayerFrameAccessor
 from analytics.possession_value import compute_action_value_deltas, encode_replay_states
 from analytics.aggregations.value_reports import build_player_value_reports
 from analytics.counterfactuals import build_coach_report
@@ -456,7 +458,249 @@ if os.path.exists(_pitch_path):
         PITCH_IMAGE_B64 = "data:image/png;base64," + base64.b64encode(_f.read()).decode()
 
 st.set_page_config(page_title="RL Analytics", layout="wide", page_icon="🚀")
-st.title("🚀 Rocket League Analytics")
+
+
+def inject_ios_shell_theme() -> None:
+    """Apply an iOS-inspired glassmorphism shell across the Streamlit surface."""
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background:
+                radial-gradient(1100px 420px at 8% -5%, rgba(59, 130, 246, 0.28), transparent 65%),
+                radial-gradient(900px 380px at 95% 0%, rgba(139, 92, 246, 0.24), transparent 65%),
+                linear-gradient(165deg, #0a1226 0%, #111c38 55%, #0e1a34 100%);
+            color: #f8fbff;
+        }
+        .main .block-container {
+            padding-top: 1.4rem;
+            padding-bottom: 1.4rem;
+            max-width: 96rem;
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.05));
+            border-right: 1px solid rgba(148, 163, 184, 0.22);
+            backdrop-filter: blur(16px);
+        }
+        [data-testid="stSidebar"] * {
+            color: #e6eefc;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.4rem;
+            background: rgba(16, 30, 58, 0.5);
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            border-radius: 999px;
+            padding: 0.24rem;
+            backdrop-filter: blur(12px);
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            height: 2.3rem;
+            color: #cbd5e1;
+            font-weight: 600;
+            padding: 0 1rem;
+        }
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(180deg, rgba(77, 163, 255, 0.35), rgba(77, 163, 255, 0.15));
+            color: #f8fbff;
+        }
+        [data-testid="stMetric"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.13), rgba(255,255,255,0.06));
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 18px;
+            padding: 0.8rem 1rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+        }
+        .stPlotlyChart, [data-testid="stDataFrame"], .stExpander {
+            background: rgba(9, 17, 34, 0.52);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 18px;
+            padding: 0.3rem;
+            backdrop-filter: blur(10px);
+        }
+        .stButton > button,
+        [data-testid="stDownloadButton"] button {
+            border-radius: 999px;
+            border: 1px solid rgba(125, 211, 252, 0.4);
+            background: linear-gradient(180deg, rgba(56, 189, 248, 0.28), rgba(56, 189, 248, 0.14));
+            color: #e0f2fe;
+            font-weight: 600;
+        }
+        .ios-hero {
+            border-radius: 24px;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: linear-gradient(130deg, rgba(255,255,255,0.13), rgba(255,255,255,0.05));
+            padding: 1rem 1.2rem;
+            margin-bottom: 0.9rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
+        }
+        .ios-hero h1 { margin: 0; font-size: 1.9rem; line-height: 1.2; }
+        .ios-hero p { margin: 0.35rem 0 0.7rem 0; color: #d0ddf8; }
+        .ios-chip-row { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+        .ios-chip {
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: rgba(15, 23, 42, 0.5);
+            color: #e2e8f0;
+            font-size: 0.78rem;
+            padding: 0.28rem 0.65rem;
+        }
+
+        .ios-score-shell {
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 22px;
+            background: linear-gradient(140deg, rgba(14, 28, 58, 0.72), rgba(11, 23, 46, 0.5));
+            padding: 0.9rem 1rem;
+            margin: 0.4rem 0 0.8rem 0;
+        }
+        .ios-scoreline {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr;
+            align-items: center;
+            text-align: center;
+            gap: 0.6rem;
+        }
+        .ios-score {
+            font-size: 3rem;
+            font-weight: 750;
+            line-height: 1;
+            letter-spacing: -0.04em;
+        }
+        .ios-score.blue { color: #66a7ff; }
+        .ios-score.orange { color: #ffaf67; }
+        .ios-score-sep {
+            font-size: 1.8rem;
+            color: #d7e6ff;
+            opacity: 0.9;
+        }
+        .ios-ot-badge {
+            border-radius: 999px;
+            border: 1px solid rgba(250, 204, 21, 0.55);
+            color: #fde68a;
+            padding: 0.12rem 0.42rem;
+            font-size: 0.72rem;
+            margin-left: 0.4rem;
+            vertical-align: middle;
+        }
+        .ios-luck-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            text-align: center;
+            margin-top: 0.55rem;
+            color: #d6e5ff;
+            font-weight: 550;
+        }
+        .ios-luck-pos { color: #86efac; }
+        .ios-luck-mid { color: #fcd34d; }
+        .ios-luck-neg { color: #fda4af; }
+        .ios-team-label {
+            margin-top: 0.55rem;
+            font-size: 0.8rem;
+            color: #a7bddf;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+        }
+        .ios-possession-card {
+            border: 1px solid rgba(148, 163, 184, 0.22);
+            border-radius: 18px;
+            background: rgba(12, 25, 52, 0.52);
+            padding: 0.7rem 0.9rem 0.85rem;
+            margin-bottom: 0.8rem;
+        }
+        .ios-possession-track {
+            width: 100%;
+            height: 14px;
+            border-radius: 999px;
+            overflow: hidden;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: rgba(15, 23, 42, 0.75);
+            display: flex;
+        }
+        .ios-possession-blue {
+            background: linear-gradient(90deg, #3b82f6, #60a5fa);
+            height: 100%;
+        }
+        .ios-possession-orange {
+            background: linear-gradient(90deg, #fb923c, #f59e0b);
+            height: 100%;
+        }
+        .ios-possession-meta {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 0.45rem;
+            font-size: 0.82rem;
+            font-weight: 650;
+        }
+        .elite-shell {
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 28px;
+            padding: 1rem;
+            margin-bottom: 1.1rem;
+            background: linear-gradient(130deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04));
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+        }
+        .elite-title { font-size: 2rem; font-weight: 760; line-height: 1.15; margin: 0; }
+        .elite-subtitle { margin: 0.28rem 0 0.85rem 0; color: #c4d5f3; font-size: 1.03rem; }
+        .elite-chip-wrap { display: flex; gap: 0.45rem; justify-content: flex-end; flex-wrap: wrap; }
+        .elite-kpi {
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04));
+            padding: 0.8rem 0.95rem;
+            min-height: 122px;
+        }
+        .elite-kpi-label { color: #bdcdea; font-size: 0.88rem; margin-bottom: 0.2rem; }
+        .elite-kpi-value { font-size: 2.1rem; font-weight: 740; line-height: 1.1; margin: 0.15rem 0; }
+        .elite-kpi-delta { color: #8ff0b0; font-size: 0.98rem; }
+        .elite-panel {
+            border: 1px solid rgba(148, 163, 184, 0.26);
+            border-radius: 20px;
+            background: rgba(14, 27, 54, 0.56);
+            padding: 0.85rem;
+            min-height: 224px;
+        }
+        .elite-panel-title { margin: 0 0 0.5rem 0; color: #dbe8ff; font-size: 1.08rem; }
+        .elite-list-row {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+            padding: 0.46rem 0;
+            color: #dbe8ff;
+        }
+        .elite-insight {
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 18px;
+            background: rgba(13, 25, 49, 0.6);
+            padding: 0.9rem;
+            min-height: 210px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_ios_hero_banner() -> None:
+    """Top-level product framing for a premium, narrative-first experience."""
+    st.markdown(
+        """
+        <div class="ios-hero">
+          <h1>🚀 Elite Match Command Center</h1>
+          <p>Apple-grade visual clarity for replay intelligence: story first, deep analytics on demand.</p>
+          <div class="ios-chip-row">
+            <span class="ios-chip">Overview-first IA</span>
+            <span class="ios-chip">Narrative + action cards</span>
+            <span class="ios-chip">Glass KPI surfaces</span>
+            <span class="ios-chip">High-contrast pro charts</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_ios_shell_theme()
+render_ios_hero_banner()
 
 # --- SESSION STATE INITIALIZATION ---
 if "match_store" not in st.session_state:
@@ -486,8 +730,51 @@ def load_data():
     if os.path.exists(KICKOFF_DB_FILE):
         try: kickoff_df = pd.read_csv(KICKOFF_DB_FILE)
         except Exception as e: logger.warning("Failed to load %s: %s", KICKOFF_DB_FILE, e)
+
+    kickoff_df = ensure_kickoff_canonical_coordinates(kickoff_df)
         
     return stats_df, kickoff_df
+
+
+def ensure_kickoff_canonical_coordinates(kickoff_df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize kickoff landing points into a single attacking-direction frame.
+
+    Convention: preserve X and only mirror Y for Orange so all teams attack toward +Y.
+    Raw End_X/End_Y stay untouched for debugging and export parity.
+    """
+    if kickoff_df.empty:
+        return kickoff_df
+
+    normalized = kickoff_df.copy()
+    if 'End_X' not in normalized.columns:
+        normalized['End_X'] = 0.0
+    if 'End_Y' not in normalized.columns:
+        normalized['End_Y'] = 0.0
+
+    normalized['End_X'] = pd.to_numeric(normalized['End_X'], errors='coerce').fillna(0.0)
+    normalized['End_Y'] = pd.to_numeric(normalized['End_Y'], errors='coerce').fillna(0.0)
+
+    if 'Team' in normalized.columns:
+        team_series = normalized['Team'].astype(str).str.strip().str.title()
+    else:
+        team_series = pd.Series(['Unknown'] * len(normalized), index=normalized.index)
+
+    canonical_y = np.where(team_series == 'Orange', -normalized['End_Y'], normalized['End_Y'])
+    canonical_x = normalized['End_X']
+
+    if 'Canon_End_X' in normalized.columns:
+        normalized['Canon_End_X'] = pd.to_numeric(normalized['Canon_End_X'], errors='coerce')
+        normalized['Canon_End_X'] = normalized['Canon_End_X'].where(normalized['Canon_End_X'].notna(), canonical_x)
+    else:
+        normalized['Canon_End_X'] = canonical_x
+
+    if 'Canon_End_Y' in normalized.columns:
+        normalized['Canon_End_Y'] = pd.to_numeric(normalized['Canon_End_Y'], errors='coerce')
+        normalized['Canon_End_Y'] = normalized['Canon_End_Y'].where(normalized['Canon_End_Y'].notna(), canonical_y)
+    else:
+        normalized['Canon_End_Y'] = canonical_y
+
+    return normalized
 
 def save_data(new_stats, new_kickoffs):
     """Appends new data to CSVs, handling duplicates by MatchID."""
@@ -837,8 +1124,13 @@ def calculate_contextual_momentum(game_df, proto):
     return pd.Series(final_threat * 100, index=time_seconds).rolling(window=10, center=True).mean().fillna(0)
 
 def calculate_win_probability(proto, game_df, pid_team):
-    """Calculates win probability for Blue Team over time. Overtime-aware.
-    Uses a moderate logistic model so the line actually swings with goals."""
+    """Hand-tuned, continuously updating Blue win probability (0-100).
+
+    Foundational assumptions:
+    - Score/time should dominate late-game certainty.
+    - Ball territory, ball velocity, and boost economy should add continuous nuance between goals.
+    - Final resolved game state should end at deterministic 100/0 when winner is known.
+    """
     max_frame = game_df.index.max()
     match_duration_s = max_frame / float(REPLAY_FPS)
     is_ot = match_duration_s > 305
@@ -850,40 +1142,83 @@ def calculate_win_probability(proto, game_df, pid_team):
     if hasattr(proto, 'game_metadata') and hasattr(proto.game_metadata, 'goals'):
         for g in proto.game_metadata.goals:
             frame = getattr(g, 'frame_number', getattr(g, 'frame', 0))
-            scorer_pid = str(g.player_id.id) if hasattr(g.player_id, 'id') else ""
-            team = pid_team.get(scorer_pid, "Orange" if getattr(g.player_id, 'is_orange', False) else "Blue")
+            scorer_pid = str(g.player_id.id) if hasattr(g, 'player_id') and hasattr(g.player_id, 'id') else ""
+            team = pid_team.get(scorer_pid, "Orange" if getattr(getattr(g, 'player_id', None), 'is_orange', False) else "Blue")
             frame = min(frame, max_frame)
-            if team == "Blue": blue_goals.append(frame)
-            else: orange_goals.append(frame)
+            if team == "Blue":
+                blue_goals.append(frame)
+            else:
+                orange_goals.append(frame)
 
     blue_goals.sort()
     orange_goals.sort()
-    probs = []
-    score_diffs = []
 
-    match_length = 300.0  # standard match length in seconds
+    ball_df = game_df['ball'] if 'ball' in game_df else None
+    ball_idx = ball_df.index.values if ball_df is not None else np.array([])
+    ball_y_arr = ball_df['pos_y'].values if ball_df is not None and 'pos_y' in ball_df.columns else np.array([])
+    ball_vy_arr = ball_df['vel_y'].values if ball_df is not None and 'vel_y' in ball_df.columns else np.array([])
 
-    for f, t in zip(frames, seconds):
-        b_score = sum(1 for gf in blue_goals if gf <= f)
-        o_score = sum(1 for gf in orange_goals if gf <= f)
+    def _boost_diff(frame: int) -> float:
+        blue_boosts, orange_boosts = [], []
+        for player in proto.players:
+            if player.name in game_df and 'boost' in game_df[player.name].columns:
+                pdf = game_df[player.name]
+                if len(pdf) == 0:
+                    continue
+                idx = min(np.searchsorted(pdf.index.values, frame), len(pdf) - 1)
+                if idx >= 0:
+                    value = pd.to_numeric(pdf.iloc[idx].get('boost', np.nan), errors='coerce')
+                    if pd.notna(value):
+                        (orange_boosts if player.is_orange else blue_boosts).append(float(value))
+        if blue_boosts and orange_boosts:
+            return float(np.mean(blue_boosts) - np.mean(orange_boosts))
+        return 0.0
+
+    probs: list[float] = []
+    score_diffs: list[int] = []
+
+    for frame, t in zip(frames, seconds):
+        b_score = sum(1 for gf in blue_goals if gf <= frame)
+        o_score = sum(1 for gf in orange_goals if gf <= frame)
         diff = b_score - o_score
         score_diffs.append(diff)
 
-        if t >= match_length and diff == 0:
-            p = 0.5
+        time_remaining = max(300 - t, 0.0)
+        time_fraction = np.clip(time_remaining / 300.0, 0.0, 1.0)
+
+        ball_y_norm = 0.0
+        ball_vy_norm = 0.0
+        if len(ball_idx) > 0:
+            bi = min(np.searchsorted(ball_idx, frame), len(ball_idx) - 1)
+            if len(ball_y_arr) > bi:
+                ball_y_norm = float(np.clip(ball_y_arr[bi] / 5120.0, -1.0, 1.0))
+            if len(ball_vy_arr) > bi:
+                ball_vy_norm = float(np.clip(ball_vy_arr[bi] / 6000.0, -1.0, 1.0))
+
+        boost_diff_norm = float(np.clip(_boost_diff(int(frame)) / 100.0, -1.0, 1.0))
+
+        score_weight = 0.9 + 2.4 * (1.0 - time_fraction)
+        context_weight = 0.95 * (0.55 + 0.45 * time_fraction)
+        control_signal = (0.52 * ball_y_norm) + (0.23 * ball_vy_norm) + (0.25 * boost_diff_norm)
+
+        if t >= 300 and diff == 0:
+            # Overtime before the deciding goal: still nuanced around toss-up.
+            x = control_signal * 0.85
         elif t >= 300 and diff != 0:
-            # Overtime with a lead — game is essentially over
-            p = 0.95 if diff > 0 else 0.05
+            # Overtime is sudden death; once goal lands, outcome is resolved.
+            probs.append(100.0 if diff > 0 else 0.0)
+            continue
         else:
-            time_remaining = max(300 - t, 1.0)
-            time_fraction = time_remaining / 300.0  # 1.0 at start, 0.0 at end
-            # Moderate scaling: bigger swings as time runs out, but not absurdly so
-            # At start (time_fraction=1): k ~= 0.8 per goal diff
-            # At end (time_fraction~0.01): k ~= 3.0 per goal diff
-            k = 0.8 + 2.2 * (1.0 - time_fraction)
-            x = diff * k
-            p = 1 / (1 + np.exp(-x))
-        probs.append(p * 100)
+            x = (diff * score_weight) + (control_signal * context_weight)
+
+        p = 1.0 / (1.0 + np.exp(-x))
+        probs.append(float(np.clip(p * 100.0, 0.0, 100.0)))
+
+    # Ensure final state reflects resolved match outcome.
+    blue_final = len(blue_goals)
+    orange_final = len(orange_goals)
+    if probs and blue_final != orange_final:
+        probs[-1] = 100.0 if blue_final > orange_final else 0.0
 
     return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'ScoreDiff': score_diffs, 'IsOT': is_ot})
 
@@ -1018,10 +1353,10 @@ def calculate_win_probability_trained(proto, game_df, pid_team, model, scaler):
         diff = b_score - o_score
         score_diffs.append(diff)
         if t >= 300 and diff == 0:
-            probs.append(50.0)
-            continue
-        if t >= 300 and diff != 0:
-            probs.append(95.0 if diff > 0 else 5.0)
+            # OT tie remains dynamic via model + context instead of a hard flatline.
+            pass
+        elif t >= 300 and diff != 0:
+            probs.append(100.0 if diff > 0 else 0.0)
             continue
         time_remaining = max(300 - t, 1.0)
         ball_y_norm = 0.0
@@ -1047,6 +1382,12 @@ def calculate_win_probability_trained(proto, game_df, pid_team, model, scaler):
         X_scaled = scaler.transform(X)
         p = model.predict_proba(X_scaled)[0][1] * 100
         probs.append(p)
+
+    if probs and score_diffs:
+        if score_diffs[-1] > 0:
+            probs[-1] = 100.0
+        elif score_diffs[-1] < 0:
+            probs[-1] = 0.0
 
     return pd.DataFrame({'Time': seconds, 'WinProb': probs, 'ScoreDiff': score_diffs, 'IsOT': is_ot}), True
 
@@ -1120,6 +1461,9 @@ def calculate_kickoff_stats(game, proto, game_df, player_map, match_id=""):
             except (KeyError, IndexError):
                 pass
 
+        canon_end_x = end_x
+        canon_end_y = -end_y if kicker_team == "Orange" else end_y
+
         kickoff_goal = False
         for gf in goal_frames:
             if k_frame < gf <= k_frame + 150: 
@@ -1130,7 +1474,9 @@ def calculate_kickoff_stats(game, proto, game_df, player_map, match_id=""):
             kickoff_list.append({
                 "MatchID": str(match_id), "Frame": k_frame, "Player": kicker_name, "Team": kicker_team,
                 "Spawn": spawn_loc, "Time to Hit": round(time_to_hit, 2), "Boost": boost_at_hit,
-                "Result": outcome, "Goal (5s)": kickoff_goal, "End_X": end_x, "End_Y": end_y
+                "Result": outcome, "Goal (5s)": kickoff_goal,
+                "End_X": end_x, "End_Y": end_y,
+                "Canon_End_X": canon_end_x, "Canon_End_Y": canon_end_y,
             })
     return pd.DataFrame(kickoff_list)
 
@@ -1609,36 +1955,25 @@ def calculate_xg_against(proto, game_df, player_map, shot_df):
     """For each shot, find the closest defender and assign xG-against to them."""
     if shot_df.empty:
         return pd.DataFrame()
-    orange_players = [p.name for p in proto.players if p.is_orange]
-    blue_players = [p.name for p in proto.players if not p.is_orange]
 
-    xga_per_player = {}  # name -> list of xG values conceded
-    for p in proto.players:
-        xga_per_player[p.name] = []
+    accessor = PlayerFrameAccessor.from_game_df(proto, game_df)
+    xga_per_player = {p.name: [] for p in proto.players}
 
     for _, shot in shot_df.iterrows():
         frame = int(shot[SHOT_COL_FRAME])
         shooter_team = shot['Team']
         xg = shot[COL_XG]
-        # Defenders are the opposing team
-        defenders = blue_players if shooter_team == "Orange" else orange_players
+        defending_team = "Blue" if shooter_team == "Orange" else "Orange"
 
-        if frame not in game_df.index:
-            continue
-
-        # Find closest defender to ball at shot frame
-        closest_defender = None
-        min_dist = 99999
         try:
-            ball_x, ball_y = shot[SHOT_COL_X], shot[SHOT_COL_Y]
-            for d_name in defenders:
-                if d_name in game_df:
-                    d_data = game_df[d_name].loc[frame]
-                    dist = np.sqrt((ball_x - d_data['pos_x'])**2 + (ball_y - d_data['pos_y'])**2)
-                    if dist < min_dist:
-                        min_dist = dist
-                        closest_defender = d_name
-        except (KeyError, IndexError):
+            ball_x, ball_y = float(shot[SHOT_COL_X]), float(shot[SHOT_COL_Y])
+            closest_defender, min_dist = accessor.nearest_defender(
+                frame=frame,
+                team=defending_team,
+                x=ball_x,
+                y=ball_y,
+            )
+        except (KeyError, IndexError, TypeError, ValueError):
             continue
 
         if closest_defender:
@@ -1682,7 +2017,7 @@ def estimate_scoring_threat(ball_x, ball_y, ball_z, ball_vx, ball_vy, ball_vz, t
     threat = (positional_threat * 0.5 + possession_factor * 0.3 + vel_bonus + proximity_bonus) * height_factor
     return max(0.0, min(threat, 0.99))
 
-def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
+def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df, states=None):
     """Calculate action value from canonical transition-value model.
 
     Backward-compatible aliases retained: VAEP, Total_VAEP, Avg_VAEP.
@@ -1692,7 +2027,9 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
         return pd.DataFrame(), pd.DataFrame()
 
     match_id = str(getattr(getattr(proto, "game_metadata", None), "id", "match"))
-    states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
+    replay_states = states
+    if replay_states is None:
+        replay_states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
 
     events = []
     max_frame = int(game_df.index.max()) if len(game_df.index) else 0
@@ -1718,7 +2055,7 @@ def calculate_vaep(proto, game_df, pid_team, pid_name, player_pos, shot_df):
         )
 
     event_df = pd.DataFrame(events)
-    valued_events = compute_action_value_deltas(event_df, states)
+    valued_events = compute_action_value_deltas(event_df, replay_states)
     if valued_events.empty:
         return valued_events, pd.DataFrame()
 
@@ -2106,6 +2443,12 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     pid_team = build_pid_team_map(proto)
     player_team = build_player_team_map(proto)
     player_pos = build_player_positions(proto, game_df)
+    match_id = str(getattr(getattr(proto, "game_metadata", None), "id", "match"))
+
+    state_encoding_start = perf_counter()
+    replay_states = encode_replay_states(match_id=match_id, game_df=game_df, player_pos=player_pos, pid_team=pid_team)
+    logger.info("Pipeline timing | stage=state_encoding | duration_s=%.3f | match_id=%s", perf_counter() - state_encoding_start, match_id)
+
     shot_df = calculate_shot_data(proto, game_df, pid_team, temp_map)
     momentum_series = calculate_contextual_momentum(game_df, proto)
     pass_df = calculate_advanced_passing(proto, game_df, pid_team, temp_map, shot_df, pass_threshold)
@@ -2114,7 +2457,9 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
     recovery_df = calculate_recovery_time(proto, game_df, pid_team, temp_map)
     defense_df = calculate_defensive_pressure(game_df, proto)
     xga_df = calculate_xg_against(proto, game_df, temp_map, shot_df)
-    vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df)
+    vaep_start = perf_counter()
+    vaep_df, vaep_summary = calculate_vaep(proto, game_df, pid_team, temp_map, player_pos, shot_df, states=replay_states)
+    logger.info("Pipeline timing | stage=vaep | duration_s=%.3f | match_id=%s", perf_counter() - vaep_start, match_id)
     value_reports_df = build_player_value_reports(vaep_df)
     rotation_timeline, rotation_summary, double_commits_df = calculate_rotation_analysis(game_df, proto, player_pos)
     xs_events_df, xs_summary = calculate_expected_saves(proto, game_df, player_pos, temp_map, shot_df)
@@ -2135,7 +2480,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
             team_goals = int(df[df['Team'] == team]['Goals'].sum())
             luck_val = calculate_luck_percentage(shot_df, team, team_goals)
             df.loc[df['Team'] == team, 'Luck'] = luck_val
-    replay_states = encode_replay_states("match", game_df, player_pos, pid_team)
+    coach_report_start = perf_counter()
     coach_report_df = build_coach_report(
         replay_states,
         momentum_series,
@@ -2145,6 +2490,7 @@ def _compute_match_analytics(manager, game_df, proto, pass_threshold):
         team="Blue",
         top_n=5,
     )
+    logger.info("Pipeline timing | stage=coach_report | duration_s=%.3f | match_id=%s", perf_counter() - coach_report_start, match_id)
     return {
         "manager": manager, "game": game, "game_df": game_df, "proto": proto,
         "df_unfiltered": df, "shot_df": shot_df, "pass_df": pass_df,
@@ -2455,27 +2801,158 @@ def build_export_pressure(momentum_series, proto, pid_team):
     return fig
 
 # --- 11. UI COMPONENTS ---
+def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_df, focus_players):
+    """Top-level command center surface modeled after the elite iOS concept."""
+    blue_df = df[df['Team'] == 'Blue']
+    orange_df = df[df['Team'] == 'Orange']
+    blue_goals = int(blue_df['Goals'].sum())
+    orange_goals = int(orange_df['Goals'].sum())
+
+    xg_blue = float(blue_df.get('xG', pd.Series([0.0])).sum()) if not blue_df.empty else 0.0
+    xg_orange = float(orange_df.get('xG', pd.Series([0.0])).sum()) if not orange_df.empty else 0.0
+    total_xg = xg_blue + xg_orange
+    poss_blue = float(blue_df.get('Possession', pd.Series([0.0])).sum()) if not blue_df.empty else 0.0
+    poss_orange = float(orange_df.get('Possession', pd.Series([0.0])).sum()) if not orange_df.empty else 0.0
+    total_poss = poss_blue + poss_orange
+
+    wp = pd.Series(dtype=float)
+    if win_prob_df is not None and not win_prob_df.empty:
+        wp_col = next((c for c in ['BlueWinProb', 'Blue_Win_Prob', 'win_prob_blue'] if c in win_prob_df.columns), None)
+        if wp_col:
+            wp = pd.to_numeric(win_prob_df[wp_col], errors='coerce').dropna()
+    win_swing = float((wp.max() - wp.min()) * 100) if not wp.empty else 0.0
+
+    if shot_df is not None and not shot_df.empty and COL_XG in shot_df.columns:
+        xg_benchmark = float(pd.to_numeric(shot_df[COL_XG], errors='coerce').fillna(0).mean() * 10)
+    else:
+        xg_benchmark = 0.0
+    xg_delta = total_xg - xg_benchmark
+
+    possession_value = ((poss_blue - poss_orange) / total_poss) if total_poss > 0 else 0.0
+    chemistry_index = 0.0
+    if pass_df is not None and not pass_df.empty:
+        chemistry_index = min(100.0, float(len(pass_df)) * 2.2)
+
+    chips = ["Single Match", f"Blue {blue_goals} - {orange_goals} Orange", "Ranked 3v3"]
+
+    with st.container(border=True):
+        top_left, top_right = st.columns([3.0, 1.4])
+        with top_left:
+            st.markdown("## Elite Match Command Center")
+            st.caption("A calm, Apple-grade analytics surface: story first, depth on demand.")
+        with top_right:
+            st.markdown('<div class="elite-chip-wrap">' + ''.join([f'<span class="ios-chip">{c}</span>' for c in chips]) + '</div>', unsafe_allow_html=True)
+
+        k1, k2, k3, k4 = st.columns(4)
+        kpis = [
+            ("Win Probability Swing", f"{win_swing:+.1f}%", "▲ Positive momentum" if win_swing > 0 else "• Stable"),
+            ("Expected Goals (xG)", f"{total_xg:.2f}", f"{xg_delta:+.2f} vs baseline"),
+            ("Possession Value", f"{possession_value:+.2f}", "Control edge" if possession_value > 0 else "Pressure against"),
+            ("Chemistry Index", f"{chemistry_index:.0f}", "Strong passing lanes" if chemistry_index > 50 else "Build passing rhythm"),
+        ]
+        for col, (label, value, delta) in zip([k1, k2, k3, k4], kpis):
+            with col:
+                st.markdown(f'<div class="elite-kpi"><div class="elite-kpi-label">{label}</div><div class="elite-kpi-value">{value}</div><div class="elite-kpi-delta">{delta}</div></div>', unsafe_allow_html=True)
+
+        left, right = st.columns([2.3, 1.0])
+        with left:
+            st.markdown("#### Narrative Arc · pressure, xG, and turning points")
+            if not wp.empty:
+                fig_arc = themed_figure(tier="support")
+                x_vals = np.arange(len(wp))
+                fig_arc.add_trace(go.Scatter(x=x_vals, y=wp, mode='lines', line=dict(color='#7fb5ff', width=3), showlegend=False))
+                fig_arc.add_trace(go.Scatter(x=x_vals, y=1 - wp, mode='lines', line=dict(color='#fb7f9b', width=2), showlegend=False))
+                fig_arc.update_layout(height=240, margin=dict(l=12, r=12, t=12, b=12))
+                fig_arc.update_xaxes(visible=False)
+                fig_arc.update_yaxes(visible=False)
+                st.plotly_chart(fig_arc, use_container_width=True)
+            else:
+                st.info('Narrative chart appears after replay parsing.')
+
+            with st.container(border=True):
+                st.markdown("#### Key Insight")
+                top_edge = 'midfield pressure conversion'
+                if not df.empty and 'Saves' in df.columns and (blue_df['Saves'].sum() + orange_df['Saves'].sum()) > 12:
+                    top_edge = 'defensive save quality under pressure'
+                st.markdown(f"### Your strongest edge was {top_edge}.")
+                st.caption("When second-man challenge timing tightened, expected possession value increased and unlocked higher-quality shots.")
+                st.success("Recommended: Preserve rotation spacing + early midfield challenge")
+
+        with right:
+            with st.container(border=True):
+                st.markdown("#### Priority Actions")
+                actions = []
+                if coach_report_df is not None and not coach_report_df.empty and 'Role' in coach_report_df.columns:
+                    role_counts = coach_report_df['Role'].value_counts().head(4)
+                    for role, count in role_counts.items():
+                        actions.append((title_case_label(str(role)), 'Improve' if count >= 2 else 'Stable'))
+                if not actions:
+                    actions = [
+                        ('Defensive Third exits', 'Improve'),
+                        ('Backboard coverage', 'Stable'),
+                        ('Kickoff conversion', 'Strong'),
+                        ('Third-man spacing', 'Improve'),
+                    ]
+                for label, status in actions[:4]:
+                    st.markdown(f'<div class="elite-list-row"><span>{label}</span><strong>{status}</strong></div>', unsafe_allow_html=True)
+
+            with st.container(border=True):
+                st.markdown("#### Coach Impact Opportunities")
+                if coach_report_df is not None and not coach_report_df.empty and 'MissedSwing' in coach_report_df.columns:
+                    impact = coach_report_df.groupby('Role', as_index=False).agg(MissedSwing=('MissedSwing', 'sum')).sort_values('MissedSwing', ascending=False).head(4)
+                    fig_impact = themed_px(px.bar, impact, x='Role', y='MissedSwing', tier='detail', intent='outcome', variant='negative')
+                    fig_impact.update_layout(height=190, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+                    st.plotly_chart(fig_impact, use_container_width=True)
+                else:
+                    st.caption('Coach opportunities populate once contextual role data is available.')
+
+
 def render_scoreboard(df, shot_df=None, is_overtime=False):
     st.markdown("### 🏆 Final Scoreboard")
-    blue_goals = df[df['Team']=='Blue']['Goals'].sum()
-    orange_goals = df[df['Team']=='Orange']['Goals'].sum()
-    ot_badge = " <span style='font-size: 0.4em; color: #ffcc00;'>(OT)</span>" if is_overtime else ""
-    c1, c2, c3 = st.columns([1, 0.5, 1])
-    with c1: st.markdown(f"<h1 style='text-align: center; color: #007bff; margin: 0;'>{blue_goals}</h1>", unsafe_allow_html=True)
-    with c2: st.markdown(f"<h1 style='text-align: center; color: white; margin: 0;'>-{ot_badge}</h1>", unsafe_allow_html=True)
-    with c3: st.markdown(f"<h1 style='text-align: center; color: #ff9900; margin: 0;'>{orange_goals}</h1>", unsafe_allow_html=True)
-    # Luck % display
+    blue_goals = int(df[df['Team'] == 'Blue']['Goals'].sum())
+    orange_goals = int(df[df['Team'] == 'Orange']['Goals'].sum())
+    overtime_badge = '<span class="ios-ot-badge">OT</span>' if is_overtime else ''
+
+    st.markdown(
+        f"""
+        <div class="ios-score-shell">
+          <div class="ios-scoreline">
+            <div>
+              <div class="ios-score blue">{blue_goals}</div>
+              <div class="ios-team-label">Blue Team</div>
+            </div>
+            <div class="ios-score-sep">— {overtime_badge}</div>
+            <div>
+              <div class="ios-score orange">{orange_goals}</div>
+              <div class="ios-team-label">Orange Team</div>
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if shot_df is not None and not shot_df.empty:
-        blue_luck = calculate_luck_percentage(shot_df, "Blue", int(blue_goals))
-        orange_luck = calculate_luck_percentage(shot_df, "Orange", int(orange_goals))
-        lc1, lc2 = st.columns(2)
-        with lc1:
-            luck_color = "#00cc96" if blue_luck > 50 else "#ff6b6b" if blue_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {blue_luck}%</span></div>", unsafe_allow_html=True)
-        with lc2:
-            luck_color = "#00cc96" if orange_luck > 50 else "#ff6b6b" if orange_luck < 30 else "#ffcc00"
-            st.markdown(f"<div style='text-align:center;'><span style='color:{luck_color}; font-size:1.1em;'>Luck: {orange_luck}%</span></div>", unsafe_allow_html=True)
-    st.markdown("<br>", unsafe_allow_html=True)
+        blue_luck = calculate_luck_percentage(shot_df, "Blue", blue_goals)
+        orange_luck = calculate_luck_percentage(shot_df, "Orange", orange_goals)
+
+        def _luck_class(value: float) -> str:
+            if value > 50:
+                return "ios-luck-pos"
+            if value < 30:
+                return "ios-luck-neg"
+            return "ios-luck-mid"
+
+        st.markdown(
+            f"""
+            <div class="ios-luck-row">
+              <div>Blue luck: <span class="{_luck_class(blue_luck)}">{blue_luck}%</span></div>
+              <div>Orange luck: <span class="{_luck_class(orange_luck)}">{orange_luck}%</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     cols = ['Name', 'Rating', 'Score', 'Goals', 'Assists', 'Saves', 'Shots']
     col_blue, col_orange = st.columns(2)
     with col_blue:
@@ -2496,17 +2973,22 @@ def render_dashboard(df, shot_df, pass_df):
     if total > 0:
         blue_pct = int((blue_poss / total) * 100)
         orange_pct = 100 - blue_pct
-        st.write(f"**Possession**")
-        st.markdown(f"""
-            <div style="display: flex; width: 100%; height: 20px; border-radius: 10px; overflow: hidden;">
-                <div style="background-color: #007bff; width: {blue_pct}%;"></div>
-                <div style="background-color: #ff9900; width: {orange_pct}%;"></div>
+        st.markdown(
+            f"""
+            <div class="ios-possession-card">
+              <div style="font-weight:650; margin-bottom:0.45rem;">Possession Split</div>
+              <div class="ios-possession-track">
+                <div class="ios-possession-blue" style="width: {blue_pct}%;"></div>
+                <div class="ios-possession-orange" style="width: {orange_pct}%;"></div>
+              </div>
+              <div class="ios-possession-meta">
+                <span style="color:#93c5fd;">Blue {blue_pct}%</span>
+                <span style="color:#fdba74;">Orange {orange_pct}%</span>
+              </div>
             </div>
-            <div style="display: flex; justify-content: space-between; margin-top: 5px;">
-                <span style="color: #007bff; font-weight: bold;">{blue_pct}%</span>
-                <span style="color: #ff9900; font-weight: bold;">{orange_pct}%</span>
-            </div>
-        """, unsafe_allow_html=True)
+            """,
+            unsafe_allow_html=True,
+        )
     st.divider()
     blue_df = df[df['Team']=='Blue']
     orange_df = df[df['Team']=='Orange']
@@ -2653,6 +3135,7 @@ if app_mode == "🔍 Single Match Analysis":
             help="Shared player filter synced across related match tabs.",
         )
 
+        render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_df, focus_players)
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
@@ -2674,13 +3157,12 @@ if app_mode == "🔍 Single Match Analysis":
                         fig = kickoff_kpi_indicator(win_rate=win_rate, title="Kickoff Win Rate (Selected)")
                         st.plotly_chart(fig, use_container_width=True)
                     with col_k2:
-                        fig = spatial_outcome_scatter(
+                        fig = kickoff_outcome_map(
                             disp_kickoff,
-                            x_col="End_X",
-                            y_col="End_Y",
+                            perspective="canonical",
                             outcome_col="Result",
                             label_col="Player",
-                            title="Kickoff Outcomes",
+                            title="Kickoff Outcomes (Canonical Field Frame)",
                             intent="outcome",
                             variant="neutral",
                         )
@@ -2802,11 +3284,23 @@ if app_mode == "🔍 Single Match Analysis":
                         events=goal_events,
                         tier="detail",
                     )
-                    blue_last = float(win_prob_df['BlueWinProb'].iloc[-1] * 100) if 'BlueWinProb' in win_prob_df.columns else 0.0
+                    wp_col = next((c for c in ["BlueWinProb", "Blue_Win_Prob", "win_prob_blue", "WinProb"] if c in win_prob_df.columns), None)
+                    blue_last = 50.0
+                    if wp_col is not None:
+                        raw_last = pd.to_numeric(win_prob_df[wp_col], errors='coerce').dropna()
+                        if not raw_last.empty:
+                            blue_last = float(raw_last.iloc[-1])
+                            if blue_last <= 1.0:
+                                blue_last *= 100.0
+                    blue_match_goals = int(df[df['Team'] == 'Blue']['Goals'].sum())
+                    orange_match_goals = int(df[df['Team'] == 'Orange']['Goals'].sum())
+                    if blue_match_goals != orange_match_goals:
+                        blue_last = 100.0 if blue_match_goals > orange_match_goals else 0.0
+                    final_state = "Blue Won" if blue_last >= 99.5 else ("Orange Won" if blue_last <= 0.5 else "In Progress")
                     render_section_pattern(
                         title="Win Probability",
                         kpis=[
-                            ("Final Blue Win %", f"{blue_last:.1f}%", None),
+                            ("Final Match State", final_state, None),
                             ("Goal Events", str(len(goal_events)), None),
                         ],
                         chart_fig=fig_prob,
@@ -4213,22 +4707,28 @@ elif app_mode == "📈 Season Batch Processor":
                     st.plotly_chart(fig, use_container_width=True)
 
                 st.write("#### Season Kickoff Outcome Map")
-                result_colors = {"Win": "#00cc96", "Loss": "#EF553B", "Neutral": "#636efa"}
-                result_symbols = {"Win": "triangle-up", "Loss": "triangle-down", "Neutral": "diamond"}
-                fig = themed_figure()
-                for result, color in result_colors.items():
-                    subset = hero_k[hero_k['Result'] == result]
-                    if not subset.empty:
-                        fig.add_trace(go.Scatter(
-                            x=subset['End_X'], y=subset['End_Y'],
-                            mode='markers',
-                            marker=dict(size=11, color=color, symbol=result_symbols.get(result, 'circle'), line=dict(width=1, color='white'), opacity=0.8),
-                            name=f"{result} ({len(subset)})",
-                            hovertemplate="Result: " + result + "<extra></extra>",
-                        ))
-                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View)"))
+                kickoff_perspective_label = st.radio(
+                    "Map orientation",
+                    options=["Canonical (single-side)", "Raw (team-relative)"],
+                    index=0,
+                    horizontal=True,
+                    help="Canonical mirrors teams into one attacking direction; Raw keeps original team-relative coordinates.",
+                )
+                kickoff_perspective = "canonical" if kickoff_perspective_label == "Canonical (single-side)" else "raw"
+                map_title_suffix = "Canonical" if kickoff_perspective == "canonical" else "Raw"
+
+                fig = kickoff_outcome_map(
+                    hero_k,
+                    perspective=kickoff_perspective,
+                    outcome_col="Result",
+                    label_col="Player",
+                    title=f"Where {hero}'s Kickoffs Go (Season View, {map_title_suffix})",
+                    intent="outcome",
+                    variant="neutral",
+                )
+                fig.update_layout(get_field_layout(f"Where {hero}'s Kickoffs Go (Season View, {map_title_suffix})"))
                 fig.update_layout(legend=dict(font=dict(color='white'), bgcolor='rgba(0,0,0,0.3)'))
- 
+
                 st.plotly_chart(fig, use_container_width=True)
                 if total_kickoffs > 0:
                     direction = "positive" if win_rate >= 50 else "negative"
@@ -4319,45 +4819,55 @@ elif app_mode == "📈 Season Batch Processor":
         with t4:
             st.subheader("Player Comparison")
             categories = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', SPEED_METRIC_DISPLAY, 'Aerial %', 'Total_VAEP']
+            category_labels = ['Goals', 'Assists', 'Saves', 'xG', 'Possession', SPEED_METRIC_DISPLAY, 'Aerial %', 'Total VAEP']
             season_display = with_dashboard_speed_display(season)
-            all_avgs = season_display.groupby('Name')[categories].mean()
-            cat_max = all_avgs.max().replace(0, 1)
-            hero_avg = hero_display_df[categories].mean()
-            hero_norm = (hero_avg / cat_max * 100).fillna(0)
+            all_avgs = season_display.groupby('Name')[categories].mean().apply(pd.to_numeric, errors='coerce')
+            percentile_scores = all_avgs.rank(pct=True, method='average').mul(100).fillna(0)
 
-            compare_df = pd.DataFrame({'Metric': categories, hero: hero_norm.values})
+            if hero in percentile_scores.index:
+                hero_norm = percentile_scores.loc[hero]
+            else:
+                hero_norm = pd.Series(0.0, index=categories)
+
+            compare_df = pd.DataFrame({'Metric': category_labels, hero: hero_norm.values})
             if teammate != "None":
-                mate_df = season_display[season_display['Name'] == teammate]
-                mate_avg = mate_df[categories].mean()
-                mate_norm = (mate_avg / cat_max * 100).fillna(0)
+                if teammate in percentile_scores.index:
+                    mate_norm = percentile_scores.loc[teammate]
+                else:
+                    mate_norm = pd.Series(0.0, index=categories)
                 compare_df[teammate] = mate_norm.values
 
             mode = st.toggle("Show radar chart", value=False, help="Default view is normalized grouped bars for readability.")
             if mode:
                 fig = themed_figure()
-                fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
+                fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=category_labels, fill='toself', name=hero, line=dict(color='#007bff')))
                 if teammate != "None":
-                    fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
-                fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=500)
+                    fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=category_labels, fill='toself', name=teammate, line=dict(color='#ff9900')))
+                fig.update_layout(
+                    title="Player Comparison Radar (Percentile)",
+                    polar=dict(radialaxis=dict(visible=True, range=[0, 100], ticksuffix="th pct")),
+                    showlegend=True,
+                    height=500,
+                )
                 st.plotly_chart(fig, use_container_width=True)
             else:
-                comp_long = compare_df.melt(id_vars='Metric', var_name='Player', value_name='Normalized Score')
+                comp_long = compare_df.melt(id_vars='Metric', var_name='Player', value_name='Percentile Score')
                 fig_bar = themed_px(
                     px.bar,
                     comp_long,
                     x='Metric',
-                    y='Normalized Score',
+                    y='Percentile Score',
                     color='Player',
                     barmode='group',
-                    title='Normalized Stat Comparison (0-100)',
-                    text='Normalized Score',
+                    title='Percentile Stat Comparison (0-100)',
+                    text='Percentile Score',
                 )
                 fig_bar.update_traces(texttemplate='%{y:.0f}', textposition='outside')
-                fig_bar.update_yaxes(range=[0, 110], title='Normalized Score')
+                fig_bar.update_yaxes(range=[0, 110], title='Percentile Score')
                 st.plotly_chart(fig_bar, use_container_width=True)
                 top_metric = compare_df.set_index('Metric')[hero].sort_values(ascending=False).index[0]
                 top_val = float(compare_df.set_index('Metric').loc[top_metric, hero])
-                render_chart_signal_summary(f"Strongest normalized metric: {top_metric}", 'positive', top_val, unit=' score')
+                render_chart_signal_summary(f"Strongest percentile metric: {top_metric}", 'positive', top_val, unit='th pct')
 
             st.markdown("#### Best Partner Profile")
             hero_pairs = pair_chemistry_df[(pair_chemistry_df['Player1'] == hero) | (pair_chemistry_df['Player2'] == hero)] if not pair_chemistry_df.empty else pd.DataFrame()
