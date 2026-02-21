@@ -629,6 +629,49 @@ def inject_ios_shell_theme() -> None:
             font-size: 0.82rem;
             font-weight: 650;
         }
+        .elite-shell {
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 28px;
+            padding: 1rem;
+            margin-bottom: 1.1rem;
+            background: linear-gradient(130deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04));
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+        }
+        .elite-title { font-size: 2rem; font-weight: 760; line-height: 1.15; margin: 0; }
+        .elite-subtitle { margin: 0.28rem 0 0.85rem 0; color: #c4d5f3; font-size: 1.03rem; }
+        .elite-chip-wrap { display: flex; gap: 0.45rem; justify-content: flex-end; flex-wrap: wrap; }
+        .elite-kpi {
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 18px;
+            background: linear-gradient(180deg, rgba(255,255,255,0.10), rgba(255,255,255,0.04));
+            padding: 0.8rem 0.95rem;
+            min-height: 122px;
+        }
+        .elite-kpi-label { color: #bdcdea; font-size: 0.88rem; margin-bottom: 0.2rem; }
+        .elite-kpi-value { font-size: 2.1rem; font-weight: 740; line-height: 1.1; margin: 0.15rem 0; }
+        .elite-kpi-delta { color: #8ff0b0; font-size: 0.98rem; }
+        .elite-panel {
+            border: 1px solid rgba(148, 163, 184, 0.26);
+            border-radius: 20px;
+            background: rgba(14, 27, 54, 0.56);
+            padding: 0.85rem;
+            min-height: 224px;
+        }
+        .elite-panel-title { margin: 0 0 0.5rem 0; color: #dbe8ff; font-size: 1.08rem; }
+        .elite-list-row {
+            display: flex;
+            justify-content: space-between;
+            border-bottom: 1px solid rgba(148, 163, 184, 0.18);
+            padding: 0.46rem 0;
+            color: #dbe8ff;
+        }
+        .elite-insight {
+            border: 1px solid rgba(148, 163, 184, 0.24);
+            border-radius: 18px;
+            background: rgba(13, 25, 49, 0.6);
+            padding: 0.9rem;
+            min-height: 210px;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -2654,6 +2697,117 @@ def build_export_pressure(momentum_series, proto, pid_team):
     return fig
 
 # --- 11. UI COMPONENTS ---
+def render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_df, focus_players):
+    """Top-level command center surface modeled after the elite iOS concept."""
+    blue_df = df[df['Team'] == 'Blue']
+    orange_df = df[df['Team'] == 'Orange']
+    blue_goals = int(blue_df['Goals'].sum())
+    orange_goals = int(orange_df['Goals'].sum())
+
+    xg_blue = float(blue_df.get('xG', pd.Series([0.0])).sum()) if not blue_df.empty else 0.0
+    xg_orange = float(orange_df.get('xG', pd.Series([0.0])).sum()) if not orange_df.empty else 0.0
+    total_xg = xg_blue + xg_orange
+    poss_blue = float(blue_df.get('Possession', pd.Series([0.0])).sum()) if not blue_df.empty else 0.0
+    poss_orange = float(orange_df.get('Possession', pd.Series([0.0])).sum()) if not orange_df.empty else 0.0
+    total_poss = poss_blue + poss_orange
+
+    if win_prob_df is not None and not win_prob_df.empty and 'BlueWinProb' in win_prob_df.columns:
+        wp = pd.to_numeric(win_prob_df['BlueWinProb'], errors='coerce').dropna()
+        win_swing = float((wp.max() - wp.min()) * 100) if not wp.empty else 0.0
+    else:
+        win_swing = 0.0
+
+    if shot_df is not None and not shot_df.empty and COL_XG in shot_df.columns:
+        xg_benchmark = float(pd.to_numeric(shot_df[COL_XG], errors='coerce').fillna(0).mean() * 10)
+    else:
+        xg_benchmark = 0.0
+    xg_delta = total_xg - xg_benchmark
+
+    possession_value = ((poss_blue - poss_orange) / total_poss) if total_poss > 0 else 0.0
+    chemistry_index = 0.0
+    if pass_df is not None and not pass_df.empty:
+        chemistry_index = min(100.0, float(pass_df.groupby('Sender').size().sum()) * 2.2)
+
+    chips = ["Single Match", f"Blue {blue_goals} - {orange_goals} Orange", "Ranked 3v3"]
+    st.markdown('<div class="elite-shell">', unsafe_allow_html=True)
+    h1, h2 = st.columns([3.0, 1.4])
+    with h1:
+        st.markdown('<h2 class="elite-title">Elite Match Command Center</h2>', unsafe_allow_html=True)
+        st.markdown('<p class="elite-subtitle">A calm, Apple-grade analytics surface: story first, depth on demand.</p>', unsafe_allow_html=True)
+    with h2:
+        st.markdown('<div class="elite-chip-wrap">' + ''.join([f'<span class="ios-chip">{c}</span>' for c in chips]) + '</div>', unsafe_allow_html=True)
+
+    k1, k2, k3, k4 = st.columns(4)
+    kpis = [
+        ("Win Probability Swing", f"{win_swing:+.1f}%", "▲ Positive momentum" if win_swing > 0 else "• Stable"),
+        ("Expected Goals (xG)", f"{total_xg:.2f}", f"{xg_delta:+.2f} vs baseline"),
+        ("Possession Value", f"{possession_value:+.2f}", "Control edge" if possession_value > 0 else "Pressure against"),
+        ("Chemistry Index", f"{chemistry_index:.0f}", "Strong passing lanes" if chemistry_index > 50 else "Build passing rhythm"),
+    ]
+    for col, (label, value, delta) in zip([k1, k2, k3, k4], kpis):
+        with col:
+            st.markdown(f'<div class="elite-kpi"><div class="elite-kpi-label">{label}</div><div class="elite-kpi-value">{value}</div><div class="elite-kpi-delta">{delta}</div></div>', unsafe_allow_html=True)
+
+    left, right = st.columns([2.3, 1.0])
+    with left:
+        st.markdown('<div class="elite-panel"><div class="elite-panel-title">Narrative Arc · pressure, xG, and turning points</div>', unsafe_allow_html=True)
+        if win_prob_df is not None and not win_prob_df.empty:
+            fig_arc = themed_figure(tier="support")
+            time_col = 'TimeSeconds' if 'TimeSeconds' in win_prob_df.columns else win_prob_df.columns[0]
+            x_vals = pd.to_numeric(win_prob_df[time_col], errors='coerce').fillna(0)
+            y_wp = pd.to_numeric(win_prob_df.get('BlueWinProb', pd.Series([0.5] * len(win_prob_df))), errors='coerce').fillna(0.5)
+            fig_arc.add_trace(go.Scatter(x=x_vals, y=y_wp, mode='lines', name='Blue Win Prob', line=dict(color='#7fb5ff', width=3)))
+            fig_arc.add_trace(go.Scatter(x=x_vals, y=1 - y_wp, mode='lines', name='Orange Win Prob', line=dict(color='#fb7f9b', width=2)))
+            fig_arc.update_layout(height=230, margin=dict(l=10, r=10, t=10, b=10), showlegend=False)
+            fig_arc.update_xaxes(visible=False)
+            fig_arc.update_yaxes(visible=False)
+            st.plotly_chart(fig_arc, use_container_width=True)
+        else:
+            st.info('Narrative chart appears after replay parsing.')
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="elite-insight"><div class="elite-panel-title">Key Insight</div>', unsafe_allow_html=True)
+        top_edge = 'midfield pressure conversion'
+        if not df.empty and 'Saves' in df.columns:
+            if blue_df['Saves'].sum() + orange_df['Saves'].sum() > 12:
+                top_edge = 'defensive save quality under pressure'
+        st.markdown(f"<div style='font-size:2rem;font-weight:760;line-height:1.08;margin-bottom:0.55rem;'>Your strongest edge was<br>{top_edge}.</div>", unsafe_allow_html=True)
+        st.markdown("<div style='color:#c5d6f3;'>When second-man challenge timing tightened, expected possession value increased and unlocked higher-quality shots.</div>", unsafe_allow_html=True)
+        st.markdown("<div style='margin-top:0.65rem; display:inline-block; border:1px solid rgba(134,239,172,.45); color:#9af5b8; padding:.25rem .45rem; border-radius:8px; background:rgba(22,163,74,.18);'>Recommended: Preserve rotation spacing + early midfield challenge</div>", unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    with right:
+        st.markdown('<div class="elite-panel"><div class="elite-panel-title">Priority Actions</div>', unsafe_allow_html=True)
+        actions = []
+        if coach_report_df is not None and not coach_report_df.empty and 'Role' in coach_report_df.columns:
+            role_counts = coach_report_df['Role'].value_counts().head(4)
+            for role, count in role_counts.items():
+                actions.append((title_case_label(str(role)), 'Improve' if count >= 2 else 'Stable'))
+        if not actions:
+            actions = [
+                ('Defensive Third exits', 'Improve'),
+                ('Backboard coverage', 'Stable'),
+                ('Kickoff conversion', 'Strong'),
+                ('Third-man spacing', 'Improve'),
+            ]
+        for label, status in actions[:4]:
+            st.markdown(f'<div class="elite-list-row"><span>{label}</span><strong>{status}</strong></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+
+        st.markdown('<div class="elite-panel" style="margin-top:0.9rem;"><div class="elite-panel-title">Coach Impact Opportunities</div>', unsafe_allow_html=True)
+        if coach_report_df is not None and not coach_report_df.empty and 'MissedSwing' in coach_report_df.columns:
+            impact = coach_report_df.groupby('Role', as_index=False).agg(MissedSwing=('MissedSwing', 'sum')).sort_values('MissedSwing', ascending=False).head(4)
+            fig_impact = themed_px(px.bar, impact, x='Role', y='MissedSwing', tier='detail', intent='outcome', variant='negative')
+            fig_impact.update_layout(height=165, margin=dict(l=8, r=8, t=8, b=8), showlegend=False)
+            fig_impact.update_xaxes(visible=False)
+            fig_impact.update_yaxes(visible=False)
+            st.plotly_chart(fig_impact, use_container_width=True)
+        else:
+            st.markdown('<div style="height:140px;border:1px solid rgba(148,163,184,.24);border-radius:14px;background:rgba(8,16,32,.45);"></div>', unsafe_allow_html=True)
+        st.markdown('</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
+
+
 def render_scoreboard(df, shot_df=None, is_overtime=False):
     st.markdown("### 🏆 Final Scoreboard")
     blue_goals = int(df[df['Team'] == 'Blue']['Goals'].sum())
@@ -2882,6 +3036,7 @@ if app_mode == "🔍 Single Match Analysis":
             help="Shared player filter synced across related match tabs.",
         )
 
+        render_elite_overview_shell(df, shot_df, pass_df, win_prob_df, coach_report_df, focus_players)
         render_scoreboard(df, shot_df, is_overtime)
         render_dashboard(df, shot_df, pass_df)
             
