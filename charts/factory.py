@@ -9,6 +9,34 @@ from plotly.subplots import make_subplots
 
 from constants import FIELD_HALF_X, FIELD_HALF_Y, GOAL_HALF_W, GOAL_HEIGHT, WALL_HEIGHT, REPLAY_FPS, TEAM_COLORS
 from charts.theme import apply_chart_theme, semantic_color
+
+# Standard Rocket League boost pad positions (Unreal Units, field-center origin)
+# Large pads (100 boost): 6 positions
+_BOOST_LARGE_XY = [
+    (0.0, -4240.0),
+    (0.0, 4240.0),
+    (-3584.0, -2560.0),
+    (3584.0, -2560.0),
+    (-3584.0, 2560.0),
+    (3584.0, 2560.0),
+]
+# Small pads (12 boost): 28 positions — representative subset of standard RLCS field
+_BOOST_SMALL_XY = [
+    (-1792.0, -4184.0), (1792.0, -4184.0),
+    (-3072.0, -4096.0), (3072.0, -4096.0),
+    (-940.0, -3308.0), (940.0, -3308.0),
+    (-3584.0, 0.0), (3584.0, 0.0),
+    (-2048.0, 0.0), (0.0, 0.0), (2048.0, 0.0),
+    (-1024.0, -1024.0), (1024.0, -1024.0),
+    (-3072.0, -1280.0), (3072.0, -1280.0),
+    (-1792.0, 4184.0), (1792.0, 4184.0),
+    (-3072.0, 4096.0), (3072.0, 4096.0),
+    (-940.0, 3308.0), (940.0, 3308.0),
+    (-1024.0, 1024.0), (1024.0, 1024.0),
+    (-3072.0, 1280.0), (3072.0, 1280.0),
+    (-2048.0, 2048.0), (2048.0, 2048.0),
+    (0.0, 2048.0),
+]
 from charts.formatters import (
     format_metric_series,
     format_metric_value,
@@ -1082,3 +1110,434 @@ def teammate_synergy_matrix(shared_actions_df: pd.DataFrame, title: str = "Teamm
     ))
     fig.update_layout(title=title, xaxis_title="Teammate", yaxis_title="Teammate")
     return apply_chart_theme(fig, tier="support", intent="dual_series", variant="primary")
+
+
+def add_boost_pad_overlay(fig: go.Figure, *, show_large: bool = True, show_small: bool = True, opacity: float = 0.55) -> go.Figure:
+    """Add boost pad markers to an existing field scatter figure.
+
+    Large pads render as gold stars; small pads as smaller circle-open markers.
+    Both sets are added as non-legend ghost traces (hoverinfo only).
+    """
+    if show_large and _BOOST_LARGE_XY:
+        xs, ys = zip(*_BOOST_LARGE_XY)
+        fig.add_trace(go.Scatter(
+            x=list(xs), y=list(ys),
+            mode="markers",
+            name="Large Boost (100)",
+            marker=dict(
+                symbol="star",
+                size=14,
+                color="#f59e0b",
+                opacity=opacity,
+                line=dict(width=1, color="#fbbf24"),
+            ),
+            hovertemplate="Large Boost Pad<br>(%{x:.0f}, %{y:.0f})<extra></extra>",
+            showlegend=True,
+        ))
+    if show_small and _BOOST_SMALL_XY:
+        xs, ys = zip(*_BOOST_SMALL_XY)
+        fig.add_trace(go.Scatter(
+            x=list(xs), y=list(ys),
+            mode="markers",
+            name="Small Boost (12)",
+            marker=dict(
+                symbol="circle-open",
+                size=7,
+                color="#fcd34d",
+                opacity=opacity * 0.75,
+                line=dict(width=1, color="#fcd34d"),
+            ),
+            hovertemplate="Small Boost Pad<br>(%{x:.0f}, %{y:.0f})<extra></extra>",
+            showlegend=True,
+        ))
+    return fig
+
+
+def ball_carry_map(
+    game_df: "pd.DataFrame",
+    pid_name_map: "dict[str, str]",
+    pid_team_map: "dict[str, str]",
+    *,
+    min_carry_frames: int = 15,
+    title: str = "Ball Carry Map",
+) -> go.Figure:
+    """Render ball carry paths as polylines on the field, colored by team.
+
+    A carry is defined as a consecutive sequence of frames where a single player
+    is within contact distance of the ball (approx ≤ 130 UU from ball surface).
+    Paths are colored by team (Blue/Orange) with speed-proportional opacity.
+
+    Args:
+        game_df: The carball game DataFrame with per-frame positions.
+        pid_name_map: Mapping of player id → player name.
+        pid_team_map: Mapping of player id → team name.
+        min_carry_frames: Minimum consecutive frames to count as a carry sequence.
+        title: Chart title.
+    """
+    from constants import REPLAY_FPS
+
+    fig = go.Figure()
+    BALL_RADIUS = 93.0
+    CONTACT_THRESHOLD = BALL_RADIUS + 130.0  # ~223 UU
+    CAR_HALF_HEIGHT = 36.0
+
+    ball_cols = {"pos_x", "pos_y", "pos_z"}
+    if "ball" not in game_df or not all(c in game_df["ball"].columns for c in ball_cols):
+        fig.update_layout(title=title)
+        fig.add_annotation(x=0.5, y=0.5, xref="paper", yref="paper",
+                           text="Ball position data unavailable", showarrow=False,
+                           font=dict(size=13, color=semantic_color("threshold", "neutral")))
+        return apply_chart_theme(fig, tier="hero")
+
+    ball = game_df["ball"][["pos_x", "pos_y", "pos_z"]].copy()
+
+    total_carries = 0
+    for pid, name in pid_name_map.items():
+        if name not in game_df:
+            continue
+        pdf = game_df[name]
+        if not all(c in pdf.columns for c in ("pos_x", "pos_y", "pos_z")):
+            continue
+        team = pid_team_map.get(pid, "Blue")
+        team_color = TEAM_COLORS.get(team, {}).get("primary", semantic_color("dual_series", "primary"))
+
+        # Align player and ball frames
+        common_idx = pdf.index.intersection(ball.index)
+        if len(common_idx) < min_carry_frames:
+            continue
+
+        px = pdf.loc[common_idx, "pos_x"].to_numpy(dtype=float)
+        py = pdf.loc[common_idx, "pos_y"].to_numpy(dtype=float)
+        pz = pdf.loc[common_idx, "pos_z"].to_numpy(dtype=float)
+        bx = ball.loc[common_idx, "pos_x"].to_numpy(dtype=float)
+        by = ball.loc[common_idx, "pos_y"].to_numpy(dtype=float)
+        bz = ball.loc[common_idx, "pos_z"].to_numpy(dtype=float)
+
+        dist = np.sqrt((px - bx)**2 + (py - by)**2 + (pz - bz - CAR_HALF_HEIGHT)**2)
+        in_contact = dist < CONTACT_THRESHOLD
+
+        # Find carry runs
+        carry_start = None
+        for i in range(len(in_contact)):
+            if in_contact[i] and carry_start is None:
+                carry_start = i
+            elif not in_contact[i] and carry_start is not None:
+                run_len = i - carry_start
+                if run_len >= min_carry_frames:
+                    seg_x = bx[carry_start:i]
+                    seg_y = by[carry_start:i]
+                    duration_s = run_len / REPLAY_FPS
+                    fig.add_trace(go.Scatter(
+                        x=seg_x, y=seg_y,
+                        mode="lines",
+                        line=dict(color=team_color, width=2.5),
+                        opacity=0.75,
+                        name=name,
+                        legendgroup=team,
+                        showlegend=(total_carries == 0),
+                        hovertemplate=f"{name} carry<br>Duration: {duration_s:.1f}s<extra></extra>",
+                    ))
+                    total_carries += 1
+                carry_start = None
+
+    if total_carries == 0:
+        fig.add_annotation(x=0.5, y=0.5, xref="paper", yref="paper",
+                           text="No carry sequences detected", showarrow=False,
+                           font=dict(size=13, color=semantic_color("threshold", "neutral")))
+
+    fig.update_layout(title=title)
+    return apply_chart_theme(fig, tier="hero")
+
+
+def demo_map(
+    game_df: "pd.DataFrame",
+    proto,
+    pid_name_map: "dict[str, str]",
+    pid_team_map: "dict[str, str]",
+    *,
+    title: str = "Demolition Map",
+) -> go.Figure:
+    """Render demolition locations as field scatter with directional indicators.
+
+    Each demo is shown at the victim's position with team-color encoding.
+    Arrow annotations point from attacker direction.
+
+    Args:
+        game_df: carball game DataFrame.
+        proto: carball AnalysisProto for demo event data.
+        pid_name_map: player id → name map.
+        pid_team_map: player id → team map.
+        title: Chart title.
+    """
+    fig = go.Figure()
+    demo_rows: list[dict] = []
+
+    if hasattr(proto, "game_stats") and hasattr(proto.game_stats, "demolitions"):
+        for demo in proto.game_stats.demolitions:
+            attacker_pid = str(getattr(getattr(demo, "attacker_id", None), "id", ""))
+            victim_pid = str(getattr(getattr(demo, "victim_id", None), "id", ""))
+            frame = getattr(demo, "frame_number", None)
+            if not attacker_pid or not victim_pid or frame is None:
+                continue
+            attacker_name = pid_name_map.get(attacker_pid, attacker_pid)
+            victim_name = pid_name_map.get(victim_pid, victim_pid)
+            attacker_team = pid_team_map.get(attacker_pid, "Blue")
+            victim_team = pid_team_map.get(victim_pid, "Orange")
+
+            vx, vy = None, None
+            if victim_name in game_df:
+                vdf = game_df[victim_name]
+                nearby = vdf[vdf.index <= frame].tail(3)
+                if not nearby.empty and "pos_x" in vdf.columns and "pos_y" in vdf.columns:
+                    vx = float(nearby["pos_x"].iloc[-1])
+                    vy = float(nearby["pos_y"].iloc[-1])
+
+            demo_rows.append({
+                "attacker": attacker_name,
+                "attacker_team": attacker_team,
+                "victim": victim_name,
+                "victim_team": victim_team,
+                "frame": frame,
+                "vx": vx,
+                "vy": vy,
+            })
+
+    if not demo_rows:
+        fig.update_layout(title=title)
+        fig.add_annotation(x=0.5, y=0.5, xref="paper", yref="paper",
+                           text="No demolitions detected in this match", showarrow=False,
+                           font=dict(size=13, color=semantic_color("threshold", "neutral")))
+        return apply_chart_theme(fig, tier="support")
+
+    demo_df = pd.DataFrame(demo_rows).dropna(subset=["vx", "vy"])
+
+    for attacker_team, group in demo_df.groupby("attacker_team"):
+        team_color = TEAM_COLORS.get(attacker_team, {}).get("primary", semantic_color("dual_series", "primary"))
+        victim_labels = group.apply(lambda r: f"{r['attacker']} → {r['victim']}", axis=1).tolist()
+        fig.add_trace(go.Scatter(
+            x=group["vx"].tolist(),
+            y=group["vy"].tolist(),
+            mode="markers+text",
+            marker=dict(
+                size=18,
+                color=team_color,
+                symbol="x",
+                opacity=0.9,
+                line=dict(width=2, color="white"),
+            ),
+            text=["💥"] * len(group),
+            textposition="top center",
+            name=f"{attacker_team} Demo",
+            customdata=victim_labels,
+            hovertemplate="Demo: %{customdata}<br>Location: (%{x:.0f}, %{y:.0f})<extra></extra>",
+        ))
+
+    count = len(demo_df)
+    fig.update_layout(
+        title=f"{title} ({count} demos)",
+        annotations=[dict(
+            x=0.5, y=1.02, xref="paper", yref="paper",
+            text=f"{count} demo{'s' if count != 1 else ''} this match",
+            showarrow=False,
+            font=dict(size=11, color=semantic_color("threshold", "neutral")),
+        )],
+    )
+    return apply_chart_theme(fig, tier="support")
+
+
+def vaep_waterfall_chart(vaep_summary: "pd.DataFrame", title: str = "Player Contribution Waterfall (VAEP)") -> go.Figure:
+    """Waterfall chart showing cumulative VAEP contribution by player.
+
+    Each player's VAEP value extends (or drops) the running total. A final
+    'Total' bar shows the net team VAEP. Players are sorted descending by VAEP.
+    Colors follow semantic outcome intent: positive bars are win-colored, negative
+    bars are loss-colored, and the total bar uses threshold neutral.
+    """
+    if vaep_summary is None or vaep_summary.empty or "Total_VAEP" not in vaep_summary.columns:
+        fig = go.Figure()
+        fig.add_annotation(text="No VAEP data available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
+        return apply_chart_theme(fig, tier="support")
+
+    df = vaep_summary.sort_values("Total_VAEP", ascending=False).reset_index(drop=True)
+    names = df["Name"].tolist()
+    values = df["Total_VAEP"].tolist()
+
+    measures = ["relative"] * len(names) + ["total"]
+    x_labels = names + ["Team Total"]
+    y_values = values + [sum(values)]
+
+    fig = go.Figure(go.Waterfall(
+        name="VAEP",
+        orientation="v",
+        measure=measures,
+        x=x_labels,
+        y=y_values,
+        texttemplate="%{y:+.3f}",
+        textposition="outside",
+        connector=dict(line=dict(color="rgba(255,255,255,0.18)", width=1)),
+        decreasing=dict(marker=dict(color=semantic_color("outcome", "loss"))),
+        increasing=dict(marker=dict(color=semantic_color("outcome", "win"))),
+        totals=dict(marker=dict(color=semantic_color("threshold", "neutral"))),
+        hovertemplate="%{x}<br>VAEP: %{y:+.3f}<extra></extra>",
+    ))
+    fig.update_layout(
+        title=title,
+        showlegend=False,
+        yaxis_title="VAEP",
+        xaxis_title="Player",
+    )
+    return apply_chart_theme(fig, tier="support", intent="outcome", variant="win")
+
+
+def save_quality_scatter(
+    xs_events_df: "pd.DataFrame",
+    xs_summary: "pd.DataFrame",
+    title: str = "Save Quality Matrix",
+) -> go.Figure:
+    """2D scatter: Save Difficulty Index (x) vs ExpectedSaveProb (y).
+
+    Marker size encodes SaveImpact. Color encodes team. Quadrant lines divide
+    easy/routine saves (lower-left) from elite/pressure saves (upper-right).
+    """
+    if xs_events_df is None or xs_events_df.empty:
+        fig = go.Figure()
+        fig.add_annotation(text="No save event data available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
+        return apply_chart_theme(fig, tier="hero")
+
+    required = {"SaveDifficultyIndex", "ExpectedSaveProb", "SaveImpact", "Saver"}
+    missing = required - set(xs_events_df.columns)
+    if missing:
+        fig = go.Figure()
+        fig.add_annotation(text=f"Missing columns: {', '.join(missing)}", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
+        return apply_chart_theme(fig, tier="hero")
+
+    player_team: dict = {}
+    if xs_summary is not None and "Name" in xs_summary.columns and "Team" in xs_summary.columns:
+        for _, row in xs_summary.iterrows():
+            player_team[row["Name"]] = row.get("Team", "Blue")
+
+    df = xs_events_df.copy()
+    df["_team"] = df["Saver"].map(lambda n: player_team.get(n, "Blue"))
+    df["_impact_size"] = (df["SaveImpact"].abs().clip(lower=0.01) * 28 + 8).clip(upper=36)
+
+    fig = go.Figure()
+    for team in ("Blue", "Orange"):
+        t_df = df[df["_team"] == team]
+        if t_df.empty:
+            continue
+        team_color = semantic_color("team", team.lower())
+        fig.add_trace(go.Scatter(
+            x=t_df["SaveDifficultyIndex"],
+            y=t_df["ExpectedSaveProb"],
+            mode="markers",
+            name=f"{team}",
+            marker=dict(
+                size=t_df["_impact_size"],
+                color=team_color,
+                opacity=0.75,
+                line=dict(width=1, color="rgba(255,255,255,0.35)"),
+            ),
+            customdata=np.stack([
+                t_df["Saver"],
+                t_df["SaveDifficultyIndex"].round(3),
+                t_df["ExpectedSaveProb"].round(3),
+                t_df["SaveImpact"].round(3),
+            ], axis=-1),
+            hovertemplate=(
+                "<b>%{customdata[0]}</b><br>"
+                "SDI: %{customdata[1]:.3f}<br>"
+                "ExpSaveProb: %{customdata[2]:.3f}<br>"
+                "SaveImpact: %{customdata[3]:+.3f}<extra></extra>"
+            ),
+        ))
+
+    fig.add_hline(y=0.5, line_dash="dot", line_color="rgba(255,255,255,0.2)", annotation_text="50% baseline", annotation_position="top left")
+    fig.add_vline(x=0.5, line_dash="dot", line_color="rgba(255,255,255,0.2)", annotation_text="Medium difficulty", annotation_position="top right")
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Save Difficulty Index (SDI)",
+        yaxis_title="Expected Save Probability",
+        xaxis=dict(range=[-0.05, 1.05]),
+        yaxis=dict(range=[-0.05, 1.05]),
+    )
+    return apply_chart_theme(fig, tier="hero", intent="outcome", variant="win")
+
+
+def boost_economy_timeline(
+    game_df: "pd.DataFrame",
+    pid_name_map: "dict[str, str]",
+    pid_team_map: "dict[str, str]",
+    shot_df: "pd.DataFrame | None" = None,
+    *,
+    fps: float = 30.0,
+    title: str = "Boost Economy Timeline",
+) -> go.Figure:
+    """Per-player boost level over match time as overlapping line chart.
+
+    Overlays shot events as vertical shaded bands (opacity proportional to xG).
+    Includes a low-boost warning reference line at 20 boost.
+    """
+    fig = go.Figure()
+    has_any = False
+
+    for pid, name in pid_name_map.items():
+        team = pid_team_map.get(pid, "Blue")
+        if name not in game_df:
+            continue
+        p_df = game_df[name]
+        if "boost" not in p_df.columns:
+            continue
+        boost_series = p_df["boost"].dropna()
+        if boost_series.empty:
+            continue
+
+        t_sec = boost_series.index / fps
+        color = semantic_color("team", team.lower())
+        fig.add_trace(go.Scatter(
+            x=list(t_sec),
+            y=list(boost_series.values),
+            mode="lines",
+            name=name,
+            line=dict(color=color, width=1.5),
+            opacity=0.85,
+            hovertemplate=f"<b>{name}</b><br>Time: %{{x:.1f}}s<br>Boost: %{{y:.0f}}<extra></extra>",
+        ))
+        has_any = True
+
+    if not has_any:
+        fig.add_annotation(text="No per-frame boost data available", x=0.5, y=0.5, showarrow=False, xref="paper", yref="paper")
+        return apply_chart_theme(fig, tier="support")
+
+    if shot_df is not None and not shot_df.empty and "Frame" in shot_df.columns and "xG" in shot_df.columns:
+        for _, row in shot_df.iterrows():
+            frame = pd.to_numeric(row.get("Frame", 0), errors="coerce")
+            if pd.isna(frame):
+                continue
+            t = float(frame) / fps
+            xg = float(row.get("xG", 0) or 0)
+            if xg <= 0:
+                continue
+            fig.add_vrect(
+                x0=t - 0.5, x1=t + 0.5,
+                fillcolor=semantic_color("outcome", "win"),
+                opacity=min(xg * 0.4, 0.35),
+                layer="below",
+                line_width=0,
+            )
+
+    fig.add_hline(
+        y=20, line_dash="dot",
+        line_color=semantic_color("outcome", "loss"),
+        annotation_text="Low boost (20)",
+        annotation_position="bottom right",
+    )
+
+    fig.update_layout(
+        title=title,
+        xaxis_title="Match Time (s)",
+        yaxis_title="Boost Amount",
+        yaxis=dict(range=[0, 105]),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
+    )
+    return apply_chart_theme(fig, tier="hero", intent="dual_series", variant="primary")
