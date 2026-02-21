@@ -27,7 +27,7 @@ from utils import (
     apply_categorical_order, stable_sort,
 )
 
-from charts.theme import apply_chart_theme, semantic_color
+from charts.theme import apply_chart_theme, semantic_color, team_heatmap_colorscale
 from charts.formatters import dataframe_formatter, format_metric_value, title_case_label
 from charts.factory import (
     chemistry_network_chart,
@@ -72,6 +72,7 @@ from analytics.save_metrics import calculate_save_analytics, SAVE_METRIC_MODEL_V
 from analytics.possession_value import compute_action_value_deltas, encode_replay_states
 from analytics.aggregations.value_reports import build_player_value_reports
 from analytics.counterfactuals import build_coach_report
+from analytics.narrative_engine import generate_narrative_report
 
 logger = logging.getLogger(__name__)
 
@@ -615,8 +616,18 @@ def get_3d_field_traces():
     # Goal frames (blue at -Y, orange at +Y)
     gw = GOAL_HALF_W
     gh = GOAL_HEIGHT
-    for sign, color in [(-1, 'rgba(0,123,255,0.5)'), (1, 'rgba(255,153,0,0.5)')]:
+    for sign, color, glow_color in [
+        (-1, 'rgba(0,140,255,0.85)', 'rgba(0,140,255,0.20)'),
+        ( 1, 'rgba(255,160,0,0.85)', 'rgba(255,160,0,0.20)'),
+    ]:
         gy = sign * fy
+        # Outer soft-glow mouth (wide, low opacity) for goal-frame depth.
+        traces.append(go.Scatter3d(
+            x=[-gw, gw, gw, -gw, -gw],
+            y=[gy, gy, gy, gy, gy],
+            z=[0, 0, gh, gh, 0],
+            mode='lines', line=dict(color=glow_color, width=10),
+            showlegend=False, hoverinfo='skip'))
         # Goal mouth outline (front face)
         traces.append(go.Scatter3d(
             x=[-gw, gw, gw, -gw, -gw],
@@ -2247,12 +2258,9 @@ def build_export_heatmap(game_df, player_name):
             sampled = valid_pos.iloc[::3]
             fig.add_trace(go.Histogram2dContour(
                 x=sampled['pos_x'], y=sampled['pos_y'],
-                colorscale=[[0, 'rgba(0,0,0,0)'], [0.15, 'rgba(0,80,0,0.25)'],
-                            [0.3, 'rgba(0,160,0,0.4)'], [0.5, 'rgba(80,200,0,0.5)'],
-                            [0.7, 'rgba(200,220,0,0.6)'], [0.85, 'rgba(255,200,0,0.65)'],
-                            [1.0, 'rgba(255,255,50,0.75)']],
+                colorscale=team_heatmap_colorscale("neutral"),
                 contours=dict(coloring='fill', showlines=False),
-                ncontours=20, showscale=False, hoverinfo='skip'
+                ncontours=25, showscale=False, hoverinfo='skip'
             ))
     return fig
 
@@ -2704,6 +2712,78 @@ if app_mode == "🔍 Single Match Analysis":
         with t2:
             st.subheader("Match Narrative")
 
+            with st.expander("🧠 Narrative Studio", expanded=True):
+                ns_col1, ns_col2, ns_col3 = st.columns(3)
+                with ns_col1:
+                    ns_tone = st.selectbox("Audience Tone", ["balanced", "hype", "coach"], index=0, key="ns_tone")
+                with ns_col2:
+                    ns_verbosity = st.selectbox("Verbosity", ["brief", "standard", "deep"], index=1, key="ns_verbosity")
+                with ns_col3:
+                    ns_role = st.selectbox(
+                        "Role Target",
+                        ["solo_queue", "team_scrim", "coaching_review"],
+                        index=2,
+                        format_func=lambda r: r.replace("_", " ").title(),
+                        key="ns_role_target",
+                    )
+
+                players_per_team = None
+                if not df.empty and {"Team", "Name"}.issubset(df.columns):
+                    team_sizes = df.groupby("Team")["Name"].nunique()
+                    if not team_sizes.empty:
+                        players_per_team = int(team_sizes.max())
+
+                narrative_report = generate_narrative_report(
+                    momentum_series=momentum_series,
+                    possession_value_df=vaep_df,
+                    rotation_summary=rotation_summary,
+                    shot_df=shot_df,
+                    save_events_df=xs_events_df,
+                    situational_df=situational_df,
+                    kickoff_df=kickoff_df,
+                    tone=ns_tone,
+                    verbosity=ns_verbosity,
+                    role_target=ns_role,
+                    players_per_team=players_per_team,
+                )
+                if narrative_report.claims:
+                    for claim in narrative_report.claims:
+                        st.markdown(f"**{claim.phase.replace('_', ' ').title()}** — {claim.text}")
+                        st.caption(f"{claim.confidence_language.title()} ({claim.confidence:.2f})")
+                        for ev in claim.evidence:
+                            ev_bits = [f"source={ev.source}"]
+                            if ev.row_index is not None:
+                                ev_bits.append(f"row={ev.row_index}")
+                            if ev.frame is not None:
+                                ev_bits.append(f"frame={ev.frame}")
+                            st.caption(f"Evidence: {', '.join(ev_bits)} · {ev.detail}")
+                    st.markdown("**Role-targeted recommendations**")
+                    for rec in narrative_report.recommendations:
+                        st.markdown(f"- {rec}")
+                else:
+                    st.info("Narrative Studio could not generate evidence-linked claims for the current dataset.")
+
+                md_out = narrative_report.to_markdown()
+                json_out = narrative_report.to_json()
+                export_col1, export_col2 = st.columns(2)
+                with export_col1:
+                    st.download_button(
+                        "Download Narrative (Markdown)",
+                        data=md_out,
+                        file_name="narrative_studio_report.md",
+                        mime="text/markdown",
+                        key="download_narrative_md",
+                    )
+                with export_col2:
+                    st.download_button(
+                        "Download Narrative (JSON)",
+                        data=json_out,
+                        file_name="narrative_studio_report.json",
+                        mime="application/json",
+                        key="download_narrative_json",
+                    )
+            st.divider()
+
             # --- TEAM STATS OVERVIEW (ballchasing-style tug-of-war) ---
             if not df.empty:
                 blue_df = df[df['Team'] == 'Blue']
@@ -2914,42 +2994,66 @@ if app_mode == "🔍 Single Match Analysis":
                         fig = themed_figure()
                         fig.update_layout(get_field_layout("Shot Map"))
 
-                        # Team-colored shots and goals
+                        # Shot density contours (per team, below scatter).
+                        for team in ("Blue", "Orange"):
+                            t_all = filtered_shots[filtered_shots[SHOT_COL_TEAM] == team]
+                            if len(t_all) >= 3:
+                                fig.add_trace(go.Histogram2dContour(
+                                    x=t_all[SHOT_COL_X], y=t_all[SHOT_COL_Y],
+                                    colorscale=team_heatmap_colorscale(team),
+                                    ncontours=8,
+                                    contours=dict(coloring='fill', showlines=False),
+                                    showscale=False, hoverinfo='skip',
+                                ))
+
+                        # Team-colored shots and goals — dot size encodes xG.
                         for team, color in [(t, TEAM_COLORS[t]["primary"]) for t in ("Blue", "Orange")]:
                             t_shots = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Shot')]
                             t_goals = filtered_shots[(filtered_shots[SHOT_COL_TEAM] == team) & (filtered_shots[SHOT_COL_RESULT] == 'Goal')]
                             if not t_shots.empty:
-                                shot_speed = pd.to_numeric(t_shots.get('Speed', 0), errors='coerce').fillna(0)
+                                xg_vals = pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0).clip(lower=0)
+                                shot_sizes = (xg_vals * 22 + 6).clip(lower=5, upper=28).tolist()
                                 fig.add_trace(go.Scatter(
                                     x=t_shots[SHOT_COL_X], y=t_shots[SHOT_COL_Y], mode='markers',
-                                    marker=dict(size=10, color=color, opacity=0.5),
+                                    marker=dict(size=shot_sizes, color=color, opacity=0.78,
+                                                line=dict(width=1, color='rgba(255,255,255,0.25)')),
                                     name=f'{team} Shot',
                                     customdata=np.stack([
                                         t_shots[SHOT_COL_PLAYER],
                                         [team] * len(t_shots),
                                         pd.to_numeric(t_shots[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
                                         pd.to_numeric(t_shots.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
+                                        pd.to_numeric(t_shots.get(COL_XGOT, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xGOT')),
                                     ], axis=-1),
-                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
+                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>xG: %{customdata[3]}<br>xGOT: %{customdata[4]}<extra></extra>",
                                 ))
                             if not t_goals.empty:
-                                goal_speed = pd.to_numeric(t_goals.get('Speed', 0), errors='coerce').fillna(0)
+                                xg_goal_vals = pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0).clip(lower=0)
+                                goal_sizes = (xg_goal_vals * 20 + 13).clip(lower=11, upper=32).tolist()
                                 fig.add_trace(go.Scatter(
                                     x=t_goals[SHOT_COL_X], y=t_goals[SHOT_COL_Y], mode='markers',
-                                    marker=dict(size=15, color=color, line=dict(width=2, color='white'), symbol='circle'),
+                                    marker=dict(size=goal_sizes, color=color,
+                                                line=dict(width=2, color='white'), symbol='star'),
                                     name=f'{team} Goal',
                                     customdata=np.stack([
                                         t_goals[SHOT_COL_PLAYER],
                                         [team] * len(t_goals),
                                         pd.to_numeric(t_goals[SHOT_COL_FRAME], errors='coerce').fillna(0).map(lambda v: format_metric_value(v / float(REPLAY_FPS), 'Time')),
                                         pd.to_numeric(t_goals.get(COL_XG, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xG')),
+                                        pd.to_numeric(t_goals.get(COL_XGOT, 0), errors='coerce').fillna(0).map(lambda v: format_metric_value(v, 'xGOT')),
                                     ], axis=-1),
-                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>Metric: xG: %{customdata[3]}<extra></extra>",
+                                    hovertemplate="Player: %{customdata[0]}<br>Team: %{customdata[1]}<br>Time: %{customdata[2]}<br>xG: %{customdata[3]}<br>xGOT: %{customdata[4]}<extra></extra>",
                                 ))
                         big_chances = filtered_shots[filtered_shots['BigChance'] == True]
                         if not big_chances.empty:
-                            fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y], mode='markers',
-                                marker=dict(size=25, color='rgba(0,0,0,0)', line=dict(width=2, color='yellow')),
+                            # Glow ring behind big chance markers.
+                            fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y],
+                                mode='markers',
+                                marker=dict(size=38, color='rgba(255,204,0,0.14)', line=dict(width=0)),
+                                showlegend=False, hoverinfo='skip'))
+                            fig.add_trace(go.Scatter(x=big_chances[SHOT_COL_X], y=big_chances[SHOT_COL_Y],
+                                mode='markers',
+                                marker=dict(size=26, color='rgba(0,0,0,0)', line=dict(width=2, color='rgba(255,204,0,0.85)')),
                                 name='Big Chance', hoverinfo='skip'))
                         st.plotly_chart(fig, use_container_width=True)
 
@@ -3068,21 +3172,15 @@ if app_mode == "🔍 Single Match Analysis":
                 if 'pos_z' in p_frames.columns:
                     valid_pos = p_frames[p_frames['pos_z'] > 0].dropna(subset=['pos_x', 'pos_y'])
                     sampled = valid_pos.iloc[::3]
-                    sofascore_scale = [
-                        [0.0, 'rgba(0,0,0,0)'],
-                        [0.15, 'rgba(20,60,0,0.35)'],
-                        [0.3, 'rgba(60,100,0,0.5)'],
-                        [0.45, 'rgba(120,140,0,0.6)'],
-                        [0.6, 'rgba(180,180,0,0.65)'],
-                        [0.75, 'rgba(220,210,0,0.75)'],
-                        [0.9, 'rgba(255,240,50,0.85)'],
-                        [1.0, 'rgba(255,255,120,0.95)'],
-                    ]
+                    # Team-aware colorscale: blue/orange density tones.
+                    _player_team = "Blue"
+                    if not df.empty and target in df['Name'].values:
+                        _player_team = str(df[df['Name'] == target]['Team'].iloc[0])
                     fig = themed_figure()
                     fig.add_trace(go.Histogram2dContour(
                         x=sampled['pos_x'], y=sampled['pos_y'],
-                        colorscale=sofascore_scale,
-                        ncontours=20,
+                        colorscale=team_heatmap_colorscale(_player_team),
+                        ncontours=25,
                         contours=dict(coloring='fill', showlines=False),
                         showscale=False,
                         hoverinfo='skip',
@@ -3530,6 +3628,19 @@ if app_mode == "🔍 Single Match Analysis":
                 with c4:
                     trail_seconds = st.slider("Trail Duration (s)", 0.5, 3.0, 1.0, 0.5, key="trail_dur_3d")
 
+                # ── Camera preset selector ──
+                _CAMERA_PRESETS = {
+                    "Isometric": dict(eye=dict(x=1.5, y=-1.5, z=1.2),  center=dict(x=0, y=0, z=-0.1), up=dict(x=0, y=0, z=1)),
+                    "Cinematic": dict(eye=dict(x=0.6, y=-2.2, z=0.4),  center=dict(x=0, y=0, z=0.1),  up=dict(x=0, y=0, z=1)),
+                    "Top-Down":  dict(eye=dict(x=0,   y=0,    z=2.8),  center=dict(x=0, y=0, z=0),    up=dict(x=0, y=1, z=0)),
+                }
+                camera_preset = st.radio(
+                    "Camera angle", list(_CAMERA_PRESETS.keys()),
+                    horizontal=True, key="cam_preset_3d",
+                    help="Isometric: classic overview  |  Cinematic: low dramatic angle  |  Top-Down: bird's-eye"
+                )
+                _active_camera = _CAMERA_PRESETS[camera_preset]
+
                 # ── Smart stride: cap at ~300 rendered frames for usable performance ──
                 MAX_RENDERED_FRAMES = 300
                 frame_stride = max(1, window_frames // MAX_RENDERED_FRAMES)
@@ -3554,31 +3665,47 @@ if app_mode == "🔍 Single Match Analysis":
                     """Build exactly TRACES_PER_FRAME traces for one animation frame."""
                     traces = []
 
-                    # -- Ball marker --
+                    # -- Ball marker: size + ring width scale with height for aerial feel --
                     if len(ball_frames) > 0:
                         bi = min(np.searchsorted(ball_frames, frame_idx), len(ball_x) - 1)
                         bx, by, bz = float(ball_x[bi]), float(ball_y[bi]), float(ball_z[bi])
                     else:
                         bx, by, bz = 0.0, 0.0, 0.0
+                    _ball_size = 8 + int(bz > 300) + int(bz > 900)
+                    _ball_ring_w = 2 + int(bz > 300) + int(bz > 900)
                     traces.append(go.Scatter3d(
                         x=[bx], y=[by], z=[bz], mode='markers',
-                        marker=dict(size=8, color='white', symbol='circle', line=dict(width=2, color='gold')),
+                        marker=dict(size=_ball_size, color='white', symbol='circle',
+                                    line=dict(width=_ball_ring_w, color='gold')),
                         name='Ball', showlegend=False,
                         hovertemplate="Ball<br>x: %{x:.0f}<br>y: %{y:.0f}<br>z: %{z:.0f}<extra></extra>"))
 
-                    # -- Ball trail (always present; empty when toggled off) --
+                    # -- Ball trail: opacity fades from old → recent for motion-blur effect --
                     if show_ball_trail and len(ball_frames) > 0:
                         bi = min(np.searchsorted(ball_frames, frame_idx), len(ball_x) - 1)
                         ts = max(0, bi - trail_frame_count)
                         tx, ty, tz = ball_x[ts:bi+1], ball_y[ts:bi+1], ball_z[ts:bi+1]
                     else:
                         tx, ty, tz = [], [], []
+                    _n_trail = len(tx)
+                    if _n_trail > 1:
+                        _ball_trail_line = dict(
+                            color=np.linspace(0, 1, _n_trail).tolist(),
+                            colorscale=[[0, 'rgba(255,255,255,0.03)'], [1, 'rgba(255,255,255,0.60)']],
+                            width=3,
+                        )
+                    else:
+                        _ball_trail_line = dict(color='rgba(255,255,255,0.40)', width=3)
                     traces.append(go.Scatter3d(
                         x=tx, y=ty, z=tz, mode='lines',
-                        line=dict(color='rgba(255,255,255,0.5)', width=3),
+                        line=_ball_trail_line,
                         showlegend=False, hoverinfo='skip'))
 
                     # -- Players (marker + trail for each, always in same order) --
+                    _player_trail_scales = {
+                        "Blue":   [[0, 'rgba(0,100,220,0.03)'],   [1, 'rgba(60,160,255,0.60)']],
+                        "Orange": [[0, 'rgba(200,80,0,0.03)'],    [1, 'rgba(255,165,30,0.60)']],
+                    }
                     for pinfo in tac_players:
                         pi = min(np.searchsorted(pinfo['frames'], frame_idx), len(pinfo['x']) - 1)
                         px, py, pz = float(pinfo['x'][pi]), float(pinfo['y'][pi]), float(pinfo['z'][pi])
@@ -3586,16 +3713,28 @@ if app_mode == "🔍 Single Match Analysis":
                         bv = max(0, min(100, bv)) if not np.isnan(bv) else 0
                         tc = TEAM_COLORS[pinfo['team']]
 
+                        # Boost-based marker aura: ring color shifts white→gold→bright-gold.
+                        if bv >= 75:
+                            _ring_color = 'rgba(255,220,50,0.95)'
+                            _marker_size = 8
+                        elif bv >= 45:
+                            _ring_color = 'rgba(255,200,100,0.80)'
+                            _marker_size = 7
+                        else:
+                            _ring_color = 'rgba(255,255,255,0.90)'
+                            _marker_size = 6
+
                         traces.append(go.Scatter3d(
                             x=[px], y=[py], z=[pz], mode='markers+text',
-                            marker=dict(size=6, color=tc['solid'], symbol='diamond',
-                                       opacity=0.9, line=dict(width=2, color='white')),
+                            marker=dict(size=_marker_size, color=tc['solid'], symbol='diamond',
+                                       opacity=0.92, line=dict(width=2, color=_ring_color)),
                             text=[pinfo['name']], textposition='top center',
                             textfont=dict(color='white', size=9),
                             name=pinfo['name'], showlegend=False,
                             hovertemplate=f"<b>{pinfo['name']}</b><br>Boost: {int(bv)}<br>"
                                          f"x: %{{x:.0f}}<br>y: %{{y:.0f}}<br>z: %{{z:.0f}}<extra></extra>"))
 
+                        # Car trail with opacity fade (oldest→newest).
                         if show_car_trails:
                             ts_idx = max(0, pi - trail_frame_count)
                             ctx = pinfo['x'][ts_idx:pi+1]
@@ -3603,9 +3742,19 @@ if app_mode == "🔍 Single Match Analysis":
                             ctz = pinfo['z'][ts_idx:pi+1]
                         else:
                             ctx, cty, ctz = [], [], []
+                        _n_car = len(ctx)
+                        if _n_car > 1:
+                            _car_trail_line = dict(
+                                color=np.linspace(0, 1, _n_car).tolist(),
+                                colorscale=_player_trail_scales.get(pinfo['team'],
+                                    [[0, 'rgba(180,180,180,0.03)'], [1, 'rgba(180,180,180,0.60)']]),
+                                width=2,
+                            )
+                        else:
+                            _car_trail_line = dict(color=tc['trail'], width=2)
                         traces.append(go.Scatter3d(
                             x=ctx, y=cty, z=ctz, mode='lines',
-                            line=dict(color=tc['trail'], width=2),
+                            line=_car_trail_line,
                             showlegend=False, hoverinfo='skip'))
 
                     return traces
@@ -3638,9 +3787,7 @@ if app_mode == "🔍 Single Match Analysis":
                                   showbackground=False, showticklabels=False),
                         aspectmode='manual',
                         aspectratio=dict(x=1, y=1.3, z=0.5),
-                        camera=dict(eye=dict(x=1.5, y=-1.5, z=1.2),
-                                    center=dict(x=0, y=0, z=-0.1),
-                                    up=dict(x=0, y=0, z=1)),
+                        camera=_active_camera,
                         bgcolor='rgba(10,10,10,1)'
                     ),
                     updatemenus=[{
@@ -4334,11 +4481,43 @@ elif app_mode == "📈 Season Batch Processor":
 
             mode = st.toggle("Show radar chart", value=False, help="Default view is normalized grouped bars for readability.")
             if mode:
-                fig = themed_figure()
-                fig.add_trace(go.Scatterpolar(r=hero_norm.values, theta=categories, fill='toself', name=hero, line=dict(color='#007bff')))
+                _blue_color  = semantic_color("team", "blue")
+                _orange_color = semantic_color("team", "orange")
+                fig = themed_figure(tier="hero")
+                # Session average band (shaded baseline for comparison context).
+                _overall_norm = (all_avgs.mean() / cat_max * 100).fillna(0)
+                fig.add_trace(go.Scatterpolar(
+                    r=_overall_norm.values, theta=categories, fill='toself',
+                    fillcolor='rgba(148,163,184,0.10)', name='Session Avg',
+                    line=dict(color='rgba(148,163,184,0.45)', width=1, dash='dot'),
+                ))
+                fig.add_trace(go.Scatterpolar(
+                    r=hero_norm.values, theta=categories, fill='toself',
+                    fillcolor='rgba(59,130,246,0.14)', name=hero,
+                    line=dict(color=_blue_color, width=2),
+                ))
                 if teammate != "None":
-                    fig.add_trace(go.Scatterpolar(r=mate_norm.values, theta=categories, fill='toself', name=teammate, line=dict(color='#ff9900')))
-                fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=True, height=500)
+                    fig.add_trace(go.Scatterpolar(
+                        r=mate_norm.values, theta=categories, fill='toself',
+                        fillcolor='rgba(251,146,60,0.14)', name=teammate,
+                        line=dict(color=_orange_color, width=2),
+                    ))
+                fig.update_layout(
+                    polar=dict(
+                        radialaxis=dict(
+                            visible=True, range=[0, 100],
+                            tickfont=dict(size=9, color='rgba(148,163,184,0.7)'),
+                            gridcolor='rgba(255,255,255,0.10)',
+                            linecolor='rgba(255,255,255,0.10)',
+                        ),
+                        angularaxis=dict(
+                            gridcolor='rgba(255,255,255,0.10)',
+                            linecolor='rgba(255,255,255,0.10)',
+                        ),
+                        bgcolor='rgba(20,20,28,1)',
+                    ),
+                    showlegend=True, height=500,
+                )
                 st.plotly_chart(fig, use_container_width=True)
             else:
                 comp_long = compare_df.melt(id_vars='Metric', var_name='Player', value_name='Normalized Score')
