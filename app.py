@@ -41,13 +41,10 @@ from charts.factory import (
     session_composite_chart,
     spatial_outcome_scatter,
     value_timeline_chart,
-    action_type_value_decomposition_chart,
     arena_3d_shot_chart,
-    teammate_synergy_matrix,
     add_boost_pad_overlay,
     ball_carry_map,
     demo_map,
-    vaep_waterfall_chart,
     save_quality_scatter,
     boost_economy_timeline,
 )
@@ -214,6 +211,7 @@ def _build_coach_role_impact_chart(report_df: pd.DataFrame) -> go.Figure:
         .sort_values("TotalMissedSwing", ascending=False)
     )
     role_summary["RoleLabel"] = role_summary["Role"].map(lambda value: title_case_label(str(value)))
+    role_summary["TotalMissedSwing"] = role_summary["TotalMissedSwing"].round(3)
 
     fig = themed_px(
         px.bar,
@@ -260,6 +258,8 @@ def _build_coach_action_mix_chart(report_df: pd.DataFrame) -> go.Figure:
     action_summary["ActionLabel"] = action_summary["RecommendedAction"].map(
         lambda value: title_case_label(str(value).replace("_", " "))
     )
+    action_summary["WeightedSwing"] = action_summary["WeightedSwing"].round(3)
+    action_summary["AvgMissedSwing"] = action_summary["AvgMissedSwing"].round(3)
 
     fig = themed_px(
         px.bar,
@@ -4153,10 +4153,6 @@ if app_mode == "🔍 Single Match Analysis":
             # --- Action Value (VAEP) ---
             st.subheader("Action Value (VAEP)")
             if not vaep_summary.empty:
-                # Waterfall: cumulative contribution view (primary hero chart)
-                st.plotly_chart(vaep_waterfall_chart(vaep_summary), use_container_width=True)
-                st.caption("Each bar extends the running total by that player's net VAEP. The final bar shows team total.")
-
                 vc1, vc2 = st.columns(2)
                 with vc1:
                     fig_vaep_bar = themed_px(px.bar, vaep_summary.sort_values('Total_VAEP', ascending=False),
@@ -4167,18 +4163,6 @@ if app_mode == "🔍 Single Match Analysis":
                     st.caption("Total VAEP summarizes each player's net impact on scoring threat.")
                 with vc2:
                     st.plotly_chart(value_timeline_chart(vaep_df), use_container_width=True)
-
-                vd1, vd2 = st.columns(2)
-                with vd1:
-                    event_source = vaep_df.copy()
-                    event_source['EventType'] = event_source.get('EventType', 'touch')
-                    st.plotly_chart(action_type_value_decomposition_chart(event_source), use_container_width=True)
-                with vd2:
-                    synergy_input = vaep_df[['Player', 'VAEP']].copy() if not vaep_df.empty else pd.DataFrame(columns=['Player', 'VAEP'])
-                    if not synergy_input.empty:
-                        synergy_input['Player1'] = synergy_input['Player']
-                        synergy_input['Player2'] = synergy_input['Player']
-                    st.plotly_chart(teammate_synergy_matrix(synergy_input), use_container_width=True)
 
                 vaep_show_cols = ['Name', 'Team', 'Total_VAEP', 'Avg_VAEP', 'Positive_Actions', 'Negative_Actions']
                 vaep_ranked = stable_sort(vaep_summary[vaep_show_cols], by=['Total_VAEP', 'Name'], ascending=[False, True])
