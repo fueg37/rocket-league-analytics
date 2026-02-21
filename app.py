@@ -456,7 +456,120 @@ if os.path.exists(_pitch_path):
         PITCH_IMAGE_B64 = "data:image/png;base64," + base64.b64encode(_f.read()).decode()
 
 st.set_page_config(page_title="RL Analytics", layout="wide", page_icon="🚀")
-st.title("🚀 Rocket League Analytics")
+
+
+def inject_ios_shell_theme() -> None:
+    """Apply an iOS-inspired glassmorphism shell across the Streamlit surface."""
+    st.markdown(
+        """
+        <style>
+        .stApp {
+            background:
+                radial-gradient(1100px 420px at 8% -5%, rgba(59, 130, 246, 0.28), transparent 65%),
+                radial-gradient(900px 380px at 95% 0%, rgba(139, 92, 246, 0.24), transparent 65%),
+                linear-gradient(165deg, #0a1226 0%, #111c38 55%, #0e1a34 100%);
+            color: #f8fbff;
+        }
+        .main .block-container {
+            padding-top: 1.4rem;
+            padding-bottom: 1.4rem;
+            max-width: 96rem;
+        }
+        [data-testid="stSidebar"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.12), rgba(255,255,255,0.05));
+            border-right: 1px solid rgba(148, 163, 184, 0.22);
+            backdrop-filter: blur(16px);
+        }
+        [data-testid="stSidebar"] * {
+            color: #e6eefc;
+        }
+        .stTabs [data-baseweb="tab-list"] {
+            gap: 0.4rem;
+            background: rgba(16, 30, 58, 0.5);
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            border-radius: 999px;
+            padding: 0.24rem;
+            backdrop-filter: blur(12px);
+        }
+        .stTabs [data-baseweb="tab"] {
+            border-radius: 999px;
+            height: 2.3rem;
+            color: #cbd5e1;
+            font-weight: 600;
+            padding: 0 1rem;
+        }
+        .stTabs [aria-selected="true"] {
+            background: linear-gradient(180deg, rgba(77, 163, 255, 0.35), rgba(77, 163, 255, 0.15));
+            color: #f8fbff;
+        }
+        [data-testid="stMetric"] {
+            background: linear-gradient(180deg, rgba(255,255,255,0.13), rgba(255,255,255,0.06));
+            border: 1px solid rgba(148, 163, 184, 0.28);
+            border-radius: 18px;
+            padding: 0.8rem 1rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.16);
+        }
+        .stPlotlyChart, [data-testid="stDataFrame"], .stExpander {
+            background: rgba(9, 17, 34, 0.52);
+            border: 1px solid rgba(148, 163, 184, 0.2);
+            border-radius: 18px;
+            padding: 0.3rem;
+            backdrop-filter: blur(10px);
+        }
+        .stButton > button,
+        [data-testid="stDownloadButton"] button {
+            border-radius: 999px;
+            border: 1px solid rgba(125, 211, 252, 0.4);
+            background: linear-gradient(180deg, rgba(56, 189, 248, 0.28), rgba(56, 189, 248, 0.14));
+            color: #e0f2fe;
+            font-weight: 600;
+        }
+        .ios-hero {
+            border-radius: 24px;
+            border: 1px solid rgba(148, 163, 184, 0.25);
+            background: linear-gradient(130deg, rgba(255,255,255,0.13), rgba(255,255,255,0.05));
+            padding: 1rem 1.2rem;
+            margin-bottom: 0.9rem;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,0.2);
+        }
+        .ios-hero h1 { margin: 0; font-size: 1.9rem; line-height: 1.2; }
+        .ios-hero p { margin: 0.35rem 0 0.7rem 0; color: #d0ddf8; }
+        .ios-chip-row { display: flex; gap: 0.45rem; flex-wrap: wrap; }
+        .ios-chip {
+            border-radius: 999px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background: rgba(15, 23, 42, 0.5);
+            color: #e2e8f0;
+            font-size: 0.78rem;
+            padding: 0.28rem 0.65rem;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def render_ios_hero_banner() -> None:
+    """Top-level product framing for a premium, narrative-first experience."""
+    st.markdown(
+        """
+        <div class="ios-hero">
+          <h1>🚀 Elite Match Command Center</h1>
+          <p>Apple-grade visual clarity for replay intelligence: story first, deep analytics on demand.</p>
+          <div class="ios-chip-row">
+            <span class="ios-chip">Overview-first IA</span>
+            <span class="ios-chip">Narrative + action cards</span>
+            <span class="ios-chip">Glass KPI surfaces</span>
+            <span class="ios-chip">High-contrast pro charts</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+inject_ios_shell_theme()
+render_ios_hero_banner()
 
 # --- SESSION STATE INITIALIZATION ---
 if "match_store" not in st.session_state:
