@@ -1,6 +1,6 @@
 # Plan: Match Store & Unified Ingest
 
-Status: proposed · Owner: Fueg · Last updated: 2026-10-10
+Status: proposed · Owner: Fueg · Last updated: 2026-10-11
 
 ## Why
 
@@ -29,8 +29,8 @@ What this costs:
 
 ```
 Sources ─► Ingest ─► Pipeline ─► Store ─► Views
-upload      hash dedupe   one compute fn   SQLite index     Single match
-Demos dir   parse         (versioned)      + per-match      Season
+upload      hash dedupe   one compute fn   plain files:     Single match
+Demos dir   parse         (versioned)      manifest.json +  Season
 ballchasing                                parquet tables   (later: pages/)
 Stats API
 ```
@@ -42,76 +42,77 @@ Rules this design depends on:
 3. **Duplicates are rejected before parsing.** Files are identified by the SHA-256 of their bytes (instant). Matches are identified by replay ID (known after parsing). The same match arriving from two sources maps to one record.
 4. **Every record stores the `ANALYTICS_VERSION` that produced it.** If it differs from the current version, the record is stale and can be recomputed.
 5. **Views never call `calculate_*` functions.** They only read from the store. The one exception is frame-level views (see Phase 4).
+6. **No database; the folder layout is the store.** Every fact lives in exactly one file, and anything that looks like an index is computed from those files, never maintained alongside them. There's nothing to get out of sync, and you can inspect, back up or delete data with a file explorer.
 
 ## Storage layout
 
 ```
-data/                         # gitignored; path configurable in settings
-  store.sqlite                # index + ledger (small, transactional)
-  replays/<sha256>.replay     # raw files, content-addressed
-  matches/<match_id>/         # derived tables, one parquet file per table
-    players.parquet           # per-player summary (today's calculate_final_stats rows + Won/Overtime/Luck)
-    shots.parquet             # SHOT_EVENT_COLUMNS
-    saves.parquet             # CANONICAL_EVENT_COLUMNS
-    passes.parquet
-    kickoffs.parquet
-    aerials.parquet  recoveries.parquet  defense.parquet  xga.parquet
-    vaep.parquet  vaep_summary.parquet  value_reports.parquet
-    rotation_timeline.parquet  rotation_summary.parquet  double_commits.parquet
-    situational.parquet  momentum.parquet  win_prob.parquet  coach_report.parquet
-    wp_training.parquet       # rows from extract_win_prob_training_data
+data/                              # gitignored; path configurable in settings
+  replays/
+    <sha256>.replay                # raw file, named by content hash; its existence = "seen"
+    <sha256>.error.txt             # present only if parse/compute failed (traceback + source)
+  matches/
+    <match_id>/
+      manifest.json                # match metadata + players + version (see below)
+      players.parquet              # per-player summary (today's calculate_final_stats rows + Won/Overtime/Luck)
+      shots.parquet                # SHOT_EVENT_COLUMNS
+      saves.parquet                # CANONICAL_EVENT_COLUMNS
+      passes.parquet
+      kickoffs.parquet
+      aerials.parquet  recoveries.parquet  defense.parquet  xga.parquet
+      vaep.parquet  vaep_summary.parquet  value_reports.parquet
+      rotation_timeline.parquet  rotation_summary.parquet  double_commits.parquet
+      situational.parquet  momentum.parquet  win_prob.parquet  coach_report.parquet
+      wp_training.parquet          # rows from extract_win_prob_training_data
 ```
 
-Why both SQLite and parquet: SQLite (built into Python) handles the parts that need atomic updates: the list of files ingested, failures, and versions. Parquet files per match avoid schema migrations, because each match's tables have whatever columns the pipeline produced at that version. A season query is a concat over the selected matches. That's fast enough for hundreds to low thousands of matches; DuckDB can read the same files later if that changes.
+**State comes from the files themselves**, so there is no ledger to maintain:
 
-### SQLite schema
+| What's on disk for a replay hash | Meaning |
+|---|---|
+| `<sha256>.replay` + a manifest whose `sha256` matches | ingested OK |
+| `<sha256>.replay` + `<sha256>.error.txt` | failed (shown in the UI with the error; "Retry" deletes the `.txt`) |
+| `<sha256>.replay` alone | interrupted mid-ingest, so the next sync retries it automatically |
 
-```sql
-CREATE TABLE replay_files (          -- every file ever seen; the duplicate ledger
-  sha256       TEXT PRIMARY KEY,
-  match_id     TEXT,                 -- NULL until parsed successfully
-  source       TEXT NOT NULL,        -- 'upload' | 'demos_dir' | 'ballchasing' | 'legacy_csv'
-  source_ref   TEXT,                 -- original filename / path / ballchasing id
-  first_seen   TEXT NOT NULL,
-  status       TEXT NOT NULL,        -- 'ok' | 'parse_failed' | 'compute_failed'
-  error        TEXT
-);
+**Writes are atomic per match.** `write_match` writes everything into `matches/.tmp-<match_id>/` and then renames it into place (if a previous version exists, it's renamed aside first and deleted afterwards). A crash can never leave a half-written match visible to the views.
 
-CREATE TABLE matches (
-  match_id          TEXT PRIMARY KEY,
-  sha256            TEXT REFERENCES replay_files(sha256),  -- NULL for legacy CSV rows
-  played_at         TEXT,            -- ISO-8601; get_match_timestamp / extract_replay_date
-  playlist          TEXT,
-  blue_goals        INTEGER,
-  orange_goals      INTEGER,
-  overtime          INTEGER,
-  analytics_version TEXT,            -- NULL for legacy rows
-  computed_at       TEXT,
-  fidelity          TEXT NOT NULL    -- 'replay' | 'legacy_summary' | (later) 'stats_api'
-);
+**Parquet, not CSV,** because it keeps column types (bools, ints, NaN) across a save and reload, and each match's files carry whatever columns the pipeline produced at that version, so there are no schema migrations. A season query is a concat over the selected matches' files. That's fast enough for hundreds to low thousands of matches.
 
-CREATE TABLE match_players (         -- small join table so "matches with X" needs no parquet scan
-  match_id     TEXT REFERENCES matches(match_id),
-  player_key   TEXT,                 -- str(p.id.id), the platform ID; never the display name
-  display_name TEXT,
-  team         TEXT,                 -- 'Blue' | 'Orange'
-  is_bot       INTEGER,
-  PRIMARY KEY (match_id, player_key)
-);
+### `manifest.json`
+
+```json
+{
+  "match_id": "8F3A...",
+  "sha256": "c1d2...",                  // null for legacy CSV imports
+  "sources": [{"source": "demos_dir", "ref": "8F3A....replay", "seen_at": "2026-10-11T19:02:11"}],
+  "played_at": "2026-10-10T21:14:03",   // get_match_timestamp / extract_replay_date
+  "playlist": "Ranked Doubles",
+  "score": {"Blue": 3, "Orange": 2},
+  "overtime": false,
+  "fidelity": "replay",                 // 'replay' | 'legacy_summary' | (later) 'stats_api'
+  "analytics_version": "2026.10.1",     // null for legacy imports
+  "computed_at": "2026-10-11T19:02:15",
+  "players": [
+    {"key": "steam:7656119...", "name": "Fueg", "team": "Blue", "is_bot": false}
+  ],
+  "tables": ["players", "shots", "saves", "passes", "..."]
+}
 ```
+
+**The match index** (`list_matches()`) reads every `manifest.json` (tiny files; a few hundred take milliseconds) into one DataFrame. It's wrapped in `st.cache_data`, keyed on the `matches/` folder's modification time, so it only reloads after an ingest. Filters like "matches with my squad" or "stale versions" are pandas filters on that DataFrame.
 
 ## Module layout
 
 ```
 store/
   __init__.py
-  schema.py      # DDL, open_store(path), migrations (versioned via PRAGMA user_version)
-  writer.py      # write_match(record), mark_file(...)
-  reader.py      # list_matches(filters), load_match(match_id), load_table(name, match_ids)
+  layout.py      # path helpers: replay_path(sha), match_dir(id), error_path(sha)
+  writer.py      # save_replay(bytes) -> sha, write_match(record) (atomic), mark_failed(sha, err)
+  reader.py      # list_matches() -> DataFrame, load_match(id), load_table(name, match_ids)
 ingest/
   __init__.py
   sources.py     # ReplayCandidate + UploadSource, DemosFolderSource
-  run.py         # ingest(candidates, compute_fn, store) -> IngestReport
+  run.py         # ingest(candidates, compute_fn, data_dir) -> IngestReport
 analytics/
   version.py     # ANALYTICS_VERSION = "2026.10.1"
 settings.py      # loads settings.toml: data_dir, demos_dir, identity
@@ -128,13 +129,11 @@ class ReplayCandidate:
 
 @dataclass(frozen=True)
 class MatchRecord:
-    match_id: str
-    meta: dict             # columns of `matches`
-    players: list[dict]    # rows of `match_players`
+    manifest: dict                    # becomes manifest.json
     tables: dict[str, pd.DataFrame]   # name -> table, written as parquet
 ```
 
-`ingest.run.ingest()` does: read bytes → hash → skip if `replay_files` already has it → save the file to `replays/` → parse → `compute_fn(...) -> MatchRecord` → write it → record status. A failure in one file gets recorded in the ledger and never stops the rest of the batch. Calling ingest again on the same folder does nothing new.
+`ingest.run.ingest()` does: read bytes → hash → skip if `replays/<sha>.replay` exists and isn't in the "interrupted" state → save the file → parse → `compute_fn(...) -> MatchRecord` → `write_match` (or `mark_failed`). A failure in one file is recorded as its `.error.txt` and never stops the rest of the batch. If the parsed `match_id` already has a manifest from a different file (the same match from another source), the new source is appended to `sources` and nothing is recomputed. Calling ingest again on the same folder does nothing new.
 
 ## Identity & settings
 
@@ -162,20 +161,20 @@ Each phase can be merged on its own and leaves the app working.
 - [ ] Add `carball` (and its pinned dependencies) to `requirements.txt`. It's missing today.
 
 ### Phase 1: Store
-- [ ] `store/` package with schema, writer, reader; `pyarrow` added to requirements.
-- [ ] Tests: write/read round-trip; rewriting a match replaces it completely (no leftover tables); stale query by version.
+- [ ] `store/` package (layout, writer, reader); `pyarrow` added to requirements.
+- [ ] Tests: write/read round-trip; rewriting a match replaces it completely (no leftover tables); a simulated crash mid-write leaves no visible partial match; the stale filter on `list_matches()` works; an interrupted replay is picked up again.
 
 ### Phase 2: One pipeline, one ingest path
 - [ ] Extend `_compute_match_analytics` to return a `MatchRecord`. Move the batch-only work into it (`Won`, `Timestamp`, `MatchID` on player rows, win-prob training rows, kickoff `MatchID`) so nothing exists only in batch mode.
 - [ ] `ingest/run.py` takes `compute_fn` as a parameter. The pipeline still lives in `app.py` until the page split; passing it in avoids a circular import and keeps ingest testable with a fake.
 - [ ] Batch upload becomes `ingest([UploadSource(f) ...], compute_fn, store)`. **Delete the inline batch pipeline** (`app.py:4443-4520`).
 - [ ] Win-prob model training reads `wp_training` across the store instead of only the current batch.
-- [ ] Tests: ingesting the same file twice parses once; a broken file is recorded as `parse_failed` and the rest of the batch continues.
+- [ ] Tests: ingesting the same file twice parses once; a broken file gets a `.error.txt` and the rest of the batch continues; the same match from two sources produces one match with two `sources`.
 
 ### Phase 3: Season mode reads the store
-- [ ] Season dataframe = `load_table("players", match_ids)` joined with `matches` metadata. Remove the column-default backfill list.
-- [ ] Session detection uses `matches.played_at`. Remove the "every 5 matches" fallback and the bare `except:`. Matches without a date sort last and are labelled as such.
-- [ ] **Migration:** a one-time `migrate_legacy_csv()` imports `career_stats.csv` / `career_kickoffs.csv` as `fidelity='legacy_summary'` matches (no replay, no events, version NULL). Re-ingesting the real replay later replaces the legacy record with a full one because the `match_id` is the same. Views that need events quietly leave out legacy matches and show a count ("12 legacy matches have summary stats only").
+- [ ] Season dataframe = `load_table("players", match_ids)` joined with the `list_matches()` index. Remove the column-default backfill list.
+- [ ] Session detection uses the manifest's `played_at`. Remove the "every 5 matches" fallback and the bare `except:`. Matches without a date sort last and are labelled as such.
+- [ ] **Migration:** a one-time `migrate_legacy_csv()` imports `career_stats.csv` / `career_kickoffs.csv` as `fidelity='legacy_summary'` matches: a manifest plus `players.parquet` / `kickoffs.parquet`, with no replay, no events and a null version. Re-ingesting the real replay later replaces the legacy record with a full one because the `match_id` is the same. Views that need events quietly leave out legacy matches and show a count ("12 legacy matches have summary stats only").
 - [ ] Remove `load_data` / `save_data` / `DB_FILE` / `KICKOFF_DB_FILE`.
 
 ### Phase 4: Single-match mode reads the store
@@ -204,11 +203,12 @@ Each phase can be merged on its own and leaves the app working.
 |---|---|
 | carball can't parse post-anti-cheat replays | Phase 0 checks this first; the design isolates parsing |
 | Replay ID differs between `proto` and `manager` | Phase 0 checks this; if it differs, choose one and remap legacy rows during migration |
-| Parquet file count grows (~20 files per match) | Fine for thousands of matches; switch to one file per table partitioned by match if it becomes a problem |
+| Parquet file count grows (~20 files per match) | Fine for thousands of matches; if it ever isn't, add a rebuildable season cache (one parquet per table, regenerated from the per-match files). It's still a derived cache, never the source of truth |
+| Index scan slows as manifests grow | Cached until the next ingest; a few thousand small JSON files still load in well under a second |
 | Re-parsing for frame-level views is slow | Cached per session; only the views that need frames pay for it |
 
 ## Open questions
 
 1. Do you still have the original `.replay` files for the matches in `career_stats.csv`? If so, migration is just "ingest the folder" and legacy records are rare.
-2. Is adding `pyarrow` acceptable? (It's the only new required dependency.)
+2. Is adding `pyarrow` acceptable? It's the only new required dependency, and it's what lets pandas read and write parquet.
 3. Should bots be stored and filtered at view time (proposed), or dropped at ingest as batch mode does today?
