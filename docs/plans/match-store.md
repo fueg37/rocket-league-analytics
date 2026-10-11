@@ -209,7 +209,7 @@ Each phase can be merged on its own and leaves the app working.
 | Index scan slows as manifests grow | Cached until the next ingest; a few thousand small JSON files still load in well under a second |
 | Re-parsing for frame-level views is slow | Cached per session; only the views that need frames pay for it |
 
-## Open questions
+## Decisions
 
-1. Is adding `pyarrow` acceptable? It's the only new required dependency, and it's what lets pandas read and write parquet.
-2. Should bots be stored and filtered at view time (proposed), or dropped at ingest as batch mode does today?
+- **`pyarrow` is approved** as a new dependency.
+- **Bots (AI players) are always stored and filtered in the views.** Today, batch import drops them for good if the sidebar's "Hide Bots" box happened to be checked at import time (`app.py:4476`), so what gets saved depends on a UI setting. In the store, each player row keeps `IsBot` (from carball's `player.is_bot`), and "Hide Bots" becomes a view filter only.
