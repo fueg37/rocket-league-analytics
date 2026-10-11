@@ -212,4 +212,5 @@ Each phase can be merged on its own and leaves the app working.
 ## Decisions
 
 - **`pyarrow` is approved** as a new dependency.
+- **2v2 only.** `compute_fn` checks team size first; a non-2v2 replay gets a `.error.txt` reading `skipped: not 2v2 (3v3)` so it's visible in the UI and never retried.
 - **Bots (AI players) are always stored and filtered in the views.** Today, batch import drops them for good if the sidebar's "Hide Bots" box happened to be checked at import time (`app.py:4476`), so what gets saved depends on a UI setting. In the store, each player row keeps `IsBot` (from carball's `player.is_bot`), and "Hide Bots" becomes a view filter only.

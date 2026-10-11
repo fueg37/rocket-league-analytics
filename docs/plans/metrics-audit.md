@@ -7,11 +7,11 @@ This audit assumes none of the existing work is correct by default. Every number
 ## TL;DR
 
 1. **Several headline stats are wrong because of bugs, not modeling choices.** The app reads carball's hit flags under names that don't exist, so carball's physics-based shot, goal and save detection is never used. The goal width constant is twice the real value. Frame count divided by 30 is used as the game clock. Shots that miss the net are counted as saves.
-2. **Every "model" is hand-tuned, and none has ever been fitted to data.** That covers xG, xGOT, save difficulty, win probability, "VAEP" and the coach report. `fit_value_model()` exists and is never called. Until now there was no event store to fit against; the match-store plan creates one.
+2. **Every "model" is hand-tuned, with weights nobody has checked.** That covers xG, xGOT, save difficulty, win probability, "VAEP" and the coach report. `fit_value_model()` exists and is never called. With about 20 replays (roughly 100 goals) there isn't enough data to *fit* replacements either, so the rebuild uses physics instead of curve fitting.
 3. **A few features compute impressive-looking output from inputs that can't support it.** The counterfactual coach report and Partnership Intelligence are the main ones. They should be deleted, not tuned.
 4. **carball already computes a lot of good stats that the app ignores** (boost economy, positioning tendencies, possession time, ball carries, demos), while the app reimplements weaker versions of some of them.
 
-The fix is not 25 separate patches. Most of the analytics should be rebuilt around **one fitted model of "how likely is a goal soon, for each team, from this exact moment"**, and most metrics then follow from it (see *The rebuild*).
+The fix is not 25 separate patches. Most of the analytics should be rebuilt around **one physical question: "who can reach the ball first, and where is it going?"** That needs no training data, and most metrics follow from it (see *The rebuild*).
 
 ---
 
@@ -49,7 +49,6 @@ A touch only counts as the goal-scoring hit if it's within 10 frames of the goal
 ### B7. Rotation stats break in 2v2
 - **Rotation breaks need 3 players.** `RotationBreaks` requires at least 3 players (`app.py:2147`), so it's **always 0 in doubles**. Your default focus pair suggests that's most of your games.
 - **Double commits only count in the attacking half** (`app.py:2136`), which skips the defensive double commits that actually concede goals.
-- **3v3 roles are wrong.** Roles are only `1st`/`2nd`, so a third man gets folded into "2nd".
 
 ### B8. Smaller definition errors
 | Stat | Problem |
@@ -57,7 +56,7 @@ A touch only counts as the goal-scoring hit if it's within 10 frames of the goal
 | `Time Airborne (s)` (`app.py:1802`) | Car z > 300 counts **wall driving** as airborne |
 | `Avg Recovery (s)` (`app.py:1828`) | "Time from **any** touch until supersonic", capped at 5 s. Dribbles, flicks and passes all score 5 s. Not a recovery measure |
 | `Possession` (`app.py:2329`) | Share of the match's touches, not possession. carball computes real possession time |
-| `Goals Prevented` (`app.py:2433`) | On-target shots faced minus goals conceded, i.e. roughly saves, under a misleading name. "Prevented" should mean xGOT faced minus goals conceded |
+| `Goals Prevented` (`app.py:2433`) | On-target shots faced minus goals conceded, i.e. roughly saves, under a misleading name. "Prevented" should mean xG faced minus goals conceded (R3) |
 | `xGA` (`app.py:1954`) | Credits each shot's xG to whoever is nearest **the ball** when the shot happens. That's usually the player challenging the shooter, not the one responsible |
 | `Pressure Time (s)` | Actually shadow-defense time; nothing measures pressure |
 | `Saves_Last_Min` (`app.py:2251-2264`) | **Made up**: total saves × the share of the opponent's saved shots that came late. No real per-save timing |
@@ -104,45 +103,46 @@ The store makes renames free, because there's no old CSV schema to stay compatib
 
 ---
 
-## Part 3: The rebuild, one fitted model at the center
+## Part 3: The rebuild, physics first
 
-### Why now
-Every model in the app is a hand-weighted formula because there was never a data set to fit against. The match store (with every replay re-ingested) creates exactly that: **every touch and every state of every match you've played, with what happened next.** Even 300 matches gives:
-- about 3,000+ shots
-- about 100,000+ touches
-- millions of game states
+### Constraints that shape it
+- **About 20 replays, all 2v2, growing slowly** (manual saves). That's roughly 200 shots and 100 goals, and maybe a few hundred more matches a year.
+- **That's too little to fit statistical models.** A fitted xG model needs thousands of shots, and a fitted "chance of scoring in the next 10 s" model needs thousands of goals. Fitting on 100 goals would produce numbers that look precise and mean nothing. That rules out training a model on your own games for now.
+- **But Rocket League is deterministic physics, and the replay records every car and the ball 30 times a second.** Football analytics needs data because it can't simulate players; we mostly can.
 
-That's plenty for small, well-regularized models such as logistic regression or gradient-boosted trees with few features. Small, interpretable models are the right choice here; big black boxes are not.
+### The core: reachability
+For any moment in a match:
 
-### The core: a state-value model
-For any moment in a match, estimate
+1. **Where is the ball going?** Project its flight with gravity and bounces. carball already ships a `BallSimulator` (it's what its shot detection uses), or we write a small one.
+2. **How fast can each car get to a point on that path?** A simple kinematic estimate from each car's position, velocity, facing and boost: accelerate toward the point (faster with boost), up to max speed.
+3. **The margin:** each team's earliest arrival time minus the ball's arrival time, both for the ball's path and for the goal line.
 
-> **P(Blue scores in the next 10 s)** and **P(Orange scores in the next 10 s)**
+That single computation (call it `reach(state)`) answers most of the questions the app asks, with no training data and a handful of physically meaningful constants: car acceleration, boost acceleration, max speed, and one "reaction slack" value for human imperfection. Every one of those constants is either a known game value or tunable by watching a few clips.
 
-from the ball's position and velocity, every car's position, velocity and boost, who touched last, and the real clock. Train it on your own matches (label = whether a goal actually happened within 10 s), and check it on held-out matches with a calibration plot. This is the standard approach in football analytics (VAEP / possession value). Rocket League is well suited to it because the replay contains the full physical state, not just events.
-
-### What follows from that one model
+### What follows from it
 
 | Metric | New definition | Replaces |
 |---|---|---|
-| **R1. xG** | A shot-specific model fitted on your shots (label: goal). Features: ball position, velocity, the real goal geometry, defender positions and distance to the goal line, plus whether the ball is reachable before the line. A "shot" is carball's physics-based shot flag (B1) | Hand-weighted angle × distance formula |
-| **R2. xGOT** | Fitted on on-target shots only, using where the ball crosses the goal line (carball's ball simulation accounts for gravity; the current straight-line projection doesn't), its speed, and defender positions at the moment of crossing | Placement heuristic with a 0.20 baseline |
-| **R3. Saves & save value** | Saves come from carball's `save` flag (a defending touch on a real shot). Save value = the xGOT of the saved shot. Goals conceded above expected = goals conceded − xGOT faced. All three names collapse into one honest number | SDI / ExpectedSaveProb / SaveImpact |
-| **R4. Player value (actual VAEP)** | Each touch's value = Δ P(your team scores soon) − Δ P(you concede soon), measured before and after the touch. Separated into attacking and defensive value. Also includes value lost by *not* acting, e.g. when the chance of conceding rises while you're the closest defender | The unfitted linear "VAEP" |
-| **R5. Rating** | Value added per minute (R4), shown with its bootstrap interval | Arbitrary weighted sum |
-| **R6. xWin (replaces Luck)** | Simulate the match 10,000 times from both teams' shot xGs. P(win) given the chances each team created. "You won a match you'd win 22% of the time" is easier to read and correct in both directions | One-sided Luck % |
-| **R7. Win probability** | A **clock model** plus the in-game state. Goals arrive at roughly constant rates, so from score difference *d* and real time remaining *t*, P(win) comes from the Skellam distribution (difference of two Poisson counts) with a goal rate fitted to your games. Ties at 0:00 go to a 50/50-ish OT (also fitted). The short-term state model (R1–R4) adjusts it ("the ball is about to go in"). It handles the lead × time interaction correctly; the current linear logistic regression **can't**, because a one-goal lead matters far more with 10 s left than with 4 minutes, and a model with separate `score_diff` and `time_remaining` terms can't express that | Hand-tuned sigmoid + linear logistic regression |
-| **R8. Momentum** | A rolling team scoring threat from the state model: P(Blue scores soon) − P(Orange scores soon), smoothed | The squared ball-Y heuristic |
-| **R9. Leverage / clutch** | Weight R4 by how much each moment could swing win probability (R7). "Clutch" becomes value added in high-leverage moments, instead of counting goals scored in the last frame-based minute | `Goals_Last_Min`, `Saves_Last_Min` |
+| **R1. xG (one shot-quality number)** | For each shot (carball's physics-based shot flag, B1): P(the ball crosses the goal line before any defender can reach its path), turned into a probability by a soft margin (logistic on "defender arrival − ball arrival"). A clear shot with nobody able to reach it ≈ 0.95; a shot the keeper can meet with half a second to spare ≈ 0.05. | Hand-weighted angle × distance formula **and** the separate xGOT |
+| **R2. Merge xGOT into xG** | In Rocket League the touch *is* the shot. After contact, the trajectory and the defenders' positions determine the outcome, which is exactly what R1 measures. A separate "pre-shot" xG would need a model of where a player *could* have hit the ball, and 20 replays can't support that. One honest number is better than two dubious ones | xGOT |
+| **R3. Saves & save value** | Saves come from carball's `save` flag (a defending touch on a real shot). Save value = the xG of the shot saved. Goals conceded above expected = goals conceded − xG faced. All the save metrics collapse into these | SDI / ExpectedSaveProb / SaveImpact |
+| **R4. Control** | At every moment, which team gets to the ball first: Blue control / Orange control / **contested** (arrival times within ~0.3 s) | The sigmoid "possession belief" in `possession_value.py`, and touch-share `Possession` |
+| **R5. Threat** | For the team in control: how dangerous the moment is if they shoot now, i.e. R1 evaluated at the ball's current position against the defenders' reach to the goal. Not a fitted probability, so it's labeled a **threat index**, not a percentage | The unfitted linear "VAEP" state value |
+| **R6. Touch value** | Each touch's change in threat for your team minus change in threat for the opponent (R5, before vs. ~0.5 s after). Shown as attacking and defensive totals and per-touch averages. **No composite "Rating"**: with 20 matches a single number would mostly be noise | "VAEP", `Rating` |
+| **R7. xWin (replaces Luck)** | Simulate the match 10,000 times from both teams' shot xGs (R1). "You won a match you'd win 22% of the time from the chances created." Correct in both directions | One-sided Luck % |
+| **R8. Win probability** | A clock model. Goals arrive at a roughly constant rate, so from score difference *d* and **real** time remaining *t*, P(win) comes from the Skellam distribution (difference of two Poisson counts), and ties at 0:00 go to OT at 50/50. It needs **one** parameter, the goal rate, which 20 matches (~100 goals) already estimates to within about ±10%. Optionally nudged by R5 threat in the moment. Handles the lead × time interaction that the current linear model can't | Hand-tuned sigmoid + linear logistic regression |
+| **R9. Momentum** | Rolling difference of team threat (R5), smoothed | The squared ball-Y heuristic |
 
-Because R1–R9 share one model, they agree with each other: momentum, win probability and player value can't tell contradictory stories about the same match.
+**Calibrating later:**
+- **What to tune:** only the few scalars (the margin softness in R1, the reaction slack, the goal rate in R8). Never a big model.
+- **When:** once you have ~150+ matches, tune them so that total xG across your matches matches total goals, and so that a calibration plot (predicted xG vs. actual scoring rate, binned) roughly lines up.
+- **Faster option:** pull public 2v2 replays from ballchasing at your rank and calibrate on those. This is optional.
+- **Versioning:** each tuning is an `ANALYTICS_VERSION` bump, and the store's recompute updates every match.
 
-**How to build it safely:**
-- **Start with today's heuristics as the baseline**, and keep them around only as the comparison for calibration plots.
-- **Ship each fitted model only when it calibrates better** on held-out matches.
-- **Version models with `ANALYTICS_VERSION`.** Refitting is a version bump, and the store's recompute handles the rest.
-
----
+**Small samples, shown honestly:**
+- **Show sample sizes and intervals everywhere.** Every season aggregate shows *n* and a bootstrap interval.
+- **Smooth trend lines** (e.g. rolling 5 matches with a band) instead of plotting game-to-game noise.
+- **Gate rate stats on volume.** Any rate stat with fewer than ~10 underlying events (e.g. "50/50 win %" from 6 challenges) is greyed out with "not enough data yet".
 
 ## Part 4: New stats worth adding
 
@@ -158,27 +158,20 @@ Because R1–R9 share one model, they agree with each other: momentum, win proba
   - each defender's boost
   - whether a double commit happened
   - whether both teammates were ahead of the ball
-  - the touch with the most negative value (R4) in the lead-up
+  - the touch with the most negative value (R6) in the lead-up
 
   Then aggregate over the season: "38% of goals conceded came after both of you were in front of the ball; 21% after you had under 20 boost when last back." This is concrete coaching from real data.
 - **N2. Possession chains:** sequences of same-team touches until the other team touches. Chain outcomes (shot, goal, turnover), turnovers by field zone, chain length, and the time from winning the ball to a shot.
-- **N3. 50/50s / challenges:** both teams touching within about 0.3 s. Who wins them (which way the ball goes, who gets the next possession), split by first-man role and by boost level.
+- **N3. 50/50s / challenges:** contested moments (R4) that end in a touch from each side. Who wins them (which team controls the ball afterwards), split by first-man role and by boost level.
 - **N4. Proper xA (expected assists):** the xG of the *resulting* shot credited to the passer. Today's xA is the xG at the receiver's touch.
-- **N5. Kickoffs, rebuilt:** both kickers (B6), spawn, first-touch timing difference, and outcome defined by **the next possession and value after 3 s** (R4) rather than "ball Y > 1000 after 3 s". Also goals within 10 s of kickoff, for and against.
-- **N6. Honest pair stats** (replaces D2). For each teammate pairing:
-  - matches played together
-  - win rate with a Wilson interval
-  - xG for/against per match
-  - xWin (R6)
-  - total and per-player value (R4)
-  - passing links between the two
-
-  Shrink toward your overall average when the sample is small. Small numbers, shown honestly.
-- **N7. Rotation for 2v2 and 3v3:**
-  - roles by distance to the ball *and* goal-side position, sized to team size
-  - double commits anywhere on the field, credited by outcome
-  - **"both in front of the ball" time** (the classic 2s mistake)
-  - spacing (average distance between teammates)
+- **N5. Kickoffs, rebuilt:** both kickers (B6), spawn, first-touch timing difference, and outcome defined by **which team has control (R4) and threat (R5) 3 s after the first touch** rather than "ball Y > 1000 after 3 s". Also goals within 10 s of kickoff, for and against.
+- **N6. Duo report** (replaces D2). You almost always play 2s with the same teammate, so pairing tables would mostly show one pair with tiny samples. A side-by-side of **you vs. your teammate in the same matches** is more useful: first-man share, touch value (R6), challenges won, boost starved time, who was last back on goals conceded (N1), and who double committed. Same matches, same opponents, so the comparison is fair.
+- **N7. 2v2 rotation:**
+  - first/second man at every moment (closer to the ball, goal-side considered)
+  - double commits anywhere on the field (both committing to the same ball), with what happened next
+  - **"both in front of the ball" time**, the classic 2s mistake, and how often it led to a shot against
+  - last-back distance from your own net when the opponent gets control
+  - spacing (distance between you and your teammate)
 - **N8. Recovery, redefined:** after a touch made in the air or on a wall, the time until the car is back on its wheels and driving toward a useful position. If carball's data can't measure this reliably, drop it rather than ship a wrong number.
 
 ---
@@ -200,10 +193,11 @@ Because R1–R9 share one model, they agree with each other: momentum, win proba
 2. **Bug-fix release** (`ANALYTICS_VERSION` bump): B1 (flag names), B2 (goal width, single xG implementation), B3 (real clock), B4/B5 (saves and goals from carball flags), B6 (both kickers). Recompute everything. Expect shot counts to drop, saves to drop sharply, some shots to become goals, and the win-prob curve to stop jumping to certainty early.
 3. **Deletions:** D1–D5. Removes about 1,000 lines plus the two misleading tabs.
 4. **carball stats** (Part 4, first list). Cheap and immediately useful.
-5. **State-value model + R1–R9**, each shipped behind a calibration check.
-6. **N1–N8**, starting with goal autopsies (N1) and 2v2 rotation (N7), which give the most coaching value for doubles.
+5. **Reachability core + R1–R9.** No data requirement; tune the few constants later as replays accumulate.
+6. **N1–N8**, starting with goal autopsies (N1), 2v2 rotation (N7) and the duo report (N6), which give the most coaching value for doubles.
 
-## Open questions
+## Decisions
 
-1. What's the rough mix of 1s / 2s / 3s in your replays? It decides how much 3v3-specific rotation work (N7) is worth.
-2. Roughly how many replays do you have? It decides whether the fitted models (Part 3) can start right away or need the heuristic baselines for a while.
+- **2v2 only.** Every analysis assumes two players per team; the 1s/3s code paths and generality get removed rather than maintained. Non-2v2 replays are skipped at import (see `match-store.md`).
+- **Physics first, fit later.** About 20 replays can't support fitted models. The rebuild uses reachability physics with a few named constants, tuned only once there are enough matches.
+- **xGOT is merged into xG** (R2), and there's **no composite Rating** (R6).
