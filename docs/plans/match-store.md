@@ -83,14 +83,14 @@ data/                              # gitignored; path configurable in settings
 ```json
 {
   "match_id": "8F3A...",
-  "sha256": "c1d2...",                  // null for legacy CSV imports
+  "sha256": "c1d2...",
   "sources": [{"source": "demos_dir", "ref": "8F3A....replay", "seen_at": "2026-10-11T19:02:11"}],
   "played_at": "2026-10-10T21:14:03",   // get_match_timestamp / extract_replay_date
   "playlist": "Ranked Doubles",
   "score": {"Blue": 3, "Orange": 2},
   "overtime": false,
-  "fidelity": "replay",                 // 'replay' | 'legacy_summary' | (later) 'stats_api'
-  "analytics_version": "2026.10.1",     // null for legacy imports
+  "fidelity": "replay",                 // 'replay' | (later) 'stats_api'
+  "analytics_version": "2026.10.1",
   "computed_at": "2026-10-11T19:02:15",
   "players": [
     {"key": "steam:7656119...", "name": "Fueg", "team": "Blue", "is_bot": false}
@@ -174,7 +174,9 @@ Each phase can be merged on its own and leaves the app working.
 ### Phase 3: Season mode reads the store
 - [ ] Season dataframe = `load_table("players", match_ids)` joined with the `list_matches()` index. Remove the column-default backfill list.
 - [ ] Session detection uses the manifest's `played_at`. Remove the "every 5 matches" fallback and the bare `except:`. Matches without a date sort last and are labelled as such.
-- [ ] **Migration:** a one-time `migrate_legacy_csv()` imports `career_stats.csv` / `career_kickoffs.csv` as `fidelity='legacy_summary'` matches: a manifest plus `players.parquet` / `kickoffs.parquet`, with no replay, no events and a null version. Re-ingesting the real replay later replaces the legacy record with a full one because the `match_id` is the same. Views that need events quietly leave out legacy matches and show a count ("12 legacy matches have summary stats only").
+- [ ] **Migration = ingest your replay folder.** All the original replays still exist, so no CSV import code or summary-only legacy record type is needed. Every match is recomputed fresh by the current pipeline.
+- [ ] **One-time parity check** (a script, not app code): for each `MatchID` in the old `career_stats.csv`, compare its per-player rows with the new `players.parquet`, and report matches missing from the store plus columns that differ beyond float tolerance. Differences should only come from the known batch/single drift listed under *Why*; anything else is a bug to fix before the CSVs are deleted.
+- [ ] Once the parity check is clean, delete `career_stats.csv` / `career_kickoffs.csv`.
 - [ ] Remove `load_data` / `save_data` / `DB_FILE` / `KICKOFF_DB_FILE`.
 
 ### Phase 4: Single-match mode reads the store
@@ -202,13 +204,12 @@ Each phase can be merged on its own and leaves the app working.
 | Risk | Mitigation |
 |---|---|
 | carball can't parse post-anti-cheat replays | Phase 0 checks this first; the design isolates parsing |
-| Replay ID differs between `proto` and `manager` | Phase 0 checks this; if it differs, choose one and remap legacy rows during migration |
+| Replay ID differs between `proto` and `manager` | Phase 0 checks this; if it differs, the parity check joins on the old ID through a one-off mapping |
 | Parquet file count grows (~20 files per match) | Fine for thousands of matches; if it ever isn't, add a rebuildable season cache (one parquet per table, regenerated from the per-match files). It's still a derived cache, never the source of truth |
 | Index scan slows as manifests grow | Cached until the next ingest; a few thousand small JSON files still load in well under a second |
 | Re-parsing for frame-level views is slow | Cached per session; only the views that need frames pay for it |
 
 ## Open questions
 
-1. Do you still have the original `.replay` files for the matches in `career_stats.csv`? If so, migration is just "ingest the folder" and legacy records are rare.
-2. Is adding `pyarrow` acceptable? It's the only new required dependency, and it's what lets pandas read and write parquet.
-3. Should bots be stored and filtered at view time (proposed), or dropped at ingest as batch mode does today?
+1. Is adding `pyarrow` acceptable? It's the only new required dependency, and it's what lets pandas read and write parquet.
+2. Should bots be stored and filtered at view time (proposed), or dropped at ingest as batch mode does today?
